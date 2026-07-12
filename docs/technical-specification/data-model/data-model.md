@@ -1,0 +1,624 @@
+# Hive Chameleon — Data Model and ERD Design
+
+**Deliverable:** Design the data model / ER diagram (core entities and relationships)
+
+**Database:** PostgreSQL
+
+## 1. Purpose
+
+This document defines the durable application data model for Hive Chameleon. It explains the ownership boundaries, assumptions, entity responsibilities, key relationships, integrity rules, indexing strategy, and PostgreSQL decisions represented by the accompanying DBML source.
+
+The model covers the approved product surface without treating PostgreSQL as the real-time simulation database. It supports:
+
+- direct-Hive authentication, Google OIDC identity mapping, idempotent real-account provisioning, and one-device sessions;
+- custodial key-reference lifecycles, explicit player signing intents, optional self-custody claim, and delayed recovery-account transfer;
+- versioned acknowledgment of the permanent public match-summary disclosure;
+- friends, blocks, lobby invitations, and notifications without chat or direct messages;
+- persistent lobby history and host migration;
+- completed Casual and Infection round history, scores, discoveries, disguise likes, immutable result revisions, and achievements;
+- a durable exact-payload match-publication outbox and normalized fork-aware Hive match-event projection;
+- official and community maps, immutable versions, review, distribution, and showcase posts;
+- on-chain collectible ownership projected into the application;
+- cosmetic offers, payments, purchases, and loadouts;
+- tournament registration, matches, scoring, entry payments, and payouts; and
+- fork-aware projections of the limited Hive data used by the product.
+
+The DBML is the source ERD and a migration input, not the final production migration set. PostgreSQL features that DBML cannot represent are specified in Section 10.
+
+## 2. Data ownership and system boundaries
+
+Hive Chameleon deliberately separates durable domain data, real-time match state, blockchain truth, and binary assets.
+
+| Boundary | Authoritative owner | Included here | Examples |
+| --- | --- | --- | --- |
+| Durable game and community data | Hive Chameleon PostgreSQL | Yes | Profiles, friends, lobbies, completed rounds, maps, achievements, tournaments |
+| Real-time simulation | Authoritative Nakama match runtime | No | Movement, paint strokes, shots, collision, timers, live roles, spectator camera |
+| Short-lived coordination | Redis/Nakama presence | No | Online presence, reconnect reservation, active socket, countdown, AFK heartbeat |
+| Hive account identity | Standard Hive account and its authorities | Normalized mapping, provisioning/claim state, public keys, opaque custody references, and sessions | Direct signed proof, Google-provisioned account, authority/recovery lifecycle |
+| Google game authentication | Verified Google OIDC issuer and subject | Deterministic protected identity lookup and lifecycle only | Game session authentication; never a Hive signature or email-based ownership link |
+| Collectible ownership | Accepted Hive event history from the official issuer | Yes, as a validated projection/cache | Issuance, revocation, finalized owner |
+| Tournament money movement | Hive/Hive-Engine transactions | Yes, as payment projections | Entry transfer, payout transfer, finality |
+| Map showcase publication | Hive posts and votes | Yes, as a cached projection | Author/permlink, current vote, publication state |
+| Live and complete gameplay result | Authoritative game service/PostgreSQL | Yes | Matchmaking, reconnect, simulation outcome, complete detailed round result, revisions |
+| Published match summary | Irreversible Hive history | Yes, as an outbox plus HAF-derived projection | Batched server-attested normal/tournament round summaries, corrections, invalidations |
+| Map files and media | Object storage | Metadata and hashes only | Map package, screenshots, thumbnails, cosmetic assets, disguise snapshots |
+| HAF internal tables | HAF deployment | No | Raw chain ingestion and fork processing internals |
+
+### 2.1 Hive boundary
+
+The model follows the current Hive-layer decisions:
+
+- Direct-Hive authentication uses a posting-authority challenge signed by an external Hive provider. Google OIDC instead establishes the game session and maps the verified issuer/subject to a newly provisioned real Hive account; Google authentication is not a Hive signature.
+- A Google-provisioned account begins under platform custody. PostgreSQL stores four public keys, opaque custody-provider references, and non-secret lifecycle evidence, never private material. Supported posting and active operations still require an explicit authenticated, allow-listed player intent.
+- PostgreSQL is authoritative for live play and the complete detailed result. The official match publisher periodically publishes bounded `match_results_batch` summaries; Hive becomes the canonical immutable public ledger for an accepted summary only after irreversibility.
+- Match summaries are server-attested, not trustless re-simulation. Players do not sign them, and the game server remains the result oracle. Corrections and invalidations are later append-only events.
+- Completed normal and tournament rounds may use the same summary protocol. Tournament eligibility, brackets, winner calculation, and aggregate state remain in PostgreSQL; entry and payout value movement uses native HIVE/HBD or Hive-Engine operations.
+- Collectibles use official issuance/revocation events, while map showcases use native Hive posts and votes. PostgreSQL projections do not replace Hive as the source of truth for those accepted public events.
+- Provisioning, match publishing, collectible issuance, treasury payments, and later general RC support are separate official service-account roles. They never reuse player custody keys or each other's signing credentials.
+- During a Hive outage, active matches and other non-Hive gameplay continue. New Hive authentication/provisioning and Hive-dependent player actions pause; completed match summaries remain durable in the publication outbox for server-owned retry. No active match is aborted solely because Hive is unavailable.
+
+## 3. Modeling principles
+
+1. **Relational core first.** Stable domain concepts use normalized tables, foreign keys, uniqueness constraints, and explicit lifecycle enums.
+2. **JSONB only for versioned or extensible data.** Examples are control mappings, score breakdowns, map manifests, technical validation reports, tournament rules, and raw Hive payloads. IDs, ownership, money, states, and timestamps remain typed columns.
+3. **Immutable facts over rewritten history.** Completed round results, result revisions, publication payloads, submitted map content and assets, reviews, indexed Hive operations, and payment evidence are append-only or tightly protected. Corrections, invalidations, revocations, and fork state use later records or explicit lifecycle transitions.
+4. **Derived data is rebuildable.** Player statistics, tournament aggregate scores, map play counts, and Hive display totals are caches backed by durable facts.
+5. **No secrets in domain records.** Passwords and invitation tokens are hashed. Game refresh tokens are stored only as hashes. Hive private keys, master passwords, seed phrases, recovery material, custodial-key plaintext, service signing keys, raw Google access/refresh/ID tokens, lobby passwords, and invitation codes are never stored.
+6. **Server authority is explicit.** Clients request actions but cannot declare discoveries, results, ownership, approvals, or payment completion.
+7. **Future phases do not weaken current rules.** Creator and tournament structures can expand, but collectible transfer/resale is intentionally absent because approved collectibles are non-transferable.
+
+## 4. Schema organization
+
+The ERD contains 70 application tables grouped into the existing seven PostgreSQL schemas.
+
+| Schema | Tables | Responsibility | Primary roots |
+| --- | ---: | --- | --- |
+| `identity` | 12 | Direct/Google identity, account provisioning, custody/claim state, disclosure, profiles, sessions, settings | `external_identity`, `hive_account_provisioning`, `player` |
+| `social` | 5 | Friend requests, friendships, blocks, invitations, notifications | `friend_request`, `friendship` |
+| `game` | 17 | Lobby lifecycle, completed results/revisions, match-publication outbox, statistics, achievements | `lobby`, `game_round`, `match_publication_outbox` |
+| `content` | 9 | Maps, versions, assets, review, distribution, showcase workflow | `map`, `map_version` |
+| `commerce` | 8 | Collectible catalog and instances, loadout, offers, purchases, payments | `collectible_definition`, `payment_transaction` |
+| `tournament` | 8 | Tournament rules, entries, matches, aggregate scores, payouts | `tournament` |
+| `hive_projection` | 11 | Validated, fork-aware application projections of required Hive operations and public match events | `operation`, `match_event` |
+
+`hive_projection` is a logical security and ownership boundary. HAF should run in its own managed database or equivalent isolated schema/role boundary. A dedicated indexer reads from HAF or a public HAF/HAfAH service and writes only the application projections defined here.
+
+## 5. Entity catalog and relationships
+
+### 5.1 Identity
+
+| Entity | Responsibility | Important relationships and rules |
+| --- | --- | --- |
+| `identity.external_identity` | Stable verified Google OIDC identity before and after provisioning | Unique provider/issuer/keyed-subject hash; optional player link; stores neither email nor raw subject/tokens |
+| `identity.hive_account_provisioning` | One durable, idempotent real-Hive-account creation job | Unique external identity and idempotency key; requested permanent username, lifecycle, creation/RC operation references, retries, verification, optional resulting player |
+| `identity.custody_key_reference` | Non-secret lifecycle row for one custodial owner, active, posting, or memo key | Belongs to provisioning and later player; stores public key and opaque provider reference only; destruction evidence is non-secret |
+| `identity.hive_account_claim` | Authority rotation, custody destruction, and delayed recovery-account transition | One pending claim per player; references one owner-authorized intent, both included operations, the later virtual operation, and distinct completion milestones |
+| `identity.public_record_disclosure` | Versioned permanent-public-record disclosure definition | Content SHA-256 proves which disclosure version was shown |
+| `identity.public_record_disclosure_acknowledgment` | One-time acknowledgment by a pending Google identity or existing player | Google row is linked to the resulting player instead of duplicated; no IP, browser, or device fingerprint is stored |
+| `identity.player` | Canonical playable in-game identity keyed by a normalized Hive username | Created for Google only after provisioning is verified; records current custodial/self-custodial control state |
+| `identity.player_profile` | Cached public Hive profile fields and game-facing profile timestamps | One-to-one with player; Hive profile metadata is cached, not identity authority |
+| `identity.auth_session` | Playable game refresh session with separate authentication and Hive-signing fields | Direct challenge or Google OIDC authentication; external or custodial signing provider; no Google token; many historical sessions, one unrevoked session |
+| `identity.player_preference` | Cross-platform comfort, accessibility, audio, UI, and Streamer Mode settings | One-to-one with player |
+| `identity.player_platform_setting` | Platform-specific sensitivity and control mappings | One row per player/platform |
+| `identity.player_appearance` | Persistent lobby character form, size preset, pose, and paint artifact reference | One-to-one with player; cube uses only the approved `x1_0` size |
+
+The pending-Google boundary is explicit: `external_identity`, its disclosure acknowledgment, and `hive_account_provisioning` exist before a player. `identity.player` and a playable `auth_session` are created only after the named Hive account is irreversible, its observed authorities match the four expected public keys, and initial RC support is verified. No guest or partly provisioned player row is created. A returning verified issuer/subject resumes the same external identity and logical job. The canonical Hive username is lowercase, unique, and immutable once the account is observed on Hive.
+
+The Google lifecycle represented by these rows is:
+
+```text
+Google verified
+→ username confirmed
+→ custody public keys ready
+→ Hive account created
+→ initial RC delegated
+→ player ready
+→ optional authority claim
+→ custodial signing disabled and keys destroyed
+→ recovery change pending
+→ full self-custody
+```
+
+Provisioning retries the same job through uncertain or partial outcomes. A response timeout after `create_claimed_account` triggers an on-chain name and expected-authority comparison; an independently created or mismatched account is never linked. Failure after account creation resumes at initial RC delegation. Reversible creation/delegation, database failure after broadcast, Hive outage, custody-provider outage, and unavailable Account Creation Token/RC capacity remain recoverable states. If a username is taken before a matching creation succeeds, the same job returns to username confirmation.
+
+Claim transfers the same account and never exports the old custodial private keys. The claim row distinguishes irreversible authority rotation, disabled custodial signing, destruction of all four old keys, the still-effective provisioning recovery account, and final recovery-account effectiveness. `self_custody_complete` is impossible until the selected non-platform recovery account becomes effective after Hive's approximately 30-day delay and HAF observes current account state plus `changed_recovery_account`.
+
+Authentication and signing remain independent. Google OIDC authenticates a game session but does not authorize a Hive transaction. Before claim, an eligible Google session can create an explicit allow-listed custodial posting/active intent. Direct-Hive and claimed players use an external Hive signer. The exact post-claim Google-session behavior remains open.
+
+### 5.2 Social
+
+| Entity | Responsibility | Important relationships and rules |
+| --- | --- | --- |
+| `social.friend_request` | Directed request workflow | Requester and recipient must differ; only one pending request exists for an unordered pair |
+| `social.friendship` | Accepted, undirected relationship | Pair is stored canonically as `player_low_id < player_high_id` |
+| `social.player_block` | Directed block relationship | Composite primary key; blocker and blocked player must differ |
+| `social.lobby_invitation` | Expiring lobby invitation | Links lobby, inviter, and invitee; invitation authorization can bypass private-lobby password entry |
+| `social.notification` | In-game notification inbox | Typed payload with optional related entity; read and expiry timestamps |
+
+Friends, invitations, blocking, presence, and lobby activity remain off-chain. No conversation, chat-message, or direct-message entities are included.
+
+### 5.3 Lobby and round history
+
+| Entity | Responsibility | Important relationships and rules |
+| --- | --- | --- |
+| `game.lobby` | One persistent rolling lobby lifecycle | Current host pointer, region, visibility, capacity, hashed password, system lifecycle close timestamp |
+| `game.lobby_access_token` | Hashed, expiring invitation link/code credential | Belongs to a lobby and creator; raw code is never persisted |
+| `game.lobby_membership` | Player join/leave history | Many memberships per lobby; at most one open membership per player globally |
+| `game.lobby_host_assignment` | Append-only host ownership history | Exactly one open assignment per lobby; records creation, transfer, leave, disconnect, or AFK reason |
+| `game.lobby_configuration` | Current host-configurable rules between rounds | One-to-one with lobby; the chosen settings are snapshotted into each round |
+| `game.game_round` | Durable round header and immutable initial rule/result snapshot | Unique sequence within lobby; exact map version, server build, match protocol, `result_schema_version`, `scoring_rule_version`, and canonical complete-result SHA-256 |
+| `game.round_participant` | One participant result for a completed round | Unique player per round; initial/final role supports Infection conversion |
+| `game.round_discovery` | Hunter discovery of a Hider | Both players must be participants in the same round; one discovery per Hider |
+| `game.round_disguise_snapshot` | Object-storage reference for an Answer Check disguise | At most one snapshot per participant |
+| `game.round_like` | One Answer Check choice per voter | Target must be a participant in the same round; no self-like |
+| `game.round_result_revision` | Append-only initial/correction/invalidation chain | Initial snapshot points to immutable canonical result object; unique previous edge and sequential same-round trigger prevent branching |
+| `game.match_publication_request` | Durable per-revision publication request | Initial request is committed with the completed detailed result; one noncancelled initial request per round |
+| `game.match_publication_outbox` | Exact logical Hive event/batch payload and retry/finality state | Stable event/batch UUIDs and canonical text/hash survive transaction rebuilds; separate from HAF projection |
+| `game.match_publication_item` | Ordered outbox-to-round/request membership | Each request enters one payload; initial batch positions/counts are validated; correction/invalidation has one item |
+| `game.player_mode_stat` | Rebuildable Casual/Infection summary cache | One row per player/mode; round history remains authoritative |
+| `game.achievement_definition` | Versioned off-chain achievement criteria | May reference a collectible badge definition |
+| `game.player_achievement` | Player progress and earned state | One row per player/definition; earned collectible instance linked after finalized issuance |
+
+`lobby.closed_at` is controlled by the lobby service for an empty, expired, or administratively terminated lifecycle; it is not a host-facing **Close lobby** capability. A departing host triggers ownership transfer while eligible players remain.
+
+#### Round persistence rule
+
+The authoritative match runtime owns the live round. PostgreSQL persists the round header when the server starts the round. Nonterminal `game_round.status` values are best-effort operational mirrors for history and support; they are never authoritative for simulation, phase timing, or reconnect restoration. Terminal commit comes from the authoritative match server. For a completed round, one transaction commits the terminal header, participants, discoveries, disguise snapshots, likes, initial `round_result_revision`, and initial `match_publication_request`; only then are rebuildable caches updated. Participant rows are terminal result records rather than live presence rows. An aborted round stores only the minimal header, end time, and abort reason and is never eligible for a normal initial publication.
+
+Completed detailed rows are immutable. A correction appends an immutable canonical result snapshot/revision and a correction request; an invalidation appends an invalidation revision/request. Neither path changes or deletes the original round, participants, discoveries, likes, initial revision, or any published Hive event. The unique `previous_revision_id` edge, one revision number per round, and same-round/sequential trigger produce one linear chain whose leaf is the current local interpretation.
+
+The publication worker batches queued initial requests with defaults of five minutes maximum age, 20 results, and 6 KiB of serialized application payload, flushing on the first limit. Only production tuning remains open. `canonical_payload` is exact canonical text rather than a `jsonb` serialization; parsed JSON is a validated convenience copy. Retrying may change Hive transaction headers/expiration, but cannot change the application payload, event UUID, batch UUID, or payload SHA-256.
+
+### 5.4 Maps and creator workflow
+
+| Entity | Responsibility | Important relationships and rules |
+| --- | --- | --- |
+| `content.map` | Stable map identity, creator attribution, discovery metadata | Official or community origin; community map requires a creator |
+| `content.map_version` | Versioned submission content and controlled review lifecycle | Unique version number per map; submitted manifest/package/assets remain immutable while status timestamps advance through commands |
+| `content.map_lifecycle_event` | Append-only publication, suspension, removal, and restoration history | Records old/new lifecycle, optional version, actor, and creator-facing reason |
+| `content.map_asset` | Package, thumbnail, screenshot, or showcase-media pointer | Object key, media type, byte size, and SHA-256 hash; one package per version |
+| `content.map_review` | Append-only manual review decision/history | Links reviewed version and reviewer; includes creator-facing and internal notes |
+| `content.tag` / `content.map_tag` | Controlled discovery tags | Normalized many-to-many relationship |
+| `content.map_distribution` | Per-platform availability | Separates dynamic desktop delivery from web-shipped availability and required build version |
+| `content.map_showcase` | Draft-to-Hive publication workflow | Off-chain draft links to a projected Hive post after publication |
+
+Map authorship, map versions, review, and file hashes remain authoritative in PostgreSQL and object storage. Hive is used only when the creator explicitly publishes the optional showcase post or votes on one. After submission, a version's identity, manifest, package, and asset content are immutable; controlled review/status fields may advance. When an updated version is submitted, the previous approved distribution remains playable until the replacement passes review and is activated atomically. A removed or suspended map cannot be selected for new lobbies, while its historical round references remain intact and the creator-facing lifecycle reason remains available.
+
+Before creating a map-showcase vote signing request, the service verifies that the voter participated in a completed round whose current result-revision chain is not invalidated. Hive votes are the only map-rating mechanism; there is no separate player-rating table.
+
+### 5.5 Collectibles, shop, and payments
+
+| Entity | Responsibility | Important relationships and rules |
+| --- | --- | --- |
+| `commerce.collectible_definition` | Catalog definition shared by many owned copies | Defines badge, weapon skin, material, emote, frame, or victory effect |
+| `commerce.collectible_asset` | Platform-specific asset pointer and content hash | Many assets per definition |
+| `commerce.collectible_instance` | One distinct on-chain-issued copy owned by one Hive player | Hive issuance UUID is the primary key; event history is authoritative; owner is immutable |
+| `commerce.player_loadout` | Off-chain equip history | One active collectible per compatible slot and one active use of an instance |
+| `commerce.shop_offer` | Time- and quantity-bounded catalog offer | References one collectible definition |
+| `commerce.shop_offer_price` | Price option for a supported rail/asset | Allows HIVE, HBD, AFIT, and later external payment rails |
+| `commerce.payment_transaction` | Unified incoming/outgoing payment workflow and evidence | Links transaction intent and external operation; records inclusion and irreversibility |
+| `commerce.purchase` | Purchase orchestration | A fulfilled purchase must have a verified payment and issued collectible instance |
+
+All purchased copies receive distinct collectible-instance UUIDs. Badges and cosmetic instances are non-transferable, so no ownership-transfer entity or event exists. Equip state is off-chain and does not change ownership.
+
+### 5.6 Tournaments
+
+| Entity | Responsibility | Important relationships and rules |
+| --- | --- | --- |
+| `tournament.tournament` | Tournament definition, schedule, fee, rules, and lifecycle | Supports the approved candidate formats without committing the product to all of them initially |
+| `tournament.tournament_entry` | One player registration and payment link | Unique player per tournament; no rejoin workflow is modeled |
+| `tournament.prize_rule` | Placement split or fixed payout rule | Multiple placements/assets per tournament |
+| `tournament.tournament_match` | Scheduled match or bracket node | Winner references an entry; detailed tournament/bracket state remains in PostgreSQL |
+| `tournament.match_entry` | Match-to-entry participation and result | Many-to-many bridge with score/outcome |
+| `tournament.match_game_round` | Exact game rounds counted toward a tournament match | Each game round belongs to at most one tournament match |
+| `tournament.entry_score` | Rebuildable aggregate standing | One-to-one with tournament entry |
+| `tournament.payout` | Expected and observed treasury payout | Links placement, amount, recipient entry, and outgoing payment transaction |
+
+There is no separate custom tournament-settlement, bracket, or payout-calculation event. Eligible completed gameplay rounds attached to tournament matches may appear in the same server-attested match-summary protocol as normal rounds, while tournament progression and detailed outcomes remain in PostgreSQL. Entry and payout transfers remain publicly verifiable through their native transaction evidence. The initial implementation accepts only the configured official treasury; a community-organized treasury model remains deferred and undecided. The general game server and match publisher cannot sign treasury payouts. Cancelled, unfilled, forfeited, or disconnected entries are not automatically refunded, and the unique player/tournament relationship deliberately prevents rejoining the same tournament.
+
+### 5.7 Hive projections and signing workflow
+
+| Entity | Responsibility | Important relationships and rules |
+| --- | --- | --- |
+| `hive_projection.operation` | Fork-aware normalized envelope for a relevant Hive operation | Stable HAF/HAfAH operation ID covers transaction and virtual operations; normal transaction/index identity plus included, irreversible, or reverted state |
+| `hive_projection.match_event` | Normalized accepted match batch/correction/invalidation envelope | References one HAF operation; publisher, schema/event versions, period, count, validation, and finality are relational |
+| `hive_projection.match_result` | Integrity/join projection for one accepted initial result item | One initial item per round; versions, map/version content hash, build/protocol, public result hash, current event, and reconciliation state |
+| `hive_projection.match_result_change` | Linear correction/invalidation edge | References original batch/event and exactly one superseded event; replacement integrity fields exist only for corrections |
+| `hive_projection.collectible_event` | Validated `collectible_issued` or `collectible_revoked` payload | Only allow-listed official issuer events can update domain ownership |
+| `hive_projection.asset_transfer` | HIVE/HBD or Hive-Engine transfer projection | Correlates tournament/shop payment; AFIT also requires successful Hive-Engine execution |
+| `hive_projection.community_post` | Current map showcase post projection | Unique author/permlink with created and latest operation references |
+| `hive_projection.community_vote` | Current voter state for a showcase post | Unique voter per post; later votes replace the projected current state |
+| `hive_projection.transaction_intent` | Server-generated operation intent and idempotency record | Separates external-wallet, custodial-player, and official-service authorization; references eligible session/key or isolated service role; never stores keys |
+| `hive_projection.rc_delegation` | Initial-provisioning or later RC-support lifecycle | Posting-authority `custom_json` ID `rc`, `delegate_rc` payload, max-RC amount, purpose/service role, grant/reclaim/finality and eligibility evidence |
+| `hive_projection.sync_cursor` | Per-source indexer progress and health | Tracks processed and irreversible blocks |
+
+The full validated match event remains in `operation.payload`; the typed match tables duplicate only identities, versions, hashes, foreign keys, current-chain state, and reconciliation fields needed for integrity and operational queries. They do not reproduce participant, discovery, or like detail as a second authoritative gameplay model. Those facts remain in `game.round_participant`, `game.round_discovery`, and `game.round_like`.
+
+For native Hive operations, irreversibility is based on HAF/LIB state. Pending match-event projections may be reverted and replayed after a fork; the durable outbox retains its logical payload and retries idempotently. An irreversible event becomes the canonical public summary. Reconciliation compares its public result hash and versions with the applicable immutable local revision. A mismatch changes the projection to `divergent`, records non-sensitive incident metadata, and alerts operations; neither Hive history nor the local complete result is silently overwritten.
+
+Hive-Engine token actions are carried through Hive operations but require a second validation of the contract execution result before AFIT payment is accepted. If indexing is unavailable, cached finalized ownership and match summaries may remain readable, but ownership-changing actions, payments, and finality-dependent transitions pause.
+
+### 5.8 Signing, custody, and secret boundary
+
+`identity.auth_session.authentication_method` answers how the game session was established. `hive_signing_provider` answers how a later player operation may be signed. `hive_projection.transaction_intent.authorization_mode` distinguishes external player signing, an explicitly authorized custodial player operation, and an official service operation. A Google OIDC session therefore never masquerades as Hive authorization.
+
+The database holds only Hive public keys, deterministic public authority text, opaque custody-provider key references, key lifecycle/destruction timestamps, and non-secret evidence references. It must never hold:
+
+- owner, active, posting, or memo private keys;
+- Hive master passwords, seeds, recovery material, or exported credential files;
+- custodial key plaintext or a provider credential capable of retrieving it;
+- raw Google ID/access/refresh tokens or the raw OIDC subject used for lookup; or
+- provisioning, match-publisher, issuer, treasury, or RC-support private keys.
+
+No KMS, HSM, or Vault product is selected by this model. The provider remains gated by a feasibility/cost spike for secp256k1, Hive-compatible compact signatures, per-key authorization, non-exportability, destruction evidence, scaling, and optional future memo shared-secret support. The memo key is tracked for account creation and rotation; encrypted memo processing is not promised by this schema.
+
+Official roles remain distinct: the provisioning account maintains the Account Creation Token pool, creates accounts, and supplies initial RC; the match publisher signs public match attestations; the issuer signs collectible events; the treasury signs payouts; and the RC-support role handles later assistance/reclaim. `transaction_intent.official_service_role` records the authorization class without storing a service key. Official service-account owner authorities remain offline and outside the application model. Production account names remain configuration, not schema values.
+
+## 6. Primary cardinalities
+
+The detailed relationships are declared as named `Ref` definitions in the DBML. The central cardinalities are:
+
+- One verified Google provider/issuer/subject hash to one `external_identity`, one durable provisioning job, and at most one resulting player. The Google path has no player before the job is ready.
+- One provisioning job to four current custodial key roles before claim; lifecycle history remains after destruction. One player may have only one pending claim.
+- One disclosure version to many acknowledgments; each pending external identity or player can acknowledge that version once, and the pending Google row is later linked to the player.
+- One `identity.player` to at most one profile, preference row, and current appearance at the database level; the account bootstrap transaction creates the required rows.
+- One player to many historical sessions, platform settings, lobby memberships, round participations, purchases, tournament entries, and notifications.
+- One lobby to at most one current configuration at the database level, plus many memberships, host assignments, and sequential rounds; lobby creation inserts the required configuration transactionally.
+- One round to many participants, discoveries, likes, and a single linear append-only result-revision chain; at most one disguise snapshot per participant.
+- One result revision to one publication request; one outbox event/batch to ordered publication items; one noncancelled initial request and one accepted initial Hive result per round.
+- One map to many immutable versions; one version to many assets, reviews, and platform distributions.
+- One collectible definition to many collectible instances; each instance has exactly one owner and issuance event, with an optional later revocation event.
+- One tournament to many entries, prize rules, matches, and payouts.
+- One relevant Hive operation to at most one typed projection row of a given kind. One match event references one operation; one initial match event contains many projected results, while each correction/invalidation event has one linear change edge.
+
+Foreign-key delete behavior is intentionally conservative. Historical and financial entities use `RESTRICT`; only pure join/configuration children such as map tags and offer prices use `CASCADE` where deletion cannot erase evidence.
+
+## 7. State and transaction boundaries
+
+### 7.1 Authentication and Google provisioning
+
+For a direct-Hive session, the client obtains a nonce-bound challenge and Keychain, HiveAuth, HiveSigner, or another approved external provider signs with the player's posting authority outside Unity. The backend verifies account, authority, nonce, origin, expiry, and signature, then transactionally upserts the normalized player/profile, revokes the old session, and inserts the new hashed game refresh session. The short-lived challenge belongs in Redis rather than these durable tables.
+
+For Google onboarding:
+
+1. The backend validates the OIDC signature, configured issuer/audience, expiration, nonce/callback correlation, and subject. It derives `subject_lookup_hash` with a keyed HMAC whose key is outside PostgreSQL.
+2. It upserts the unique `external_identity`, records the required disclosure acknowledgment, and creates or resumes its single logical provisioning job after permanent username confirmation.
+3. The custody boundary creates separate owner, active, posting, and memo keys. The job stores only their public keys and opaque references and advances to `keys_ready` only after all four rows exist.
+4. The dedicated provisioning account uses an Account Creation Token through `create_claimed_account`. Its separate pool-maintenance `claim_account` operations consume that account's RC and are visible through `hive_projection.operation` but do not create player-key rows. Account creation and initial RC capacity are platform costs, not player charges.
+5. The same provisioning role supplies initial RC through posting-authority `custom_json` ID `rc` with a `delegate_rc` payload. `rc_delegation.delegated_max_rc` is RC capacity, not HIVE, HP, or content-vote weight.
+6. The job reaches `ready` only after irreversible account creation, observed authority equality, and verified initial RC. One transaction creates/links the player, updates the pending disclosure row with that player, and issues a playable session.
+
+Concurrent callbacks and workers serialize on the same external identity/job. An uncertain broadcast is reconciled against Hive before retry. A matching already-created account resumes the same job; a mismatched account is rejected. A database failure after an on-chain success, RC failure after creation, fork rollback, or dependency outage changes retry state without creating a second job, Hive account, or player.
+
+Provisioning/username/OIDC attempts are rate-limited by the auth and provisioning services. Exact thresholds and short-lived device/network risk signals belong in security configuration or purpose-built telemetry, not in identity ownership or disclosure-acknowledgment rows.
+
+Before Google account creation—or before a direct-Hive player's first match participation—the current version of the permanent-public-record disclosure must be acknowledged. It explains that published summaries permanently expose the Hive username, match participation, role, score, outcome, and aggregated likes. The row proves which content hash/version was accepted without collecting extra device or network data.
+
+### 7.2 Custodial signing and self-custody claim
+
+A Google-authenticated unclaimed player may explicitly authorize allow-listed posting operations or active-authority payments. The backend records an authenticated `transaction_intent`, validates the current session/account/key role and operation policy, and asks the custody boundary to sign only that canonical operation. The general backend and Unity never receive the private key. Direct-Hive and claimed players use an external signer instead. Official jobs use `authorization_mode = official_service` and a distinct service role, never a player session or custody key.
+
+Claim is one idempotent workflow for the existing Hive account:
+
+1. Store safe canonical representations of the player's new public owner/active/posting authorities, new memo public key, and selected valid non-platform recovery account.
+2. Build one current-owner-authorized transaction containing `change_recovery_account` followed by `account_update2`; reference the one intent and both projected operations from the claim row.
+3. Keep `authority_rotation_pending` until the transaction is irreversible, all new authorities match a fresh Hive read, and the pending recovery request names the selected account. A fork or uncertain response never triggers destruction.
+4. Disable custodial signing and request destruction of all four old key references. Record separate signing-disabled, destruction-requested/completed, and non-secret evidence timestamps. Partial destruction remains `custody_destruction_pending` and cannot be mislabeled complete.
+5. Enter `recovery_change_pending`. The provisioning account remains the effective recovery account during Hive's approximately 30-day delay even though the platform can no longer sign normal operations.
+6. Mark `self_custody_complete` only after HAF observes the selected recovery account in current account state and the corresponding `changed_recovery_account` virtual operation.
+
+The claim never exports the old platform keys or creates a replacement account. Authority rotation, custody destruction, recovery effectiveness, and full completion remain independently auditable.
+
+### 7.3 Completed round and match publication
+
+A terminal result commit uses an idempotent round ID and one database transaction. It validates the result schema/scoring versions, canonical complete-result SHA-256, participant set, role rules, discoveries, and likes, then inserts the immutable detailed rows, initial result revision, and initial publication request. Statistics and standings update only after this succeeds and remain rebuildable.
+
+The outbox worker creates an exact canonical application payload and ordered membership rows. Initial batching flushes at five minutes, 20 results, or 6 KiB, whichever occurs first. The isolated match publisher—not the gameplay server process and not any player key—signs the `custom_json`. Broadcast retries retain the same logical event/batch UUIDs, canonical payload bytes, and payload hash even when a new Hive transaction header is required.
+
+HAF indexes the resulting operation and typed event as pending. A pre-irreversibility fork marks/reverts the projection and permits idempotent replay; it does not erase the outbox request. After irreversibility, Hive is the canonical public ledger for that server-attested summary while PostgreSQL remains authoritative for complete detail. Reconciliation compares round/map/version/hash fields. Divergence is an incident state and never causes either record to be overwritten.
+
+A correction appends a new local result revision, publication request, outbox event, and projected linear change edge. An invalidation does the same without a replacement result snapshot/hash. `original_event_uuid` and `original_batch_uuid` preserve the first publication, while unique supersession and revision edges prevent branching. Aborted rounds never enter the normal initial flow.
+
+### 7.4 Host migration
+
+Host migration is one serializable transaction that locks the lobby, closes the current `lobby_host_assignment`, inserts the replacement assignment, and updates `lobby.current_host_player_id`. The candidate-selection algorithm and lobby AFK heartbeat run in the authoritative lobby service.
+
+### 7.5 Collectible issuance
+
+1. An approved purchase, reward, or earned badge authorizes an isolated issuer service.
+2. The issuer broadcasts the approved `hive.chameleon` collectible event through WAX.
+3. The indexer observes the operation, validates namespace/schema/issuer/hash, and records the projection.
+4. The collectible instance is pending at block inclusion and finalized only when irreversible.
+5. Equip and fulfillment workflows consume finalized ownership only.
+
+`hive.chameleon` remains a proposed protocol ID until manager approval before the first production broadcast.
+
+### 7.6 Tournament payment
+
+An unclaimed custodial player explicitly confirms an active-authority entry transfer in product; a direct-Hive or claimed player explicitly signs it through the selected external provider. The payment is correlated by tournament reference, sender, recipient, asset, and amount; a memo alone is not trusted. Registration becomes accepted only after the expected operation is irreversible and, for AFIT, after successful Hive-Engine execution. Payouts follow the same evidence path in the outgoing direction through the isolated treasury signer.
+
+## 8. PostgreSQL conventions
+
+| Concern | Decision |
+| --- | --- |
+| Primary IDs | Application-generated UUIDv7 stored as PostgreSQL `uuid` |
+| Naming | Singular `snake_case` tables and columns; schema-qualified names |
+| Time | `timestamptz`; services and database operate in UTC |
+| Money/token quantities | `numeric(20,8)`; never floating point |
+| Resource Credits | Integer-like `numeric(30,0)` max-RC capacity; never modeled as HIVE/HP |
+| Scores | Fixed precision `numeric`; exact point rules are versioned |
+| Hive usernames | Normalized lowercase, unique where identity is canonical |
+| Google subject lookup | Keyed deterministic HMAC-SHA-256 over configured issuer/subject; HMAC key and raw subject remain outside the database |
+| Asset codes | Normalized uppercase |
+| Content integrity | SHA-256 lowercase hexadecimal hashes |
+| Lifecycle values | PostgreSQL enums for stable, closed state sets |
+| Extension data | JSONB only where fields are versioned, sparse, or provider-specific |
+| Canonical outbound payload | Exact canonical `text` plus SHA-256; optional parsed `jsonb` is not the signing/retry byte source |
+| Concurrency | `row_version` optimistic locking on frequently edited aggregates |
+| External assets | Object-storage key + media type + size + content hash |
+| Secrets | Only one-way hashes, public keys/authorities, and opaque non-secret references; all private signing, recovery, OIDC token, and service-key material is excluded |
+
+UUIDv7 generation belongs in the application/shared service library so deployments do not depend on a particular PostgreSQL major version's UUIDv7 function.
+
+## 9. Constraints and indexes represented in DBML
+
+The DBML declares:
+
+- primary, unique, and foreign keys;
+- one-to-one, one-to-many, and composite relationships;
+- enum-backed lifecycle states;
+- time-order, range, non-self, canonical-pair, and terminal-state checks;
+- query indexes for OIDC lookup, provisioning/claim retry, player history, lobby discovery, match outbox/projection reconciliation, map browsing, payment reconciliation, tournament standing, and Hive block replay; and
+- conservative delete/update actions on every relationship.
+
+Every declared foreign key has a child-side index whose leading columns cover the relationship, including composite account, round, tournament, and projection references.
+
+Important queries supported directly include:
+
+- exact Hive username and deterministic provider/issuer/subject lookup;
+- pending provisioning by state/retry/username, custody keys by account/role/state, and pending recovery transition;
+- disclosure-version acknowledgment checks before creation or first participation;
+- public lobby discovery by region and open status;
+- a player's round/mode history and profile statistics;
+- approved map/version and platform-distribution lookup;
+- finalized collectible inventory and active loadout;
+- pending payment/purchase/tournament workflows;
+- match-publication outbox dequeue, stable event/batch lookup, correction-chain traversal, and local/Hive reconciliation; and
+- block-ordered, replay/fork-ordered, publisher-ordered, account-ordered, and application-namespace Hive projection reads.
+
+JSONB columns intentionally have no default B-tree indexes. Add a GIN or expression index only after a real query requires a stable JSON path.
+
+## 10. PostgreSQL migration rules not expressible in DBML
+
+DBML cannot fully represent partial/expression indexes, triggers, deferrable constraints, row-level locking rules, or cross-table state validation. The migration set must add and test the following.
+
+### 10.1 Required partial and expression indexes
+
+```sql
+CREATE UNIQUE INDEX uq_provisioning_reserved_username
+    ON identity.hive_account_provisioning (requested_hive_username)
+    WHERE state <> 'terminal_failed'::identity.provisioning_state
+       OR account_observed_at IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_custody_key_current_provisioning_role
+    ON identity.custody_key_reference (provisioning_id, authority_role)
+    WHERE state IN (
+        'generated'::identity.custody_key_state,
+        'active'::identity.custody_key_state,
+        'destruction_requested'::identity.custody_key_state
+    );
+
+CREATE UNIQUE INDEX uq_custody_key_current_player_role
+    ON identity.custody_key_reference (player_id, authority_role)
+    WHERE player_id IS NOT NULL
+      AND state IN (
+          'generated'::identity.custody_key_state,
+          'active'::identity.custody_key_state,
+          'destruction_requested'::identity.custody_key_state
+      );
+
+CREATE UNIQUE INDEX uq_hive_account_claim_one_pending_player
+    ON identity.hive_account_claim (player_id)
+    WHERE state IN (
+        'requested'::identity.claim_state,
+        'authority_rotation_pending'::identity.claim_state,
+        'custody_destruction_pending'::identity.claim_state,
+        'recovery_change_pending'::identity.claim_state,
+        'retryable_failed'::identity.claim_state
+    );
+
+CREATE UNIQUE INDEX uq_disclosure_ack_external_version
+    ON identity.public_record_disclosure_acknowledgment
+       (external_identity_id, disclosure_version)
+    WHERE external_identity_id IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_disclosure_ack_player_version
+    ON identity.public_record_disclosure_acknowledgment
+       (player_id, disclosure_version)
+    WHERE player_id IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_auth_session_one_open_per_player
+    ON identity.auth_session (player_id)
+    WHERE revoked_at IS NULL;
+
+CREATE UNIQUE INDEX uq_lobby_membership_one_open_per_player
+    ON game.lobby_membership (player_id)
+    WHERE left_at IS NULL;
+
+CREATE UNIQUE INDEX uq_lobby_one_current_host_assignment
+    ON game.lobby_host_assignment (lobby_id)
+    WHERE ended_at IS NULL;
+
+CREATE UNIQUE INDEX uq_friend_request_one_pending_pair
+    ON social.friend_request (
+        LEAST(requester_player_id, recipient_player_id),
+        GREATEST(requester_player_id, recipient_player_id)
+    )
+    WHERE status = 'pending'::social.friend_request_status;
+
+CREATE UNIQUE INDEX uq_lobby_invitation_one_pending_invitee
+    ON social.lobby_invitation (lobby_id, invitee_player_id)
+    WHERE status = 'pending'::social.invitation_status;
+
+CREATE INDEX idx_lobby_open_public_region
+    ON game.lobby (region_code, created_at DESC)
+    WHERE closed_at IS NULL
+      AND visibility = 'public'::game.lobby_visibility;
+
+CREATE UNIQUE INDEX uq_map_version_one_package
+    ON content.map_asset (map_version_id)
+    WHERE kind = 'package'::content.map_asset_kind;
+
+CREATE UNIQUE INDEX uq_loadout_one_active_item_per_slot
+    ON commerce.player_loadout (player_id, equipment_slot)
+    WHERE unequipped_at IS NULL;
+
+CREATE UNIQUE INDEX uq_loadout_one_active_use_per_instance
+    ON commerce.player_loadout (collectible_instance_id)
+    WHERE unequipped_at IS NULL;
+
+CREATE UNIQUE INDEX uq_payment_one_open_correlation
+    ON commerce.payment_transaction (correlation_reference)
+    WHERE correlation_reference IS NOT NULL
+      AND state IN (
+          'requested'::commerce.payment_state,
+          'awaiting_signature'::commerce.payment_state,
+          'broadcast'::commerce.payment_state,
+          'included'::commerce.payment_state
+      );
+
+CREATE UNIQUE INDEX uq_match_publication_one_initial_round
+    ON game.match_publication_request (round_id)
+    WHERE request_type = 'initial'::game.match_publication_request_type
+      AND state <> 'cancelled'::game.match_publication_request_state;
+
+CREATE UNIQUE INDEX uq_rc_delegation_one_active_scope
+    ON hive_projection.rc_delegation
+       (delegator_hive_account, recipient_hive_username, purpose)
+    WHERE status IN (
+        'pending'::hive_projection.rc_delegation_status,
+        'active'::hive_projection.rc_delegation_status,
+        'reclaiming'::hive_projection.rc_delegation_status
+    );
+```
+
+`hive_account_provisioning.external_identity_id` is a full unique constraint rather than a partial index: the design retains and retries one logical job for the lifetime of the external identity, including its completed outcome. `match_result.round_id` similarly enforces one accepted initial Hive result per round. A separate current-chain-head index is unnecessary because one revision number per round, exactly one revision-one initial row, noninitial previous edges, and unique `previous_revision_id` produce one chain; its only leaf is the head. Those cross-row assumptions still require the triggers below.
+
+An active-showcase uniqueness rule may be added when the publication workflow is finalized. It should use a partial unique index rather than preventing retained historical drafts and failures.
+
+### 10.2 Required triggers or equivalent transactional service guarantees
+
+- Increment `row_version` and refresh `updated_at` on optimistic-lock aggregates.
+- Treat `hive_account_provisioning.external_identity_id` as the serialized idempotency root. Make the requested username immutable after a matching account is observed; reconcile uncertain creation by account name and all expected public authorities before linking.
+- Require exactly one nondestroyed owner, active, posting, and memo `custody_key_reference` before `keys_ready`; only the custody adapter may transition destruction state/evidence. A `ready` transaction links the same external identity/job/username, player, initial RC row, and pre-provisioning disclosure acknowledgment.
+- Prevent creation of a playable Google `player` or `auth_session` before account/authority/RC verification. Never synthesize a guest identity for an incomplete job.
+- Require the claim's `change_recovery_account` and `account_update2` operations to share one transaction and use the current custodied owner key for that same player. The target recovery account must pass the separately approved non-platform policy.
+- Do not disable custodial signing or destroy any key until authority rotation is irreversible, all target authorities match current Hive state, and the pending recovery request is verified. Require all four destruction completions before `recovery_change_pending`; require the effective account state and `changed_recovery_account` virtual operation before `self_custody_complete`.
+- When authority rotation is verified, atomically change `player.hive_control_state`, revoke custodial eligibility on open sessions, and reject/cancel outstanding custodial intents before key destruction. Later operations must use an external signer even while recovery remains pending.
+- Link a pending Google disclosure acknowledgment to the resulting player in place. Reject Google account creation or first direct-Hive match participation without the effective disclosure version.
+- Prevent mutation/deletion of completed round headers and detailed result children. All corrections and invalidations append revisions and requests.
+- Require an initial `round_result_revision` to match `game_round.result_schema_version`, `scoring_rule_version`, and `canonical_result_sha256`. Require every later revision's previous row to belong to the same round, increment by one, and have no existing child.
+- Commit the completed detailed result, initial revision, and initial publication request atomically. Aborted/incomplete rounds cannot receive an initial request.
+- Validate publication request/revision type, item round/revision identity, contiguous item positions, event type, and `result_count`. Corrections/invalidations have one item; initial batch defaults enforce the configured five-minute, 20-result, and 6-KiB limits.
+- Freeze outbox event/batch UUIDs, canonical payload text, and payload SHA-256 after the first broadcast attempt. Rebuilt transactions may update only attempt/transaction/finality metadata.
+- Accept match projections only when the referenced operation is posting-authority `custom_json` under the approved `hive.chameleon` namespace, its signer equals an allow-listed publisher, and the envelope/payload validate. Keep operation/event fork states synchronized, roll back pending derived pointers on reversion, and replay idempotently by event UUID.
+- Enforce one linear projected correction/invalidation chain, advance the current event under projector control, and compare versions/map/hash against the immutable local revision. An irreversible mismatch creates a divergence incident state instead of updating either source.
+- Verify an initial RC grant/reclaim operation is posting-authority `custom_json` with application ID `rc` and a valid `delegate_rc` payload. Enforce provisioning role/purpose for initial RC and the separate RC-support role for later assistance.
+- Prevent mutation of a submitted map version's identity, manifest, package, and asset content; permit only controlled review/status timestamp transitions. A content change creates a new version.
+- Keep the open `lobby_host_assignment` and `lobby.current_host_player_id` synchronized.
+- Validate that the current host and every round participant belong to the relevant lobby lifecycle.
+- Require at least two active players and enforce `hunter_count < active_player_count`, leaving at least one Hunter and one Hider.
+- Require exactly `hunter_count` initial Hunters in the completed participant set and allow no more than the approved maximum of two.
+- Require `auto_start_threshold <= lobby.max_players`; cancel the visible automatic-start countdown if active membership falls below the threshold.
+- Permit a round to start only when its exact map version has an available distribution for the requesting platform/build.
+- Validate discovery roles and Infection conversion order against the completed result snapshot.
+- Validate that a round-like target was a Hider and the voter was eligible.
+- Permit lobby selection only when the map, exact version, and target-platform distribution are all available.
+- Require a creator-facing reason for map suspension/removal and retain an append-only lifecycle event.
+- Keep the previous approved map distribution available until a replacement version passes review, then activate the replacement transactionally.
+- Create a Hive map-showcase vote intent only after the voter has a valid completed participation whose current result-revision chain is not invalidated.
+- Materialize or revoke a collectible instance only when the accepted event type, instance UUID, item-definition UUID, issuer, and owner Hive username match the domain records exactly.
+- Permit loadout activation only when the instance belongs to the player, is finalized, is not revoked, and matches the slot.
+- Fulfill a purchase only after irreversible payment evidence and irreversible collectible issuance.
+- Accept a tournament entry only after the exact incoming payment is finalized.
+- Ensure a tournament-match winner participated in that match and every match entry belongs to the same tournament.
+- Ensure percentage prize rules form an allowed split and payouts do not exceed the verified pot.
+- Mark a payout paid only after its outgoing payment is irreversible.
+
+State transitions should be implemented as explicit domain commands, not unrestricted generic row updates.
+
+### 10.3 Transaction isolation and idempotency
+
+- Login replacement, Google provisioning, account claim, host migration, lobby start, round finalization/publication request, outbox construction, purchase fulfillment, collectible/match projection, tournament entry, and payout completion require transaction-level idempotency.
+- Use row locks or serializable transactions for external-identity provisioning ownership, username/job transitions, claim state, lobby capacity, purchase limits, host replacement, correction-chain append, bracket advancement, and payout allocation.
+- Non-virtual chain operations are deduplicated by transaction ID plus operation index; every projected row, including `changed_recovery_account` virtual operations, also has a stable HAF/HAfAH source operation ID. Provisioning, claim, transaction intent, publication event, and batch identities remain stable across retries.
+- A Hive fork may revert an included projection and return a provisioning/publication workflow to reconciliation. Only irreversible ownership, payment evidence, and published public match events are final.
+
+## 11. Retention and scaling posture
+
+### 11.1 Long-lived records
+
+Retain external identity mappings needed for continuity; completed provisioning outcomes; non-secret custody-key lifecycle/destruction evidence; claim and recovery-transition history; disclosure acknowledgments; player/profile identity; completed and aborted round headers; immutable detailed results and revisions; publication requests/outbox outcomes/items; maps and versions; review history; collectible ownership evidence; purchases; tournament records; payments; RC delegation evidence; and relevant Hive projections. These records support history, verification, cache rebuilding, reconciliation, and dispute investigation.
+
+### 11.2 Operationally expirable records
+
+Expired/revoked sessions, lobby access tokens, invitations, read notifications, and expired/failed transaction-intent retry details can be archived or purged by scheduled policy after their troubleshooting window. Provisioning and publication retry telemetry may be compacted only after the immutable outcome and chain references remain reconstructable. Raw secrets are never retained for audit. Exact retention durations belong in the later security/non-functional-needs card.
+
+### 11.3 Initial scaling decision
+
+Do not partition tables for the first implementation. The expected vertical-slice volume does not justify the operational cost. Monitor `game.game_round`, `game.round_participant`, `game.match_publication_request`, `game.match_publication_outbox`, `social.notification`, `commerce.payment_transaction`, `hive_projection.operation`, and the match-event/result projection. Introduce time/range partitioning only when measured size, retention maintenance, or query latency requires it; event time or Hive block number are the likely future keys.
+
+Read replicas and caches may accelerate public profiles, map browsing, and history, but all writes continue through authoritative services. Redis may cache discovery and presence but must not become the only copy of durable facts.
+
+## 12. Scope coverage and deferred expansion
+
+The model is deliberately broad enough to support the approved P0/P1 product flow while keeping later features isolated:
+
+- The direct/Google identity lifecycle, lobby, game-round/revision, match outbox/projection, map, profile, reconnect outcome markers, and other Hive projection structures are represented; the live 60-second reconnect reservation remains outside PostgreSQL.
+- Friends, Streamer Mode, cosmetics/shop, and controlled tournament payments are represented without forcing all of them into the first gameplay milestone.
+- Creator Workshop tables support reviewed community map versions and controlled desktop distribution when that track is activated.
+- External payment rails, additional tournament formats, and richer creator workflows can extend existing commerce/content structures.
+- Mobile-specific settings, built-in communication, seasonal rankings, and collectible transfer/resale are not represented.
+
+### 12.1 Open decisions preserved by the model
+
+- Google-account loss and identity-recovery behavior.
+- Whether and how a pre-existing Hive account can be linked to Google.
+- Google issuer/subject relinking or replacement.
+- Whether Google remains an accepted game-session credential after self-custody claim.
+- Production custody-provider selection after the required capability/feasibility/cost spike.
+- Exact valid non-platform recovery-account selection and proof policy.
+- Exact player-facing claim and self-custodial credential UI.
+- Initial/general RC amounts, eligibility thresholds, cooldowns, and reclaim policy.
+- Production tuning of the decided five-minute/20-result/6-KiB match-batch defaults.
+- Production Hive service-account names and operational custody procedures.
+- Final approval of the provisional `hive.chameleon` application namespace.
+
+User roles and administrative permissions are intentionally deferred to the dedicated **Define user roles & permissions** card. The reviewer and issuer references in this model establish data relationships, not authorization by themselves.
+
+## 13. Validation and usage
+
+Import `hive-chameleon.dbml` into [dbdiagram.io](https://dbdiagram.io/) or another DBML-compatible renderer to inspect the ERD. Validate and export it locally with:
+
+```bash
+NPM_CONFIG_CACHE=/tmp/npm-cache \
+  npx --yes --package @dbml/cli \
+  dbml2sql hive-chameleon.dbml --postgres \
+  -o /tmp/hive-chameleon.sql
+```
+
+The source currently compiles successfully with the DBML CLI. A successful export validates DBML syntax and relationship resolution; the generated SQL still needs project migrations for the partial indexes, triggers, security roles, extensions, and deployment-specific choices described above.
+
+## 14. Card acceptance checklist
+
+- [x] Core product entities are represented in PostgreSQL-oriented DBML.
+- [x] Primary keys, foreign keys, cardinalities, enums, indexes, and checks are defined.
+- [x] Direct-Hive and Google identity, pending provisioning, custody references, claim/recovery, and disclosure acknowledgment have explicit boundaries without stored secrets.
+- [x] Batched match publication separates immutable operational results/outbox data from fork-aware HAF projections and append-only corrections/invalidations.
+- [x] Collectible ownership, community posts/votes, RC delegation, and payment projections have explicit authority boundaries.
+- [x] Live Nakama/Redis state and object-storage content are excluded from relational persistence.
+- [x] Completed versus aborted round persistence is defined.
+- [x] Map versioning, review, and platform distribution are modeled.
+- [x] Tournament entry, scoring, payment, and payout relationships are modeled.
+- [x] PostgreSQL-only integrity requirements missing from DBML are documented.
+- [x] The DBML source exports successfully to PostgreSQL SQL.
