@@ -403,7 +403,11 @@ Infection adds a final-surviving-Hider bonus. No persistent competitive rank is 
 The intended login screen prioritizes:
 
 - **Sign in with Hive Keychain** as the primary direct Hive path.
-- **Continue with Google** as an optional accessible path for players without an existing Hive setup. A new Google-authenticated player receives a real, standard Hive account that is provisioned custodially by the platform and linked to the verified Google identity; it is not a guest or database-only identity.
+- **Continue with Google** as an optional accessible path for players without an existing Hive
+  setup. A new Google-authenticated player receives a real, standard Hive account coordinated by
+  the platform through an approved signup/RC sponsor, provisioned with platform-custodied player
+  authorities, and linked to the verified Google identity; it is not a guest or database-only
+  identity.
 
 HiveAuth and HiveSigner remain supported platform-dependent Hive authentication/signing paths. The product may initially ship with fewer fallback providers if platform or technical constraints require it. There is no guest mode, and every supported entry path leads to a persistent Hive-linked player profile.
 
@@ -412,7 +416,8 @@ Google sign-in authenticates the player's game session; it is not itself a Hive 
 1. Completes Google sign-in.
 2. Chooses an available Hive username and confirms that Hive usernames are permanent.
 3. Reviews and acknowledges the permanent-public-record disclosure described below.
-4. Waits while the platform creates the Hive account and assigns enough Resource Credits for initial activity.
+4. Waits while the platform coordinates sponsor-backed account creation and verifies enough
+   initial Resource Credits for activity.
 5. Continues with the resulting Hive-linked profile once provisioning succeeds.
 
 A returning Google-authenticated player resumes the same linked Google-provisioned Hive account and normally skips username selection. The account belongs to the player and is custodial by default: the platform holds its Hive authorities in hardened key management until the player claims self-custody. Raw keys are not exposed to Unity, the general application backend, environment variables, or logs.
@@ -427,7 +432,14 @@ Players with unclaimed Google-provisioned Hive accounts can therefore play and u
 
 The claim path is designed in from the start even if its account-settings UI ships later. During claim, the player establishes new self-custodial Hive keys through a supported wallet or approved credential-generation/export experience. The platform uses the currently custodied owner authority to rotate owner, active, posting, and memo authorities to those new keys, then irreversibly destroys its custodial key material. The Hive username, profile, history, balances, and collectibles remain with the same account. After that authority rotation, the platform can no longer sign normal Hive actions for the player, so supported Hive actions require the player's Hive signing provider.
 
-Hive initially assigns the account creator—the platform provisioning account—as the account's recovery account. Claim therefore also requests a change to a valid non-platform recovery account selected by the player. Hive applies that recovery-account change after a 30-day delay. During the delay, the player's new keys control the account and the platform cannot sign normal operations, but the provisioning account remains listed on-chain as the recovery account and retains the technical ability to initiate a recovery request. The UI must show **Recovery change pending** and must not describe the account as fully self-custodial until Hive confirms that the new recovery account is effective.
+Hive initially assigns the account creator—the configured signup sponsor—as the account's
+recovery account. Claim therefore also requests a change to a valid non-sponsor recovery account
+selected by the player. Hive applies that recovery-account change after a 30-day delay. During
+the delay, the player's new keys control the account and the platform cannot sign normal
+operations, but the sponsor remains listed on-chain as the recovery account. The platform does
+not hold the sponsor's recovery authority; nevertheless, the UI must show **Recovery change
+pending** and must not describe the account as fully self-custodial until Hive confirms that the
+new recovery account is effective.
 
 Before creating a Google-provisioned Hive account—and before first match participation for a direct-Hive user—the product presents a one-time disclosure that the player's Hive username, match participation, roles, scores, outcomes, and aggregated likes will become permanently public in published Hive summaries. The player must acknowledge this before continuing. It is a product disclosure, not a Hive signature, and it is not repeated before every match.
 
@@ -439,7 +451,13 @@ An active match never aborts solely because Hive becomes unavailable. Live simul
 
 New direct-Hive authentication, first-time Google provisioning, and Hive-dependent posts, votes, payments, ownership changes, and claim actions pause with a clear unavailable/retry state. The technical design must define the exact health checks and avoid misclassifying a temporary local failure as a confirmed Hive outage.
 
-First-time Google provisioning also depends on Hive availability, provisioning capacity, and successful initial Resource Credit delegation. If any step is interrupted, the UI shows a recoverable pending or retry state and resumes the same provisioning attempt; it does not create a guest profile or silently create a second Hive account. If the selected username becomes unavailable before creation succeeds, the player is returned to username selection. The platform covers account creation and initial RC support; the player is not charged an account-creation fee.
+First-time Google provisioning also depends on Hive availability, custody availability, approved
+sponsor/signup-code capacity, and verified initial Resource Credit support. If any step is
+interrupted, the UI shows a recoverable pending or retry state and resumes the same sponsor
+request; it does not consume a second signup code, create a guest profile, or silently create a
+second Hive account. If the selected username becomes unavailable before creation succeeds, the
+player is returned to username selection. The approved sponsor program covers account creation
+and initial RC support; the player is not charged an account-creation fee.
 
 ## 21. Persistent Player Profile
 
@@ -769,7 +787,7 @@ flowchart TD
     D --> E{"Provisioned account exists?"}
     E -->|No| F["Choose permanent Hive username"]
     F --> R["Review permanent-public-record disclosure"]
-    R --> G["Create Hive account and delegate RC"]
+    R --> G["Sponsor creates Hive account and supplies RC"]
     E -->|Yes| H["Main menu"]
     G --> H
     C --> L["First-use public-record disclosure"]
@@ -854,7 +872,7 @@ These wireframes define hierarchy, controls, and information placement. They are
 |                                                                              |
 |                    [ CREATE MY HIVE ACCOUNT ]                                |
 |                                                                              |
-| <Creating account / assigning Resource Credits / retry status>               |
+| <Sponsor-backed account creation / RC verification / retry status>           |
 | No wallet setup or account-creation payment is required.                     |
 +------------------------------------------------------------------------------+
 ```
@@ -1189,7 +1207,7 @@ This disclosure appears before Google account creation and before first match pa
 
 | ID | Feature | Acceptance summary |
 | --- | --- | --- |
-| P0-01 | Hive-linked authentication | A player can use the primary Hive Keychain path or Continue with Google; a new Google-authenticated player confirms a permanent username, receives one real custodial-by-default Hive account with initial RC, can immediately use supported posting/payment actions without wallet setup, and can later claim self-custody; supported platform HiveAuth/HiveSigner paths remain available and there is no guest path. |
+| P0-01 | Hive-linked authentication | A player can use the primary Hive Keychain path or Continue with Google; a new Google-authenticated player confirms a permanent username, receives one real custodial-by-default Hive account and initial RC through the approved signup sponsor, can immediately use supported posting/payment actions without wallet setup, and can later claim self-custody; supported platform HiveAuth/HiveSigner paths remain available and there is no guest path. |
 | P0-02 | Persistent profile | Hive identity and the approved statistics/profile sections load consistently across supported clients. |
 | P0-03 | Main menu | All core and future product destinations are visible; unavailable future modules are clearly labeled. |
 | P0-04 | Lobby discovery | Players can Quick Play, browse public lobbies, join private lobbies, and filter at least by region. |
@@ -1271,7 +1289,7 @@ The polished vertical slice is successful when:
 5. Public, private, Quick Play, nomination, automatic start, host migration, and return-to-lobby flows behave coherently.
 6. A normal-match disconnect can reconnect within the 60-second reservation policy without corrupting the round.
 7. Spectator and Answer Check flows reveal results correctly and enforce one non-self like.
-8. Keychain and the optional Google path reach persistent Hive-linked identity without creating a guest profile; a first-time Google-authenticated player receives one RC-enabled real Hive account, acknowledges the permanent-public-record disclosure, can use supported posting/payment actions without wallet setup, and retains a claim path that transfers both account authorities and the recovery role as defined.
+8. Keychain and the optional Google path reach persistent Hive-linked identity without creating a guest profile; a first-time Google-authenticated player receives one sponsor-created, RC-enabled real Hive account, acknowledges the permanent-public-record disclosure, can use supported posting/payment actions without wallet setup, and retains a claim path that transfers both account authorities and the recovery role as defined.
 9. The official service publishes completed results as batched, server-attested Hive summaries, and an irreversible summary is publicly retrievable as the canonical immutable record of the published match summary.
 10. Desktop and Chrome web players can complete compatible cross-platform sessions.
 11. Desktop and web meet at least 30 FPS at 1080p low on the agreed ordinary-laptop baseline.
@@ -1327,7 +1345,10 @@ The following decisions are intentionally unresolved:
 
 The paired Technical Architecture & Tech Stack document should resolve implementation choices for:
 
-- Cross-platform Hive authentication/signing; Google OIDC identity mapping; permanent-username confirmation; claimed-account-token provisioning; custodial key-service signing; initial RC delegation; idempotent recovery; owner-authority rotation; and the delayed recovery-account transition for self-custody claim
+- Cross-platform Hive authentication/signing; Google OIDC identity mapping; permanent-username
+  confirmation; sponsor/signup-code account creation; custodial key-service signing; verified
+  sponsor-backed initial RC; idempotent recovery; owner-authority rotation; and the delayed
+  recovery-account transition for self-custody claim
 - Required-Hive availability checks and failure behavior
 - Authoritative role, weapon, score, collision, timer, and reconnect state
 - Periodic `custom_json` match-summary batching, canonical payloads, server attestation, publication retries, irreversibility, HAF reads, and RC budgeting

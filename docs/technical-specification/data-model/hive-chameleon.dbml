@@ -472,7 +472,6 @@ Enum hive_projection.authorization_mode {
 }
 
 Enum hive_projection.service_account_role {
-  provisioning
   match_publisher
   collectible_issuer
   treasury
@@ -506,6 +505,11 @@ Enum hive_projection.reconciliation_state {
 Enum hive_projection.rc_delegation_purpose {
   initial_provisioning
   general_support
+}
+
+Enum hive_projection.rc_delegator_kind {
+  approved_signup_sponsor
+  platform_rc_support
 }
 
 Enum hive_projection.rc_delegation_status {
@@ -567,7 +571,10 @@ Table identity.hive_account_provisioning {
   idempotency_key varchar(128) [not null, unique]
   requested_hive_username varchar(16) [not null]
   state identity.provisioning_state [not null, default: 'username_confirmed']
-  provisioning_hive_account varchar(16) [not null]
+  sponsor_program varchar(64) [not null]
+  sponsor_policy_version varchar(32) [not null]
+  sponsor_hive_account varchar(16) [not null]
+  sponsor_request_reference varchar(128) [note: 'Opaque, non-secret reference returned by the approved signup sponsor']
   account_creation_transaction_id varchar(128)
   account_creation_operation_id uuid [unique]
   initial_rc_delegation_id uuid [unique]
@@ -588,12 +595,13 @@ Table identity.hive_account_provisioning {
   indexes {
     (requested_hive_username, state) [name: 'idx_provisioning_username']
     (state, next_retry_at) [name: 'idx_provisioning_retry']
+    (sponsor_program, sponsor_request_reference) [unique, name: 'uq_provisioning_sponsor_request']
     account_creation_transaction_id [name: 'idx_provisioning_creation_tx']
   }
 
   checks {
     `requested_hive_username = lower(requested_hive_username)` [name: 'chk_provisioning_username_lower']
-    `provisioning_hive_account = lower(provisioning_hive_account)` [name: 'chk_provisioning_account_lower']
+    `sponsor_hive_account = lower(sponsor_hive_account)` [name: 'chk_provisioning_sponsor_account_lower']
     `attempt_count >= 0` [name: 'chk_provisioning_attempts']
     `(state <> 'keys_ready') OR keys_ready_at IS NOT NULL` [name: 'chk_provisioning_keys_ready']
     `(state <> 'account_created') OR account_observed_at IS NOT NULL` [name: 'chk_provisioning_account_created']
@@ -601,7 +609,7 @@ Table identity.hive_account_provisioning {
     `(state <> 'ready') OR (resulting_player_id IS NOT NULL AND keys_ready_at IS NOT NULL AND account_irreversible_at IS NOT NULL AND authorities_verified_at IS NOT NULL AND initial_rc_delegation_id IS NOT NULL AND rc_verified_at IS NOT NULL AND ready_at IS NOT NULL)` [name: 'chk_provisioning_ready']
   }
 
-  Note: 'One row is retried through partial and uncertain outcomes; no player or playable auth_session exists until ready. Migration makes requested_hive_username unique for every job except a terminal failure with no observed account, and immutable after any matching account is observed.'
+  Note: 'One row is retried through partial and uncertain sponsor outcomes; no player or playable auth_session exists until ready. Migration makes requested_hive_username unique for every job except a terminal failure with no observed account, and immutable after any matching account is observed. Raw signup codes and sponsor API credentials are never stored.'
 }
 
 Table identity.custody_key_reference {
@@ -2271,7 +2279,8 @@ Table hive_projection.rc_delegation {
   provisioning_id uuid
   recipient_hive_username varchar(16) [not null]
   delegator_hive_account varchar(16) [not null]
-  delegator_service_role hive_projection.service_account_role [not null]
+  delegator_kind hive_projection.rc_delegator_kind [not null]
+  delegator_service_role hive_projection.service_account_role
   purpose hive_projection.rc_delegation_purpose [not null]
   required_authority hive_projection.authority_type [not null, default: 'posting']
   application_id varchar(64) [not null, default: 'rc']
@@ -2302,15 +2311,15 @@ Table hive_projection.rc_delegation {
     `player_id IS NOT NULL OR provisioning_id IS NOT NULL` [name: 'chk_rc_delegation_subject']
     `recipient_hive_username = lower(recipient_hive_username)` [name: 'chk_rc_delegation_recipient_lower']
     `delegator_hive_account = lower(delegator_hive_account)` [name: 'chk_rc_delegation_delegator_lower']
-    `delegator_service_role IN ('provisioning', 'rc_support')` [name: 'chk_rc_delegation_service_role']
-    `(purpose <> 'initial_provisioning') OR (provisioning_id IS NOT NULL AND delegator_service_role = 'provisioning')` [name: 'chk_rc_delegation_initial']
-    `(purpose <> 'general_support') OR (player_id IS NOT NULL AND delegator_service_role = 'rc_support')` [name: 'chk_rc_delegation_general']
+    `(delegator_kind = 'approved_signup_sponsor' AND delegator_service_role IS NULL) OR (delegator_kind = 'platform_rc_support' AND delegator_service_role = 'rc_support')` [name: 'chk_rc_delegation_owner']
+    `(purpose <> 'initial_provisioning') OR (provisioning_id IS NOT NULL AND delegator_kind = 'approved_signup_sponsor')` [name: 'chk_rc_delegation_initial']
+    `(purpose <> 'general_support') OR (player_id IS NOT NULL AND delegator_kind = 'platform_rc_support')` [name: 'chk_rc_delegation_general']
     `required_authority = 'posting' AND application_id = 'rc' AND payload_operation = 'delegate_rc'` [name: 'chk_rc_delegation_wrapper']
     `delegated_max_rc > 0` [name: 'chk_rc_delegation_max_rc']
     `cooldown_until IS NULL OR eligible_at IS NULL OR cooldown_until >= eligible_at` [name: 'chk_rc_delegation_cooldown']
   }
 
-  Note: 'RC is max_rc capacity, not HIVE, HP, or content-vote weight. Grant/reclaim use posting-authority custom_json application id rc with a delegate_rc payload. Migration adds partial active uniqueness by delegator, recipient, and purpose; initial provisioning may exist before player creation and is linked later.'
+  Note: 'RC is max_rc capacity, not HIVE, HP, or content-vote weight. Initial capacity is supplied by the approved signup sponsor and projected from observed Hive evidence; a separate platform rc_support role may grant later general support. Grant/reclaim evidence uses posting-authority custom_json application id rc with a delegate_rc payload. Migration adds partial active uniqueness by delegator, recipient, and purpose; initial provisioning may exist before player creation and is linked later.'
 }
 
 Table hive_projection.sync_cursor {

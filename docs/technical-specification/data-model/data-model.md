@@ -54,7 +54,7 @@ The model follows the current Hive-layer decisions:
 - Match summaries are server-attested, not trustless re-simulation. Players do not sign them, and the game server remains the result oracle. Corrections and invalidations are later append-only events.
 - Completed normal and tournament rounds may use the same summary protocol. Tournament eligibility, brackets, winner calculation, and aggregate state remain in PostgreSQL; entry and payout value movement uses native HIVE/HBD or Hive-Engine operations.
 - Collectibles use official issuance/revocation events, while map showcases use native Hive posts and votes. PostgreSQL projections do not replace Hive as the source of truth for those accepted public events.
-- Provisioning, match publishing, collectible issuance, treasury payments, and later general RC support are separate official service-account roles. They never reuse player custody keys or each other's signing credentials.
+- Provisioning is coordinated through the external signup sponsor and is not a platform service-account role. Match publishing, collectible issuance, treasury payments, and later general RC support remain separate official service-account roles; none reuse player custody keys or each other's signing credentials.
 - During a Hive outage, active matches and other non-Hive gameplay continue. New Hive authentication/provisioning and Hive-dependent player actions pause; completed match summaries remain durable in the publication outbox for server-owned retry. No active match is aborted solely because Hive is unavailable.
 
 ## 3. Modeling principles
@@ -90,7 +90,7 @@ The ERD contains 70 application tables grouped into the existing seven PostgreSQ
 | Entity | Responsibility | Important relationships and rules |
 | --- | --- | --- |
 | `identity.external_identity` | Stable verified Google OIDC identity before and after provisioning | Unique provider/issuer/keyed-subject hash; optional player link; stores neither email nor raw subject/tokens |
-| `identity.hive_account_provisioning` | One durable, idempotent real-Hive-account creation job | Unique external identity and idempotency key; requested permanent username, lifecycle, creation/RC operation references, retries, verification, optional resulting player |
+| `identity.hive_account_provisioning` | One durable, idempotent sponsor-backed real-Hive-account creation job | Unique external identity and idempotency key; requested permanent username, sponsor policy/request reference, creation/RC operation references, retries, verification, optional resulting player; no raw signup code |
 | `identity.custody_key_reference` | Non-secret lifecycle row for one custodial owner, active, posting, or memo key | Belongs to provisioning and later player; stores public key and opaque provider reference only; destruction evidence is non-secret |
 | `identity.hive_account_claim` | Authority rotation, custody destruction, and delayed recovery-account transition | One pending claim per player; references one owner-authorized intent, both included operations, the later virtual operation, and distinct completion milestones |
 | `identity.public_record_disclosure` | Versioned permanent-public-record disclosure definition | Content SHA-256 proves which disclosure version was shown |
@@ -110,8 +110,9 @@ The Google lifecycle represented by these rows is:
 Google verified
 → username confirmed
 → custody public keys ready
-→ Hive account created
-→ initial RC delegated
+→ sponsor request accepted
+→ sponsored Hive account created
+→ sponsor-backed initial RC verified
 → player ready
 → optional authority claim
 → custodial signing disabled and keys destroyed
@@ -119,9 +120,15 @@ Google verified
 → full self-custody
 ```
 
-Provisioning retries the same job through uncertain or partial outcomes. A response timeout after `create_claimed_account` triggers an on-chain name and expected-authority comparison; an independently created or mismatched account is never linked. Failure after account creation resumes at initial RC delegation. Reversible creation/delegation, database failure after broadcast, Hive outage, custody-provider outage, and unavailable Account Creation Token/RC capacity remain recoverable states. If a username is taken before a matching creation succeeds, the same job returns to username confirmation.
+Provisioning retries the same sponsor request through uncertain or partial outcomes. A sponsor
+timeout triggers an on-chain creator/recovery, name, and expected-authority comparison; an
+independently created or mismatched account is never linked. Failure after account creation
+resumes at sponsor RC verification/support without submitting a second signup. Reversible
+creation/RC evidence, database failure after sponsor success, Hive outage, custody-provider
+outage, and unavailable sponsor/signup capacity remain recoverable states. If a username is
+taken before matching creation succeeds, the same job returns to username confirmation.
 
-Claim transfers the same account and never exports the old custodial private keys. The claim row distinguishes irreversible authority rotation, disabled custodial signing, destruction of all four old keys, the still-effective provisioning recovery account, and final recovery-account effectiveness. `self_custody_complete` is impossible until the selected non-platform recovery account becomes effective after Hive's approximately 30-day delay and HAF observes current account state plus `changed_recovery_account`.
+Claim transfers the same account and never exports the old custodial private keys. The claim row distinguishes irreversible authority rotation, disabled custodial signing, destruction of all four old keys, the still-effective sponsor/creator recovery account, and final recovery-account effectiveness. `self_custody_complete` is impossible until the selected non-platform recovery account becomes effective after Hive's approximately 30-day delay and HAF observes current account state plus `changed_recovery_account`.
 
 Authentication and signing remain independent. Google OIDC authenticates a game session but does not authorize a Hive transaction. Before claim, an eligible Google session can create an explicit allow-listed custodial posting/active intent. Direct-Hive and claimed players use an external Hive signer. The exact post-claim Google-session behavior remains open.
 
@@ -229,7 +236,7 @@ There is no separate custom tournament-settlement, bracket, or payout-calculatio
 | `hive_projection.community_post` | Current map showcase post projection | Unique author/permlink with created and latest operation references |
 | `hive_projection.community_vote` | Current voter state for a showcase post | Unique voter per post; later votes replace the projected current state |
 | `hive_projection.transaction_intent` | Server-generated operation intent and idempotency record | Separates external-wallet, custodial-player, and official-service authorization; references eligible session/key or isolated service role; never stores keys |
-| `hive_projection.rc_delegation` | Initial-provisioning or later RC-support lifecycle | Posting-authority `custom_json` ID `rc`, `delegate_rc` payload, max-RC amount, purpose/service role, grant/reclaim/finality and eligibility evidence |
+| `hive_projection.rc_delegation` | Sponsor-supplied initial RC or later platform RC-support lifecycle | Expected posting-authority `custom_json` ID `rc`/`delegate_rc` evidence, max-RC amount, delegator kind, optional platform service role, grant/reclaim/finality and eligibility evidence |
 | `hive_projection.sync_cursor` | Per-source indexer progress and health | Tracks processed and irreversible blocks |
 
 The full validated match event remains in `operation.payload`; the typed match tables duplicate only identities, versions, hashes, foreign keys, current-chain state, and reconciliation fields needed for integrity and operational queries. They do not reproduce participant, discovery, or like detail as a second authoritative gameplay model. Those facts remain in `game.round_participant`, `game.round_discovery`, and `game.round_like`.
@@ -248,11 +255,17 @@ The database holds only Hive public keys, deterministic public authority text, o
 - Hive master passwords, seeds, recovery material, or exported credential files;
 - custodial key plaintext or a provider credential capable of retrieving it;
 - raw Google ID/access/refresh tokens or the raw OIDC subject used for lookup; or
-- provisioning, match-publisher, issuer, treasury, or RC-support private keys.
+- sponsor, match-publisher, issuer, treasury, or RC-support private keys or raw signup codes.
 
-No KMS, HSM, or Vault product is selected by this model. The provider remains gated by a feasibility/cost spike for secp256k1, Hive-compatible compact signatures, per-key authorization, non-exportability, destruction evidence, scaling, and optional future memo shared-secret support. The memo key is tracked for account creation and rotation; encrypted memo processing is not promised by this schema.
+No production KMS, HSM, or custody product is selected by this model. Standard HashiCorp Vault Transit is not a drop-in candidate because its documented ECDSA key types omit secp256k1; a custom Vault plugin or HSM integration would be a distinct provider design. Every candidate remains gated by a feasibility/cost spike for secp256k1, Hive-compatible compact signatures, per-key authorization, non-exportability, destruction evidence, scaling, and optional future memo shared-secret support. The memo key is tracked for account creation and rotation; encrypted memo processing is not promised by this schema.
 
-Official roles remain distinct: the provisioning account maintains the Account Creation Token pool, creates accounts, and supplies initial RC; the match publisher signs public match attestations; the issuer signs collectible events; the treasury signs payouts; and the RC-support role handles later assistance/reclaim. `transaction_intent.official_service_role` records the authorization class without storing a service key. Official service-account owner authorities remain offline and outside the application model. Production account names remain configuration, not schema values.
+The external signup sponsor is not a platform service role and its Hive keys never enter the
+system. Platform official roles remain distinct: the match publisher signs public match
+attestations; the issuer signs collectible events; the treasury signs payouts; and the RC-support
+role handles later assistance/reclaim. `transaction_intent.official_service_role` records those
+authorization classes without storing a service key. Official service-account owner authorities
+remain offline and outside the application model. Production account names remain configuration,
+not schema values.
 
 ## 6. Primary cardinalities
 
@@ -284,8 +297,15 @@ For Google onboarding:
 1. The backend validates the OIDC signature, configured issuer/audience, expiration, nonce/callback correlation, and subject. It derives `subject_lookup_hash` with a keyed HMAC whose key is outside PostgreSQL.
 2. It upserts the unique `external_identity`, records the required disclosure acknowledgment, and creates or resumes its single logical provisioning job after permanent username confirmation.
 3. The custody boundary creates separate owner, active, posting, and memo keys. The job stores only their public keys and opaque references and advances to `keys_ready` only after all four rows exist.
-4. The dedicated provisioning account uses an Account Creation Token through `create_claimed_account`. Its separate pool-maintenance `claim_account` operations consume that account's RC and are visible through `hive_projection.operation` but do not create player-key rows. Account creation and initial RC capacity are platform costs, not player charges.
-5. The same provisioning role supplies initial RC through posting-authority `custom_json` ID `rc` with a `delegate_rc` payload. `rc_delegation.delegated_max_rc` is RC capacity, not HIVE, HP, or content-vote weight.
+4. The provisioning worker submits one idempotent request to the configured signup sponsor using
+   a versioned policy and the permanent username plus four expected custody public authorities.
+   It stores only an opaque non-secret sponsor request reference; raw signup codes/API credentials
+   remain outside PostgreSQL.
+5. The worker accepts creation and initial RC only after Hive shows the configured sponsor/creator,
+   exact account and recovery account, exact authorities, and sufficient irreversible RC support.
+   If the sponsor uses `create_claimed_account` and `delegate_rc`, those operations are projected
+   as external sponsor evidence. `rc_delegation.delegated_max_rc` remains RC capacity, not HIVE,
+   HP, or content-vote weight granted to the player.
 6. The job reaches `ready` only after irreversible account creation, observed authority equality, and verified initial RC. One transaction creates/links the player, updates the pending disclosure row with that player, and issues a playable session.
 
 Concurrent callbacks and workers serialize on the same external identity/job. An uncertain broadcast is reconciled against Hive before retry. A matching already-created account resumes the same job; a mismatched account is rejected. A database failure after an on-chain success, RC failure after creation, fork rollback, or dependency outage changes retry state without creating a second job, Hive account, or player.
@@ -304,7 +324,10 @@ Claim is one idempotent workflow for the existing Hive account:
 2. Build one current-owner-authorized transaction containing `change_recovery_account` followed by `account_update2`; reference the one intent and both projected operations from the claim row.
 3. Keep `authority_rotation_pending` until the transaction is irreversible, all new authorities match a fresh Hive read, and the pending recovery request names the selected account. A fork or uncertain response never triggers destruction.
 4. Disable custodial signing and request destruction of all four old key references. Record separate signing-disabled, destruction-requested/completed, and non-secret evidence timestamps. Partial destruction remains `custody_destruction_pending` and cannot be mislabeled complete.
-5. Enter `recovery_change_pending`. The provisioning account remains the effective recovery account during Hive's approximately 30-day delay even though the platform can no longer sign normal operations.
+5. Enter `recovery_change_pending`. The sponsor/creator account remains the effective recovery
+   account during Hive's approximately 30-day delay. The platform can no longer sign normal
+   operations and does not control the sponsor's recovery authority, but the third-party role
+   remains visible until Hive applies the change.
 6. Mark `self_custody_complete` only after HAF observes the selected recovery account in current account state and the corresponding `changed_recovery_account` virtual operation.
 
 The claim never exports the old platform keys or creates a replacement account. Authority rotation, custody destruction, recovery effectiveness, and full completion remain independently auditable.
@@ -523,7 +546,10 @@ An active-showcase uniqueness rule may be added when the publication workflow is
 - Freeze outbox event/batch UUIDs, canonical payload text, and payload SHA-256 after the first broadcast attempt. Rebuilt transactions may update only attempt/transaction/finality metadata.
 - Accept match projections only when the referenced operation is posting-authority `custom_json` under the approved `hive.chameleon` namespace, its signer equals an allow-listed publisher, and the envelope/payload validate. Keep operation/event fork states synchronized, roll back pending derived pointers on reversion, and replay idempotently by event UUID.
 - Enforce one linear projected correction/invalidation chain, advance the current event under projector control, and compare versions/map/hash against the immutable local revision. An irreversible mismatch creates a divergence incident state instead of updating either source.
-- Verify an initial RC grant/reclaim operation is posting-authority `custom_json` with application ID `rc` and a valid `delegate_rc` payload. Enforce provisioning role/purpose for initial RC and the separate RC-support role for later assistance.
+- Verify sponsor-backed initial RC against the configured sponsor account/policy, exact recipient,
+  minimum max-RC, expected operation schema, and irreversibility. Require the sponsor delegator
+  kind and no platform service role for initial provisioning; require the separate RC-support
+  role for later platform assistance/reclaim.
 - Prevent mutation of a submitted map version's identity, manifest, package, and asset content; permit only controlled review/status timestamp transitions. A content change creates a new version.
 - Keep the open `lobby_host_assignment` and `lobby.current_host_player_id` synchronized.
 - Validate that the current host and every round participant belong to the relevant lobby lifecycle.
@@ -587,6 +613,8 @@ The model is deliberately broad enough to support the approved P0/P1 product flo
 - Google issuer/subject relinking or replacement.
 - Whether Google remains an accepted game-session credential after self-custody claim.
 - Production custody-provider selection after the required capability/feasibility/cost spike.
+- Signup-sponsor selection, exact account-creation/RC contract, creator/recovery account,
+  signup-code policy, capacity signal, and minimum initial RC.
 - Exact valid non-platform recovery-account selection and proof policy.
 - Exact player-facing claim and self-custodial credential UI.
 - Initial/general RC amounts, eligibility thresholds, cooldowns, and reclaim policy.
@@ -615,7 +643,8 @@ The source currently compiles successfully with the DBML CLI. A successful expor
 - [x] Primary keys, foreign keys, cardinalities, enums, indexes, and checks are defined.
 - [x] Direct-Hive and Google identity, pending provisioning, custody references, claim/recovery, and disclosure acknowledgment have explicit boundaries without stored secrets.
 - [x] Batched match publication separates immutable operational results/outbox data from fork-aware HAF projections and append-only corrections/invalidations.
-- [x] Collectible ownership, community posts/votes, RC delegation, and payment projections have explicit authority boundaries.
+- [x] Collectible ownership, community posts/votes, sponsor-backed initial RC, later RC support,
+  and payment projections have explicit authority boundaries.
 - [x] Live Nakama/Redis state and object-storage content are excluded from relational persistence.
 - [x] Completed versus aborted round persistence is defined.
 - [x] Map versioning, review, and platform distribution are modeled.

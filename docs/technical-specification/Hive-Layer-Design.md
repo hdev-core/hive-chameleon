@@ -31,7 +31,10 @@ Real-time gameplay and complete operational product data remain off-chain. Postg
 13. A Google-provisioned Hive account is custodial by default. Fresh owner, active, posting, and memo keys are generated inside a non-exportable production custody boundary that has passed the Hive capability spike; the general backend receives key references and public keys, not raw private key material.
 14. Until claim, the backend may request posting- and active-authority signatures for the Google-provisioned account after an explicit authenticated player action. No Keychain or HiveAuth setup is required for those actions.
 15. Claim rotates owner, active, posting, and memo authorities to player-controlled keys through `account_update2` and requests a non-platform recovery account through `change_recovery_account`. Custodial key material is destroyed after the authority rotation is irreversible and verified; full self-custody status waits for Hive's 30-day recovery-account change to become effective.
-16. A dedicated provisioning Hive account, isolated from the match publisher, issuer, treasury, and RC-support accounts, maintains an Account Creation Token pool with `claim_account`, creates users with `create_claimed_account`, and supplies initial pure RC delegation through posting-authority `custom_json` ID `rc` with a `delegate_rc` payload.
+16. An approved external signup sponsor creates each Google-provisioned account with the exact
+    custody public authorities and supplies its initial RC under a versioned signup-code policy.
+    The platform coordinates and verifies this flow but does not maintain its own HP-funded
+    Account Creation Token pool or hold the sponsor's Hive keys.
 
 Decisions 13-16 implement the management-confirmed cross-project Google onboarding standard supplied for this revision. The custody model and capabilities are requirements; the provider-specific feasibility, recovery-account UX, and operational thresholds remain implementation decisions called out below.
 
@@ -40,7 +43,7 @@ Decisions 13-16 implement the management-confirmed cross-project Google onboardi
 | Capability | On-chain responsibility | Off-chain responsibility |
 | --- | --- | --- |
 | Hive account identity | Standard Hive account and its authorities; signed proof for direct-Hive authentication | Google OIDC subject mapping for Google-authenticated players, session, profile, device policy, permissions, and claim state |
-| Google-provisioned Hive account | `claim_account`, `create_claimed_account`, initial posting-authority `custom_json` ID `rc`/`delegate_rc`, and claim through `account_update2` plus `change_recovery_account` | Username confirmation, idempotent provisioning state, non-secret custody references, recovery-transition state, abuse controls, and recoverable UI state |
+| Google-provisioned Hive account | Sponsor-backed account creation and initial RC, followed by claim through `account_update2` plus `change_recovery_account` | Username confirmation, sponsor policy/request reference, idempotent provisioning state, non-secret custody references, recovery-transition state, abuse controls, and recoverable UI state |
 | Gameplay, matches, and results | Irreversible batched summaries of completed rounds, signed by the allow-listed official publisher | Live authoritative state, reconnect, detailed telemetry, scoring calculation, and complete result |
 | Statistics and achievements | None | Progress, unlock conditions, statistics |
 | Collectible badges | Issuance/revocation and ownership | Definition, progress, images, presentation |
@@ -70,6 +73,8 @@ flowchart TD
     C --> D
     B --> P["Account provisioning service"]
     P --> K["Approved custody boundary"]
+    P --> S["Approved signup and RC sponsor"]
+    S --> E
     P --> D
     D --> K
     D --> G["Isolated service signers"]
@@ -110,7 +115,8 @@ Hive Keychain documents browser injection and supports signing buffers, transact
 - Coordinates HiveAuth and HiveSigner flows for desktop clients.
 - Verifies returned signatures or transaction details before the backend accepts the action.
 - Validates explicit player operation intents for Google-provisioned Hive accounts and routes them to the custodial signer for the mapped, unclaimed account.
-- Constructs allow-listed provisioning and `change_recovery_account` plus `account_update2` claim transactions for the account provisioning service.
+- Validates sponsor-created account/RC evidence and constructs the allow-listed
+  `change_recovery_account` plus `account_update2` claim transaction.
 - Submits service-authorized collectible events to the isolated issuer signer.
 - Builds validated `match_results_batch`, correction, and invalidation events from completed server results and submits them to the isolated match-publisher signer.
 - Submits approved payouts to the isolated treasury signer.
@@ -122,7 +128,11 @@ WAX provides Hive protocol functionality for TypeScript/JavaScript and supports 
 
 - Accepts only authenticated internal requests tied to a verified Google OIDC subject and one mapped provisioning record.
 - Requires the selected custody boundary to generate distinct, non-exportable secp256k1 owner, active, posting, and memo key pairs. It stores only public keys, opaque provider key identifiers, lifecycle state, and audit metadata outside that boundary.
-- Uses the dedicated provisioning account to create the new standard Hive account from the Account Creation Token pool and to delegate initial Resource Credits.
+- Sends the approved sponsor one idempotent signup request containing the permanent username and
+  exact expected public authorities. It stores only the sponsor policy version and a stable,
+  non-secret request reference; raw signup credentials are never stored in product tables.
+- Requires irreversible Hive evidence that the configured sponsor created the exact account with
+  matching authorities and supplied the required initial RC before linking a player.
 - Requests a posting- or active-authority signature only for the mapped unclaimed account and only after the backend supplies an authenticated, allow-listed player intent.
 - Uses the custodied owner key only for the approved `account_update2` plus `change_recovery_account` claim transaction; ordinary gameplay, posting, payment, and service operations cannot request it.
 - After authority-rotation finality, destroys all custodied owner, active, posting, and memo key material for that player and retains only a non-secret destruction audit record; recovery-transition tracking continues separately.
@@ -135,7 +145,19 @@ Provider selection remains open until a feasibility and cost spike proves the co
 - Enforce independent policy for owner, active, posting, and memo keys; support revocation and verifiable cryptographic destruction; and scale to one isolated key set per Google-provisioned account.
 - Keep the memo private key non-exportable. If encrypted Hive memo support is introduced, the provider or a separately approved hardened boundary must also perform Hive-compatible secp256k1 shared-secret derivation without releasing the key.
 
-No generic KMS/HSM/Vault label proves those capabilities. AWS KMS documents `ECC_SECG_P256K1` for signing but excludes it from supported shared-secret derivation, while standard HashiCorp Vault Transit lists NIST P-curve ECDSA types rather than secp256k1. Therefore encrypted memo processing is not an MVP capability, provider names are candidates rather than commitments, and a split signing/memo design cannot ship without a separate security review. See the [AWS KMS key-spec reference](https://docs.aws.amazon.com/kms/latest/developerguide/symm-asymm-choose-key-spec.html) and [Vault Transit key types](https://developer.hashicorp.com/vault/docs/secrets/transit).
+No generic KMS/HSM/Vault label proves those capabilities. The AWS KMS spike proved the signing
+conversion, but its per-key topology and missing secp256k1 shared-secret derivation did not pass
+the production provider gate. Standard HashiCorp Vault Transit documents NIST P-curve ECDSA
+types rather than secp256k1, so it is not a drop-in Hive signer. A custom Vault plugin,
+externally managed-key design, or direct HSM integration is a distinct design that must pass the
+full spike.
+Encrypted memo processing is therefore not an MVP capability, and a split signing/memo design
+cannot ship without a separate security review. See the
+[AWS KMS key-spec reference](https://docs.aws.amazon.com/kms/latest/developerguide/symm-asymm-choose-key-spec.html)
+and [Vault Transit key types](https://developer.hashicorp.com/vault/docs/secrets/transit).
+The validated signature conversion and the remaining provider gate are recorded in the
+[managed secp256k1 signing recipe](./integrations/managed-secp256k1-hive-signing.md) and
+[third-party integration register](./integrations/third-party-integration-register.md).
 
 Raw custodial keys must never be placed in environment variables, source, logs, Unity assets, or general application memory. An encrypted secret or prototype vault is allowed only for an explicitly non-production prototype with no real-value flow and a documented migration to a provider that passes the production capability spike.
 
@@ -236,6 +258,7 @@ sequenceDiagram
     participant B as Auth backend and database
     participant P as Provisioning service
     participant K as Approved custody boundary
+    participant S as Approved signup and RC sponsor
     participant H as Hive
     U->>O: Complete Google sign-in
     O-->>B: Verifiable OIDC result
@@ -245,14 +268,25 @@ sequenceDiagram
     B->>P: Start idempotent provisioning job
     P->>K: Generate owner, active, posting, memo keys
     K-->>P: Public keys and opaque key references
-    P->>H: create_claimed_account
-    P->>H: posting custom_json id rc / delegate_rc
+    P->>S: Idempotent signup request, username, expected authorities
+    S->>H: Create exact account and supply initial RC
     H-->>P: Account and RC status
     P-->>B: Mark mapped account ready
     B-->>U: Access and refresh session
 ```
 
-The provisioning account replenishes its Account Creation Token pool separately with `claim_account`, which consumes that account's RC rather than a per-user HIVE fee. Signup uses one token through `create_claimed_account`, then a posting-authority `custom_json` with ID `rc` and a `delegate_rc` payload supplies pure Resource Credits without delegating HP or content-vote weight. The account is not marked ready to play until creation and the initial RC delegation have both been observed and validated.
+The sponsor contract must accept the four expected public authorities, create that exact Hive
+account, and supply enough initial RC without charging the player. The platform does not operate
+a large HP-staked provisioning account, replenish an Account Creation Token pool, or receive the
+sponsor's Hive keys. If the sponsor uses `create_claimed_account` and `delegate_rc`, those are
+observed and validated as sponsor operations, not signed by the platform. The account is not
+marked ready until irreversible creation, exact authority equality, configured creator/recovery
+account, and initial RC support are all verified from Hive.
+
+The raw signup code or sponsor API credential lives only in the provisioning secret boundary.
+The durable job records a versioned sponsor policy and opaque non-secret request reference so a
+retry resumes the same sponsor request instead of consuming another code or creating a second
+account. Actifit is a candidate example, not a selected sponsor.
 
 A returning verified OIDC subject resumes its existing account and any incomplete provisioning state. Linking a pre-existing Hive account to Google, changing the mapped Google subject, and post-claim Google session behavior are not defined by the confirmed standard and remain open decisions; no implementation may silently perform those transitions.
 
@@ -262,10 +296,15 @@ Provisioning is a durable state machine keyed by the verified OIDC issuer/subjec
 
 Recovery rules:
 
-- An uncertain `create_claimed_account` response is reconciled by reading Hive for the selected name and comparing its owner, active, posting, and memo public authorities with the stored expected public keys. A matching account continues the same job; a mismatching or independently created account is never linked.
-- If the selected name is taken before a matching platform creation succeeds, the job returns to username selection without treating that unrelated account as the player.
-- If account creation succeeds but `delegate_rc` fails, retries resume at RC delegation and never create a second account or new identity mapping.
-- KMS, Hive, Account Creation Token, or RC-capacity outages leave the job pending with a visible retry state. The same persisted job resumes after recovery.
+- An uncertain sponsor response is reconciled by reading Hive for the selected name and comparing
+  the creator/recovery account plus owner, active, posting, and memo public authorities with the
+  configured sponsor policy and stored expected public keys. A matching account continues the
+  same job; a mismatching or independently created account is never linked.
+- If the selected name is taken before matching sponsor creation succeeds, the job returns to username selection without treating that unrelated account as the player.
+- If account creation succeeds but sponsor RC support is not yet verified, retries resume at RC
+  verification/support and never submit a second account-creation request or identity mapping.
+- Custody, Hive, sponsor, signup-capacity, or RC-capacity outages leave the job pending with a
+  visible retry state. The same persisted job resumes after recovery.
 - A job reaches `ready` only after the account, expected authorities, and initial RC support are verified. Forked reversible provisioning operations return to a pending state and are reconciled before play is enabled.
 - Abandoned key material for an account that was never created is destroyed under the custodial key-retention policy; this cleanup cannot delete keys for an account observed on Hive.
 
@@ -276,7 +315,10 @@ Rate limits and abuse controls apply per OIDC subject, device/risk signal, sourc
 - Direct-Hive login approval occurs once when establishing a session. Google OIDC session establishment does not create or verify a Hive signature.
 - Every self-custodial player-originated post, vote, or financial transfer requires explicit approval through the selected Hive signing provider.
 - For an unclaimed Google-provisioned account, each post, vote, or financial transfer requires an explicit authenticated in-product intent or confirmation. The approved custodial signer signs only the validated operation for that mapped account; no external wallet prompt is required.
-- The application performs no silent or unrelated background player signing. Server-owned match publication, collectible issuance, treasury payouts, provisioning-pool maintenance, and initial RC delegation are separately authorized official operations.
+- The application performs no silent or unrelated background player signing. Server-owned match
+  publication, collectible issuance, treasury payouts, and later RC support are separately
+  authorized official operations. Sponsor-backed account creation and initial RC use the sponsor
+  contract and no platform Hive signer.
 - Rejection affects only the requested action unless it is the required login action.
 - Declining a map-showcase post leaves the draft unpublished.
 - Declining a tournament payment leaves the player unregistered.
@@ -293,16 +335,19 @@ Rate limits and abuse controls apply per OIDC subject, device/risk signal, sourc
 | Google-provisioned Hive account active authority | Explicitly confirmed HIVE/HBD and AFIT/Hive-Engine transfers before claim | Distinct per-player key in the approved custody boundary; raw material unavailable to Unity and the general backend |
 | Google-provisioned Hive account posting authority | Explicitly initiated showcase posts, votes, and other approved posting operations before claim | Distinct per-player key in the approved custody boundary; raw material unavailable to Unity and the general backend |
 | Google-provisioned Hive account memo key | Set at account creation and rotated during claim; encrypted memo processing is not an MVP capability | Distinct per-player non-exportable secp256k1 key; not an operation-signing authority and not exposed to clients/general backend |
-| Provisioning account active authority | `claim_account` and `create_claimed_account` | Dedicated isolated service signer with staked HP and an Account Creation Token pool |
-| Provisioning account posting authority | Initial RC `custom_json` ID `rc` with `delegate_rc` payload | Dedicated isolated service signer using least privilege; separate from its active key and every other service role |
-| Provisioning account recovery role | Default recovery account for accounts it creates; transitional only after a claim request | Remains on-chain for Hive's 30-day change delay, then must be replaced by the player's selected valid non-platform recovery account |
+| Approved signup sponsor | Account creation and initial RC only | External provider contract; the platform stores no sponsor Hive key or raw signup credential and accepts only matching irreversible Hive evidence |
+| Sponsor recovery role | The configured sponsor/creator may be the initial recovery account; transitional only after a claim request | Remains on-chain for Hive's 30-day change delay, then must be replaced by the player's selected valid non-platform recovery account; the platform does not control this role |
 | Official match-publisher posting authority | `match_results_batch`, `match_result_corrected`, and `match_result_invalidated` | Isolated service signer; unavailable to Unity and the general gameplay process |
 | Official issuer posting authority | `collectible_issued` and `collectible_revoked` | Isolated signing service; unavailable to Unity and general game services |
 | Treasury active authority | Approved tournament payouts | Isolated payout signer with allow-lists, limits, and audit trail |
 | RC-support authority | Controlled RC delegation/reclaim | Isolated administrative signer; not shared with issuer or gameplay processes |
 | Official service-account owner authorities | Recovery/governance only | Offline; never requested or used by the application |
 
-The provisioning account, per-player custodial keys, match publisher, issuer, treasury, and RC-support account are separate trust roles and credentials. They must not be collapsed into one Hive account or signer for convenience. In particular, the match publisher never creates accounts or signs on behalf of a player, and the provisioning account never publishes results, issues collectibles, or holds tournament funds. Production account names and custody procedures require explicit operational approval.
+The external signup sponsor, per-player custodial keys, match publisher, issuer, treasury, and
+RC-support account are separate trust roles and credentials. They must not be collapsed into one
+Hive account or signer for convenience. In particular, the platform never receives the sponsor's
+Hive authority, and the match publisher never creates accounts or signs on behalf of a player.
+Production account names and custody procedures require explicit operational approval.
 
 ### 7.1 Claim to Self-Custody
 
@@ -310,10 +355,13 @@ The claim workflow transfers control of the existing Google-provisioned Hive acc
 
 1. The player creates and takes control of a new owner, active, posting, and memo key set through Keychain or an approved master-password/seed-based credential experience, and selects a valid non-platform Hive recovery account. Exact key-generation/export, proof-of-control, and recovery-account selection UX require implementation approval.
 2. The claim service validates the new public authorities, recovery account, and explicit authenticated claim request. It builds one owner-authorized claim transaction containing `change_recovery_account` followed by `account_update2`, so the current custodied owner authorizes both the delayed recovery change and replacement of owner, active, posting, and memo values.
-3. The custodied current owner authority signs and broadcasts that exact transaction. No provisioning-account key or publisher, issuer, treasury, or RC-support key can substitute for the player's current owner authority.
+3. The custodied current owner authority signs and broadcasts that exact transaction. No sponsor key—which the platform does not hold—or publisher, issuer, treasury, or RC-support key can substitute for the player's current owner authority.
 4. The authority rotation remains pending until the transaction is irreversible, a fresh Hive read matches all player-supplied public authorities, and the pending recovery-account request names the player's selected account. A reversible/forked transaction does not trigger key destruction.
 5. The custodial service then irreversibly destroys the old per-player owner, active, posting, and memo key material and records a non-secret destruction audit event. From this point it is cryptographically unable to sign normal operations for the account.
-6. Hive keeps the provisioning account as the effective recovery account for 30 days. During this residual window the platform retains the technical ability to initiate a recovery request, so the UI and backend state remain `recovery_change_pending`; the recovery role is audit-monitored and cannot be represented as already removed.
+6. Hive keeps the sponsor/creator account as the effective recovery account for 30 days. The
+   platform does not control that sponsor authority, but the residual third-party recovery role
+   still exists on-chain, so the UI and backend state remain `recovery_change_pending` and cannot
+   represent the role as already removed.
 7. HAF observes the effective recovery-account change through account state and the `changed_recovery_account` virtual operation. Only then does the backend mark `self_custody_complete`.
 
 The same Hive username, balances, history, collectibles, and game profile remain linked throughout claim. If authority-transaction finality or verification fails, the workflow remains recoverable and does not destroy the still-required custodied owner key. After verified authority rotation, all player-originated Hive operations use the player's supported signing provider even while the recovery change is pending. Whether the verified Google identity remains usable only for game-session authentication after claim is an open decision; it can never restore platform signing access. Hive documents that the creator is the initial recovery account and that `change_recovery_account` has a 30-day delay; see the [Hive operation reference](https://developers.hive.io/apidefinitions/broadcast-ops.html).
@@ -324,9 +372,9 @@ The same Hive username, balances, history, collectibles, and game profile remain
 | --- | --- | --- | --- |
 | Direct Hive login | Off-chain signed challenge | Player posting | Account being authenticated through an approved player signer |
 | Google game login | Off-chain Google OIDC verification; no Hive operation or signature | None | Verified configured OIDC issuer/subject mapped by the backend |
-| Replenish Account Creation Token pool | `claim_account` | Provisioning account active | Dedicated provisioning account only; consumes its RC, not a per-user HIVE fee |
-| Create Google-provisioned Hive account | `create_claimed_account` | Provisioning account active | Dedicated provisioning account; new account authorities must match its per-player custody-provider public keys |
-| Supply initial account RC | `custom_json` ID `rc`, JSON payload `["delegate_rc", {"from": "...", "delegatees": ["..."], "max_rc": ...}]` | Provisioning account posting | Dedicated provisioning account to the exact newly created account |
+| Request sponsored Google provisioning | Off-chain sponsor API/signup-code contract; no platform Hive signature | Sponsor-defined request authentication | Provisioning service sends the exact username and custody-provider public authorities under the approved policy and retains only an opaque request reference |
+| Observe sponsored account creation | Approved account-creation operation, expected initially to be `create_claimed_account` | Configured sponsor/creator authority | Exact username, creator/recovery account, and all four new authorities must match before acceptance |
+| Observe initial account RC | Sponsor-supplied RC evidence, expected initially as `custom_json` ID `rc`/`delegate_rc` | Configured sponsor posting authority | Exact new account, configured sponsor, minimum RC, purpose, and irreversibility must match |
 | Request recovery-account transfer during claim | `change_recovery_account` | Current Google-provisioned account owner | That account's custodied owner key before rotation; target is the player's selected valid non-platform recovery account and becomes effective after 30 days |
 | Rotate claim authorities | `account_update2` rotating owner, active, posting, and memo | Current Google-provisioned account owner | That account's custodied owner key before claim; replacement keys are player controlled |
 | Publish completed match batch | `custom_json` with ID `hive.chameleon` | Match-publisher posting | Configured official match publisher only |
@@ -342,7 +390,7 @@ The same Hive username, balances, history, collectibles, and game profile remain
 
 Hive `custom_json` supports posting or active required authorities. Native posts/comments, votes, and transfers use their corresponding Hive operations. See the [official Hive broadcast-operation reference](https://developers.hive.io/apidefinitions/broadcast-ops.html).
 
-For player operations, the required Hive authority belongs to the player account in both custody modes. The signing provider changes: an approved external wallet signs for a self-custodial account, while the isolated per-player custody key signs for an unclaimed Google-provisioned account after explicit player authorization. Official publisher, issuer, treasury, provisioning, and RC-support operations are not player operations and cannot use player keys.
+For player operations, the required Hive authority belongs to the player account in both custody modes. The signing provider changes: an approved external wallet signs for a self-custodial account, while the isolated per-player custody key signs for an unclaimed Google-provisioned account after explicit player authorization. Official publisher, issuer, treasury, and RC-support operations are not player operations and cannot use player keys; sponsor-backed creation and initial RC are external operations observed by the platform.
 
 Hive-Engine accepts contract actions through Hive `custom_json`; token transfers use the `tokens` contract and require active authority. See the [official Hive-Engine developer documentation](https://hive-engine.github.io/engine-docs/) and [token contract reference](https://github.com/hive-engine/steemsmartcontracts-wiki/blob/master/Tokens-Contract.md).
 
@@ -701,7 +749,10 @@ Controls:
 1. Unity requests an intent; it does not construct authoritative service events.
 2. The Hive Gateway allow-lists operation types, signers, recipients, assets, and amount policies.
 3. A custodial player signature is accepted only for the unclaimed Hive account mapped to the authenticated OIDC subject, the exact player-authorized operation, and the authority required by that operation. Claim state is checked again inside the signing boundary.
-4. The provisioning account's active signer accepts only `claim_account` and `create_claimed_account`; its posting signer accepts only initial `custom_json` operations with ID `rc` and a validated `delegate_rc` payload. Neither can sign player actions or other official-service operations.
+4. Sponsor responses are never accepted on trust: account creator/recovery, public authorities,
+   initial RC, operation identities, and irreversibility must match the configured sponsor policy
+   in Hive. The platform has no sponsor Hive signer and cannot use sponsor credentials for any
+   other purpose.
 5. Match events are valid only from the configured match-publisher account and must reference a committed eligible server result with the expected canonical hash.
 6. Collectible events are valid only from the configured issuer account.
 7. Internal provisioning, custodial signing, match-publication, and issuance requests require service authentication, authorization, idempotency, and an audit record without secret material.
@@ -732,7 +783,7 @@ Every Hive-dependent action uses one of these states:
 Policy:
 
 - Direct-Hive login succeeds after challenge-signature verification; Google login succeeds after OIDC verification and safe resolution of the mapped account/provisioning state. Neither login event is a blockchain transaction.
-- First-time Google-provisioned Hive account creation is a separate on-chain provisioning workflow and does not reach `ready` until the account and initial RC delegation are validated.
+- First-time Google-provisioned Hive account creation is a separate sponsor-backed on-chain workflow and does not reach `ready` until account creation and initial RC evidence are validated.
 - A post or vote may show success after block inclusion.
 - A match batch, correction, or invalidation is pending at inclusion and becomes the canonical public record only when irreversible.
 - Collectible ownership is pending at inclusion and finalized only when irreversible.
@@ -747,20 +798,33 @@ Policy:
 
 Hive transactions consume Resource Credits rather than ordinary per-transaction gas fees. The Hive Gateway checks player RC through the Hive RC API before requesting a signed action. The official API exposes `rc_api.find_rc_accounts` for current RC availability. See the [Hive API reference](https://developers.hive.io/apidefinitions/).
 
-A newly created Hive account begins with effectively no usable RC. Google provisioning therefore includes an initial pure RC delegation through posting-authority `custom_json` ID `rc` with a `delegate_rc` payload before the account becomes ready. This delegates Resource Credits, not HP or content-vote weight.
+A newly created Hive account begins with effectively no usable RC. Google provisioning therefore
+requires the approved signup sponsor to supply enough initial RC before the account becomes
+ready. The configured sponsor flow is expected to expose verifiable `delegate_rc` evidence, but
+the platform validates the actual Hive operation and minimum RC rather than assuming success
+from an off-chain response. RC support is capacity, not HP, HIVE, or content-vote weight granted
+to the player.
 
 Initial policy:
 
 - Show a clear low-RC state before requesting an action likely to fail.
-- Provide controlled RC delegation from an application support account.
-- Apply eligibility and abuse checks before delegation.
-- Use a small configurable delegation amount.
-- Apply per-account cooldowns and rate limits.
-- Reclaim delegation after prolonged inactivity where operationally appropriate.
-- Provision account-provisioning, match-publisher, issuer, treasury, and RC-support accounts independently.
+- Require a versioned sponsor/signup-code policy with per-subject and per-network abuse controls.
+- Store no raw signup code and retry only the same opaque sponsor request.
+- Verify the configured sponsor/creator, exact recipient, minimum RC, operation identity, and
+  irreversibility before marking provisioning ready.
+- Keep later general RC assistance, cooldowns, and reclaim policy behind the separate platform
+  RC-support role.
+- Provision match-publisher, issuer, treasury, and RC-support accounts independently; none may
+  substitute for the sponsor.
 - Do not promise unlimited free on-chain actions.
 
-The dedicated provisioning account supplies only the initial new-account delegation under this flow. Later general RC assistance and reclaim policy remains the responsibility of the separate RC-support role. Rate limits are configuration, not protocol schema. At minimum they cover login challenges, Google OIDC/provisioning attempts, username checks, outstanding signing intents, custodial player operations, community actions, match-batch publication/correction, payment checks, collectible issuance, and RC delegation requests.
+The sponsor supplies only account creation and initial RC under this flow; the platform has no
+sponsor Hive key and does not operate a fallback HP-funded provisioning account. Later general RC
+assistance and reclaim policy remains the responsibility of the separate RC-support role. Rate
+limits are configuration, not protocol schema. At minimum they cover login challenges, Google
+OIDC/provisioning attempts, username checks, outstanding signing intents, custodial player
+operations, community actions, match-batch publication/correction, payment checks, collectible
+issuance, sponsor requests, and RC-support requests.
 
 ### 14.1 Match-Publisher RC Budget
 
@@ -777,13 +841,23 @@ The publisher account is provisioned for at least twice the forecast peak rate a
 
 If publisher RC falls below the configured reserve, the durable outbox retains the same events and identifiers, publication pauses with an operational alert, and gameplay continues. The system does not shrink a required summary, switch to a different unapproved signer, or charge a player to publish the official result.
 
-### 14.2 Account-Provisioning Capacity
+### 14.2 Sponsor-Backed Provisioning Capacity
 
-The provisioning account is funded with enough staked HP to maintain its Account Creation Token pool and initial RC delegations. It periodically executes `claim_account`, paying the operation cost entirely in its own RC, and uses `create_claimed_account` for signup so the platform does not burn the roughly 3 HIVE fee associated with ordinary paid account creation.
+The platform uses an approved sponsor program and special signup-code policy instead of funding a
+large provisioning account with staked HP or maintaining its own Account Creation Token pool.
+The sponsor contract must support the expected public authorities, account/recovery semantics,
+initial RC, stable request reconciliation, and an abuse-controlled capacity signal before it is
+enabled.
 
-Operations monitoring covers provisioning-account RC, staked-HP/delegation capacity, available Account Creation Tokens, tokens claimed and consumed, pending signup age, initial RC delegated per account, failure/retry counts, and forecast exhaustion. Low-token and low-RC thresholds trigger pool replenishment or capacity alerts before accepting more immediately fulfillable signups. Exact reserve thresholds, initial delegation amount, cooldowns, and later reclaim policy remain production configuration.
+Operations monitoring covers sponsor availability, policy version, remaining/advertised signup
+capacity when exposed, pending request age, irreversible account/RC evidence, request failures,
+retries, and forecast exhaustion. Raw signup codes and sponsor API credentials are secret and
+never appear in logs, telemetry, or product tables. Exact minimum RC and sponsor-specific limits
+remain production configuration.
 
-The provisioning account and costs are platform responsibilities. A signup is never redirected to the match publisher, issuer, treasury, or a player's balance when provisioning capacity is low; it remains pending or returns a clear retry state.
+When sponsor capacity is low, signup remains pending or returns a clear retry state. It is never
+redirected to the match publisher, issuer, treasury, a player's balance, or an unapproved
+platform-funded creator.
 
 ## 15. Failure and Outage Behavior
 
@@ -791,7 +865,9 @@ The provisioning account and costs are platform responsibilities. A signup is ne
 
 - Active matches continue through the authoritative game server and PostgreSQL; no active match is aborted solely because Hive is unavailable.
 - New direct-Hive authentication pauses if current authority cannot be resolved and verified safely.
-- First-time Google provisioning remains in its durable recoverable state while Hive, the provisioning signer, Account Creation Token inventory, or RC capacity is unavailable. It does not issue a guest identity or create a second account on retry.
+- First-time Google provisioning remains in its durable recoverable state while Hive, the signup
+  sponsor, sponsor capacity, custody provider, or initial RC evidence is unavailable. It does not
+  issue a guest identity, consume a second signup code, or create a second account on retry.
 - Returning Google authentication may resolve only when the OIDC mapping and current custody/claim state are known safely; Hive-dependent operations still pause when their current authority cannot be verified.
 - If the selected custodial key service is unavailable, posts, votes, payments, and claims for Google-provisioned Hive accounts pause. The system never falls back to an official service key or exports a raw player key.
 - New collectible, payment, post, and vote actions pause.
@@ -815,7 +891,7 @@ The provisioning account and costs are platform responsibilities. A signup is ne
 - Included but reversible operations remain pending.
 - The Hive projection follows HAF rollback.
 - Derived match-summary, ownership, and payment state is reverted with the operation.
-- A reversible Google-provisioned Hive account creation or initial RC delegation returns provisioning to pending reconciliation.
+- Reversible sponsor account-creation or initial-RC evidence returns provisioning to pending reconciliation.
 - A reversible owner-authorized claim transaction retains the old custodial keys and remains pending; key destruction occurs only after the replacement authorities and pending recovery-account request are irreversible and verified.
 - The 30-day recovery-account delay is tracked separately after authority rotation. Loss or delay of the effective-change projection cannot be treated as completed self-custody.
 - Finalized game actions are triggered only after the required irreversible state.
@@ -824,10 +900,13 @@ The provisioning account and costs are platform responsibilities. A signup is ne
 
 - Never collect or log Hive master passwords, seed phrases, recovery material, or private keys supplied or controlled by a self-custodial player.
 - Google-provisioned owner, active, posting, and memo private key material exists only inside the approved production custody boundary until authority claim. Unity and general backend services receive only public keys and opaque key references.
-- Never embed custodial player, provisioning, match-publisher, issuer, treasury, or RC-support keys in Unity, WebGL assets, source bundles, environment variables, logs, or general backend configuration.
+- Never embed custodial player, sponsor, match-publisher, issuer, treasury, or RC-support keys or
+  raw signup codes in Unity, WebGL assets, source bundles, environment variables exposed to the
+  application, logs, or general backend configuration.
 - Never request owner authority from a self-custodial player. The platform-custodied owner key for a Google-provisioned account is callable only by the claim workflow for that same account.
 - Use the least authority required for each action.
-- Keep per-player custodial signing, provisioning active/posting, match-publisher posting, issuer posting, treasury active, and RC-support signing responsibilities isolated.
+- Keep per-player custodial signing, sponsor integration credentials, match-publisher posting,
+  issuer posting, treasury active, and RC-support signing responsibilities isolated.
 - Enforce the OIDC-subject/account mapping, unclaimed status, required authority, operation allow-list, recipient/amount policy, explicit player intent, and idempotency key again at the custodial signing boundary.
 - Require the provider feasibility/cost spike, Hive-compatible signature tests, non-exportability controls, and verified key-destruction procedures before real-value custodial flows are enabled. A generic KMS/HSM/Vault claim or encrypted-secret prototype is insufficient and cannot carry real player value.
 - Restrict treasury signing to allow-listed operations, assets, recipients, and payout limits.
@@ -850,7 +929,8 @@ The provisioning account and costs are platform responsibilities. A signup is ne
 - Desktop HiveAuth login through QR/deep-link/WebSocket flow
 - Posting-authority signed challenge
 - Google OIDC game authentication with stable issuer/subject mapping and permanent Hive-username confirmation
-- Idempotent `claim_account`/`create_claimed_account` provisioning through a dedicated active signer plus initial posting-authority `custom_json` ID `rc`/`delegate_rc`
+- Idempotent sponsor-backed account creation and initial RC with exact authority/creator checks,
+  versioned signup policy, opaque request reconciliation, and no platform-held sponsor key
 - Per-player owner/active/posting/memo custody behind a production provider that passes the Hive capability spike, with explicit-intent posting and active signing
 - Claim-ready `change_recovery_account` plus `account_update2`, authority finality verification, irreversible custodial key destruction, and 30-day recovery-transition tracking even if the player-facing claim UI ships later
 - Single-device session enforcement
@@ -890,12 +970,13 @@ The provisioning account and costs are platform responsibilities. A signup is ne
 ## 18. Open Decisions Before Production
 
 1. Manager approval of the `hive.chameleon` protocol namespace
-2. Production Hive account names for provisioning, match publisher, issuer, treasury, and RC support
+2. Production Hive account names for match publisher, issuer, treasury, and RC support
 3. Production custody-provider feasibility/cost spike covering secp256k1 generation/import, Hive compact signatures, non-exportability, per-key policy, destruction, and any future memo shared-secret capability
 4. Approved claim key-generation/export UX, proof-of-control check, valid non-platform recovery-account selection, and residual 30-day recovery-role support policy without platform access to replacement private keys
 5. Google-account loss and identity-recovery policy, including whether/how to link a pre-existing Hive account, relink an OIDC subject, and authenticate the game session through Google after claim
 6. Google OIDC client configuration, supported clients, and provider/session operational policy
-7. Provisioning Account Creation Token reserve/replenishment thresholds, initial RC delegation amount, and abuse/risk limits
+7. Signup-sponsor selection, approved account-creation operation, signup-code policy, capacity
+   contract, minimum initial RC, creator/recovery account, and abuse/risk limits
 8. Match-publisher, issuer, and treasury custody/signing implementation
 9. Public HAF/HAfAH endpoint selection and failover providers
 10. HiveAuth service selection and HiveSigner application registration
@@ -923,7 +1004,7 @@ The provisioning account and costs are platform responsibilities. A signup is ne
 | HAF/HAfAH reads/indexing | Section 5 |
 | Hive account to player identity | Section 6 |
 | Trust boundary and forged actions | Section 12 |
-| RC, Account Creation Tokens, limits, and delegation | Section 14 |
+| Sponsor-backed account creation, RC limits, and later support | Sections 6, 8, and 14 |
 | Token/reward decision | Sections 2 and 17 |
 | On-chain/off-chain diagram | Section 4 |
 

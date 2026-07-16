@@ -8,7 +8,7 @@
 
 ## 1. Purpose
 
-This document defines the high-level runtime architecture and interface boundaries for Hive Chameleon. It translates the approved Product Spec, Hive-Layer Design, and data model into deployable logical components without selecting an AWS compute topology or writing implementation code.
+This document defines the high-level runtime architecture and interface boundaries for Hive Chameleon. It translates the approved Product Spec, Hive-Layer Design, and data model into deployable logical components on Hetzner without selecting a detailed server topology or writing implementation code.
 
 The deliverable covers:
 
@@ -19,7 +19,8 @@ The deliverable covers:
 - authentication, asynchronous operation, idempotency, finality, outage, and trust-boundary rules; and
 - feature-to-interface coverage for every prioritized backlog item.
 
-This document does not replace the detailed gameplay networking design, production AWS topology, security runbooks, database migrations, or provider-selection spikes.
+This document does not replace the detailed gameplay networking design, production Hetzner
+topology, security runbooks, database migrations, or provider-selection spikes.
 
 ## 2. Architecture decisions
 
@@ -33,6 +34,16 @@ This document does not replace the detailed gameplay networking design, producti
 8. Conceptual P2 routes are marked `x-priority: P2` and `x-maturity: conceptual`. Their existence in the draft is not approval of unresolved transfer, resale, fiat, organizer, or experimental-gameplay rules.
 9. Live gameplay never waits for Hive. Official match publication never depends on a client request or player key.
 10. No client or general backend process receives a Hive private key, master password, seed phrase, raw custodial key, service-account key, or raw Google token after OIDC exchange.
+11. Hetzner is the selected infrastructure host. The MVP uses Hetzner Object Storage for
+    S3-compatible object storage and direct HTTPS/presigned delivery; no external CDN is selected
+    until measured demand justifies one.
+12. Google-to-Hive provisioning is coordinated through an approved signup sponsor. The sponsor,
+    not a platform-funded HP/Account-Creation-Token pool, creates the exact account and supplies
+    initial RC. Hive remains the acceptance evidence.
+13. The production custody provider remains unselected behind the provider-neutral adapter.
+    Standard HashiCorp Vault Transit is not a secp256k1 backend; a custom plugin, managed-key
+    service, or HSM design must pass the same capability, isolation, cost, and scale gate recorded
+    in the [third-party integration register](../integrations/third-party-integration-register.md).
 
 ## 3. Logical architecture
 
@@ -44,10 +55,9 @@ flowchart LR
         SA[Keychain, HiveAuth, HiveSigner]
     end
 
-    subgraph Delivery[Edge and asset delivery]
-        EDGE[HTTPS ingress]
-        CDN[CloudFront]
-        OBJ[(S3 assets and builds)]
+    subgraph Delivery[Hetzner hosting and asset delivery]
+        EDGE[Hetzner-hosted HTTPS ingress]
+        OBJ[(Hetzner Object Storage)]
     end
 
     subgraph Product[Application boundary]
@@ -68,11 +78,12 @@ flowchart LR
 
     subgraph Privileged[Isolated signing boundary]
         CUST[Per-player custody provider]
-        SIGNERS[Provisioning, publisher, issuer, treasury, and RC signers]
+        SIGNERS[Publisher, issuer, treasury, and later RC-support signers]
     end
 
     subgraph External[External systems]
         GOOG[Google OIDC]
+        SPONSOR[Hive signup and RC sponsor]
         HIVE[Hive and Hive-Engine]
         HAF[HAF or HAfAH]
     end
@@ -86,9 +97,8 @@ flowchart LR
     W --> GOOG
     U --> GOOG
 
-    CDN --> U
-    CDN --> W
-    OBJ --> CDN
+    OBJ -->|HTTPS immutable assets| U
+    OBJ -->|HTTPS portal assets| W
     API -->|Presigned asset operations| OBJ
 
     API --> PG
@@ -101,6 +111,8 @@ flowchart LR
     API --> HG
     API --> PROV
     PROV --> CUST
+    PROV -->|Expected authorities and bounded signup request| SPONSOR
+    SPONSOR -->|Account creation and initial RC| HIVE
     PROV --> HG
     HG --> CUST
     HG --> SIGNERS
@@ -112,7 +124,10 @@ flowchart LR
     API --> HPROJ
 ```
 
-The diagram is logical, not a network topology. Production remains constrained to AWS `eu-central-1`, but ECS/EKS/EC2, VPC layout, database product, load-balancer shape, autoscaling, and disaster-recovery topology require a later deployment card.
+The diagram is logical, not a network topology. Hetzner is selected for compute, network, and
+object storage. The exact EU location, Cloud Server versus dedicated-server shape, private
+network and ingress layout, backup/restore policy, autoscaling approach, and disaster-recovery
+topology require a later deployment card.
 
 ### 3.1 Component responsibilities
 
@@ -127,7 +142,7 @@ The diagram is logical, not a network topology. Production remains constrained t
 | Provisioning/custody adapter | One-subject/one-account provisioning, per-player key references, custodial signing, claim workflow | Publish matches, issue collectibles, hold treasury funds, or sign unrelated player actions |
 | Match publisher worker | Build bounded summaries from committed results and publish through the official publisher | Require a player signature or modify complete results |
 | HAF projection worker | Fork-aware operation ingestion, allow-list/schema validation, normalized projections and reconciliation | Treat reversible inclusion as final or invent ownership/results |
-| S3/CloudFront | Immutable build, map, cosmetic, and media delivery by key/hash | Store relational authority or permit unreviewed map packages into live distribution |
+| Hetzner hosting/Object Storage | Host the application and deliver immutable builds, maps, cosmetics, and media by key/hash | Receive Hive signing authority, store relational authority, or permit unreviewed map packages into live distribution |
 
 ### 3.2 Authority and persistence matrix
 
@@ -142,7 +157,7 @@ The diagram is logical, not a network topology. Production remains constrained t
 | Collectible ownership | Accepted irreversible Hive event history | Hive plus commerce/projection cache | Inventory HTTP |
 | Profiles, friends, maps, tournaments | NestJS domain modules | Application PostgreSQL | HTTP API |
 | Payments | Native Hive/Hive-Engine evidence plus workflow state | Hive/Hive-Engine and PostgreSQL | Payment/operation HTTP views |
-| Binary assets and builds | Object storage content addressed by hash | S3/CloudFront | CDN or short-lived distribution URL |
+| Binary assets and builds | Object storage content addressed by hash | Hetzner Object Storage | Direct HTTPS object or short-lived presigned URL |
 
 ## 4. Client HTTP contract
 
@@ -206,11 +221,13 @@ Domain resources retain their more precise states. For example, provisioning exp
 | Catalog/inventory | `/catalog/*`, `/me/inventory`, `/me/loadout/{slot}` | Catalog/commerce modules and Hive projection | P0 committed / P1 planned |
 | Shop/payments | `/shop/offers`, `/purchases*`, `/payments/{paymentId}` | Commerce module, Hive Gateway, issuer worker | P1 planned |
 | Tournaments | `/tournaments*` including entries, standings, matches, payouts | Tournament/commerce modules | P1 planned; organizer creation P2 conceptual |
-| Maps/workshop | `/maps*`, `/map-versions*` | Content module and S3 delivery | Controlled read P1; self-service/dynamic distribution P2 conceptual |
+| Maps/workshop | `/maps*`, `/map-versions*` | Content module and Hetzner Object Storage delivery | Controlled read P1; self-service/dynamic distribution P2 conceptual |
 | Showcase/vote | `/maps/{mapId}/showcase`, `/showcases/{showcaseId}/*` | Content module and Hive Gateway | P1 planned |
 | Transfer/resale/fiat | `/collectibles/{id}/transfers`, `/marketplace/*`, `/checkout-sessions` | Not yet approved | P2 conceptual |
 
-No client endpoint starts official match publication, collectible issuance, treasury payout, Account Creation Token maintenance, or RC reclaim. Those are internal jobs with separate authorization.
+No client endpoint starts official match publication, collectible issuance, treasury payout, or
+RC reclaim. Sponsor signup credentials are never client-visible; onboarding only starts the
+platform's bounded, idempotent sponsor request. Official jobs retain separate authorization.
 
 ## 5. Nakama realtime interface
 
@@ -273,7 +290,9 @@ sequenceDiagram
     participant A as NestJS auth API
     participant G as Google or Hive signer
     participant P as Provisioning worker
-    participant H as Hive and custody boundary
+    participant K as Custody boundary
+    participant S as Signup and RC sponsor
+    participant H as Hive
     participant N as Nakama
 
     alt Direct Hive login
@@ -295,7 +314,10 @@ sequenceDiagram
             C->>A: POST /onboarding/provisioning
             A-->>C: 202 Operation
             A->>P: Claim durable provisioning job
-            P->>H: Keys, create_claimed_account, initial RC
+            P->>K: Generate four keys
+            K-->>P: Public keys and opaque references
+            P->>S: Signup request, expected authorities, policy version
+            S->>H: Create exact account and supply initial RC
             H-->>P: Included and irreversible observations
             P->>A: Mark ready and create player/session atomically
             C->>A: Poll operation/provisioning status
@@ -420,7 +442,8 @@ Internal interfaces are not added to the public OpenAPI file. Their authenticati
 | NestJS → Nakama | Private admin/session API | Mint a token only for an authenticated playable player; issue administrative lobby actions only after domain authorization |
 | Nakama → application PostgreSQL | Dedicated game repository/database role | Write lobby history and terminal results; one transaction includes result revision and initial publication request |
 | NestJS/worker → Hive Gateway | Private typed HTTP or in-process client contract | WAX-compatible operation intent, expected signer/authority, policy version, idempotency key; never arbitrary raw operations |
-| Provisioning worker → Hive Gateway | Official provisioning authorization | Allow only `claim_account`, `create_claimed_account`, and initial posting-authority `custom_json` with ID `rc` and a `delegate_rc` payload; keep this signer separate from match publisher, issuer, treasury, and general RC support |
+| Provisioning worker → signup sponsor adapter | Authenticated outbound provider contract | Send one idempotent request containing the approved username and expected public authorities under a configured signup policy; never expose the raw signup code or accept a resulting account until Hive evidence matches |
+| Claim worker → Hive Gateway | Current player's custodial owner authorization | Allow only the approved `change_recovery_account` plus `account_update2` claim transaction for that mapped account; never use a platform service signer |
 | Provisioning worker → custody adapter | Provider-neutral custody interface | Generate/sign/destroy by opaque key reference; return public keys, signatures, and non-secret lifecycle evidence only |
 | Outbox workers → PostgreSQL | `FOR UPDATE SKIP LOCKED` or equivalent claim protocol | Durable attempts, backoff, ownership timeout, idempotent recovery, safe failure code |
 | Match publisher → Hive Gateway | Official service authorization | Only validated match batch/correction/invalidation payloads for the allow-listed publisher |
@@ -440,7 +463,8 @@ No general-purpose internal endpoint accepts a private key, seed, master passwor
 | Redis unavailable | Presence, quick discovery, short-lived challenges, and caches degrade or pause; durable player/result/payment/history state is not lost. |
 | PostgreSQL unavailable | Stop new durable commands and match starts. A running match may continue only while safe, but terminal completion is not acknowledged or published until its transaction commits. |
 | Nakama node unavailable | Clients reconnect through the scoped session and reservation rules; role restoration is decided by the authoritative runtime, otherwise spectate/next-round fallback applies. |
-| S3/CloudFront unavailable | Existing packaged web maps/build assets may remain cached; new uploads/downloads pause. A missing map package cannot be selected for a new lobby. |
+| Hetzner Object Storage unavailable | Existing packaged client content may remain usable locally; new uploads/downloads pause. A missing map package cannot be selected for a new lobby. |
+| Signup sponsor unavailable or inconsistent | First-time Google provisioning remains pending/retryable. Never create a guest, link mismatched authorities, or fall back to a platform-funded account creator. |
 | Worker crash after external success | Resume the same database job, reconcile external state by stable identifiers, and never create a duplicate account/payment/event. |
 | Hive fork before irreversibility | Revert pending projection, retain raw evidence/outbox identity, and replay idempotently. |
 | Irreversible local/public mismatch | Record and alert a divergence incident; overwrite neither record. |
@@ -453,7 +477,7 @@ No general-purpose internal endpoint accepts a private key, seed, master passwor
 - Rate-limit authentication, username checks, provisioning, realtime session minting, lobby commands, transaction intents, uploads, purchases, tournament entry, and public content actions by appropriate identity and risk signals.
 - Use constant-time comparison for token hashes and signature verification inputs where applicable.
 - Require explicit confirmation for posts, votes, purchases, tournament entries, transfers, listings, and claim.
-- Never log authorization codes, refresh tokens, signed transaction bodies containing sensitive memos, private keys, custody provider credentials, presigned upload/download URLs, lobby passwords, or invitation raw tokens.
+- Never log authorization codes, refresh tokens, signed transaction bodies containing sensitive memos, private keys, custody-provider or signup-sponsor credentials, raw signup codes, presigned upload/download URLs, lobby passwords, or invitation raw tokens.
 - Streamer Mode aliases are a client presentation rule; they do not mutate canonical Hive usernames or public Hive history.
 - Validate object media type, byte count, SHA-256, ownership, and lifecycle before accepting a map/cosmetic upload reference. Approved content is served from a separate distribution path.
 - Treat P2 conceptual endpoints as disabled in production. If routed before approval, they return the defined conceptual-feature problem and perform no state change.
@@ -475,7 +499,7 @@ No general-purpose internal endpoint accepts a private key, seed, master passwor
 | P0-09 | `lobby.countdown` and `lobby.start`; server cancels under threshold |
 | P0-10 | Authoritative Nakama Casual-mode commands/events |
 | P0-11 | Authoritative Nakama Infection-mode visibility/conversion events |
-| P0-12 | Official map in shipped build through S3/CloudFront; no dynamic API required |
+| P0-12 | Official map in the shipped build; Hetzner Object Storage supports build distribution, with no dynamic map API required |
 | P0-13 | `/catalog/character-options`, `/me/appearance`, `player.appearance` |
 | P0-14 | `player.input`, server snapshots, and client camera state |
 | P0-15 | `hider.paint` plus server checkpoints |
@@ -535,7 +559,8 @@ The following remain unresolved in the approved source documents and are not sil
 - collectible transfer/resale protocol and storage changes;
 - fiat provider, webhook, settlement, refund, and chargeback behavior;
 - gameplay tick rate, serialization, compression, prediction budget, and Nakama op-code assignment; and
-- AWS compute, network, database product, autoscaling, backup, and disaster-recovery topology.
+- exact Hetzner EU location, Cloud Server/dedicated-server topology, managed versus self-hosted
+  database shape, autoscaling, backup/restore targets, and disaster-recovery design.
 
 ## 12. Validation and acceptance
 
@@ -546,7 +571,8 @@ This card is ready for approval when:
 - every HTTP operation declares priority and maturity;
 - every side-effecting retryable command declares an idempotency key and asynchronous behavior where required;
 - realtime gameplay commands are absent from ordinary REST mutation paths;
-- no public endpoint can invoke an official publisher, issuer, treasury, provisioning-pool, or RC-reclaim operation directly;
+- no public endpoint can invoke an official publisher, issuer, treasury, or RC-reclaim operation
+  directly or expose signup-sponsor credentials;
 - every P0/P1/P2 backlog item maps to HTTP, Nakama, internal worker, static delivery, or an explicit no-API classification;
 - examples and schemas contain no raw signing, custody, Google, invitation, lobby-password, or presigned-URL secrets;
 - match publication, fork, finality, custody, and recovery behavior agrees with the Hive-Layer Design and data model; and
