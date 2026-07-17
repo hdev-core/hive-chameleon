@@ -184,6 +184,13 @@ paths:
       responses:
         '201':
           description: Realtime connection credential
+          headers:
+            Cache-Control:
+              description: Prevent storage of the short-lived Nakama token by HTTP caches
+              required: true
+              schema:
+                type: string
+                enum: [no-store]
           content:
             application/json:
               schema:
@@ -198,6 +205,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableProblem'
   /disclosures/public-match/current:
     get:
       tags: [Onboarding]

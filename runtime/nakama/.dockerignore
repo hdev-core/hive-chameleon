@@ -1,0 +1,7 @@
+.env
+.env.*
+*.so
+compose.yaml
+data/
+local.yml
+README.md

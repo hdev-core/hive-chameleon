@@ -432,6 +432,19 @@ Players with unclaimed Google-provisioned Hive accounts can therefore play and u
 
 The claim path is designed in from the start even if its account-settings UI ships later. During claim, the player establishes new self-custodial Hive keys through a supported wallet or approved credential-generation/export experience. The platform uses the currently custodied owner authority to rotate owner, active, posting, and memo authorities to those new keys, then irreversibly destroys its custodial key material. The Hive username, profile, history, balances, and collectibles remain with the same account. After that authority rotation, the platform can no longer sign normal Hive actions for the player, so supported Hive actions require the player's Hive signing provider.
 
+The full-account custody model is transitional. When Hive light/lite accounts become available
+through a production-ready and security-reviewed sponsor/protocol path, new Google onboarding
+should migrate to that lighter model so the platform holds less owner-level authority. Existing
+players keep their account and identity unless a separately approved migration preserves their
+username, history, balances, collectibles, and claim guarantees.
+
+Outside the MVP, the product may introduce a roughly one-week self-custody nudge for an unclaimed
+Google player: prompt the player to generate replacement player-controlled keys and download and
+confirm their own owner-key recovery backup before continuing. This is part of the claim
+experience and never exports the platform's non-exportable custodial keys. Whether it gates
+continued play, and the recovery/fallback UX if the player declines or loses the backup, require
+explicit product and security approval.
+
 Hive initially assigns the account creator—the configured signup sponsor—as the account's
 recovery account. Claim therefore also requests a change to a valid non-sponsor recovery account
 selected by the player. Hive applies that recovery-account change after a 30-day delay. During
@@ -442,6 +455,10 @@ pending** and must not describe the account as fully self-custodial until Hive c
 new recovery account is effective.
 
 Before creating a Google-provisioned Hive account—and before first match participation for a direct-Hive user—the product presents a one-time disclosure that the player's Hive username, match participation, roles, scores, outcomes, and aggregated likes will become permanently public in published Hive summaries. The player must acknowledge this before continuing. It is a product disclosure, not a Hive signature, and it is not repeated before every match.
+
+The normative field-level no-PII/doxxing rule and Terms-of-Service requirement that irreversible
+on-chain records are permanent and cannot be removed by an off-chain deletion request are defined
+in [Non-Functional Requirements §3](../technical-specification/non-functional-requirements.md#3-privacy-and-immutable-record-compliance).
 
 Linking a pre-existing Hive account to Google, relinking a different Google identity, and the exact game-login experience after self-custody claim are not established by the confirmed standard and remain open product decisions. The system must not infer an existing Hive account from a Google email address.
 

@@ -35,8 +35,19 @@ Real-time gameplay and complete operational product data remain off-chain. Postg
     custody public authorities and supplies its initial RC under a versioned signup-code policy.
     The platform coordinates and verifies this flow but does not maintain its own HP-funded
     Account Creation Token pool or hold the sponsor's Hive keys.
+17. Full standard Hive accounts with platform-custodied owner authority are a transitional
+    onboarding model. Once Hive light/lite accounts are available through a production-ready,
+    reviewed protocol and sponsor path, new Google onboarding migrates to that lighter account
+    model to reduce the authority and key material held by the platform. Existing accounts are
+    never silently replaced or weakened; any transition requires an explicit, verified migration
+    design that preserves the player's username, history, assets, and claim path.
+18. A post-onboarding self-custody nudge may be added outside the MVP: at roughly one week, an
+    unclaimed Google player can be prompted to create player-controlled replacement keys and
+    download/confirm their own owner-key recovery backup before continuing. This is a claim-path
+    prompt, never an export of the platform's non-exportable custodial keys. Its enforcement,
+    recovery wording, and fallback UX require product/security approval before it can gate play.
 
-Decisions 13-16 implement the management-confirmed cross-project Google onboarding standard supplied for this revision. The custody model and capabilities are requirements; the provider-specific feasibility, recovery-account UX, and operational thresholds remain implementation decisions called out below.
+Decisions 13-18 implement the management-confirmed cross-project Google onboarding standard supplied for this revision. The custody model and capabilities are requirements; the provider-specific feasibility, recovery-account UX, and operational thresholds remain implementation decisions called out below.
 
 ## 3. On-Chain and Off-Chain Boundary
 
@@ -365,6 +376,13 @@ The claim workflow transfers control of the existing Google-provisioned Hive acc
 7. HAF observes the effective recovery-account change through account state and the `changed_recovery_account` virtual operation. Only then does the backend mark `self_custody_complete`.
 
 The same Hive username, balances, history, collectibles, and game profile remain linked throughout claim. If authority-transaction finality or verification fails, the workflow remains recoverable and does not destroy the still-required custodied owner key. After verified authority rotation, all player-originated Hive operations use the player's supported signing provider even while the recovery change is pending. Whether the verified Google identity remains usable only for game-session authentication after claim is an open decision; it can never restore platform signing access. Hive documents that the creator is the initial recovery account and that `change_recovery_account` has a 30-day delay; see the [Hive operation reference](https://developers.hive.io/apidefinitions/broadcast-ops.html).
+
+This claim mechanism is also the safe fallback while the ecosystem lacks an approved light/lite
+account standard. When such accounts become production-ready, the architecture must prefer the
+smaller custodial authority surface for new Google users and separately review any
+existing-account migration. A future roughly one-week backup nudge leads the player through
+generating and backing up the new player-controlled claim keys, including the owner key; it must
+not make the custody provider export or reveal the old keys.
 
 ## 8. Hive Operation Mapping
 

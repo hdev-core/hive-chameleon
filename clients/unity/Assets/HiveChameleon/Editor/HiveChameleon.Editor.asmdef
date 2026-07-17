@@ -1,0 +1,6 @@
+{
+  "name": "HiveChameleon.Editor",
+  "rootNamespace": "HiveChameleon.Editor",
+  "references": ["HiveChameleon.Runtime"],
+  "includePlatforms": ["Editor"]
+}

@@ -117,6 +117,41 @@ Enum identity.character_size_preset {
   x1_7
 }
 
+Enum identity.platform_role {
+  content_reviewer
+  content_moderator
+  tournament_operator
+  support_operator
+  security_auditor
+  platform_administrator
+}
+
+Enum identity.role_scope_type {
+  platform
+  map
+  tournament
+}
+
+Enum identity.role_approval_state {
+  pending
+  approved
+  rejected
+  expired
+  cancelled
+}
+
+Enum identity.authorization_actor_type {
+  player
+  service
+}
+
+Enum identity.authorization_decision {
+  allow
+  deny
+  grant
+  revoke
+}
+
 Enum social.friend_request_status {
   pending
   accepted
@@ -831,6 +866,111 @@ Table identity.player_appearance {
   }
 }
 
+Table identity.platform_role_approval {
+  id uuid [pk, not null, note: 'Application-generated UUIDv7']
+  target_player_id uuid [not null]
+  role identity.platform_role [not null]
+  scope_type identity.role_scope_type [not null, default: 'platform']
+  scope_id uuid
+  valid_from timestamptz [not null]
+  valid_until timestamptz
+  requested_by_player_id uuid [not null]
+  approved_by_player_id uuid
+  state identity.role_approval_state [not null, default: 'pending']
+  reason text [not null]
+  requested_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null]
+  decided_at timestamptz
+
+  indexes {
+    (target_player_id, role, state) [name: 'idx_platform_role_approval_target']
+    (requested_by_player_id, requested_at) [name: 'idx_platform_role_approval_requester']
+    (approved_by_player_id, decided_at) [name: 'idx_platform_role_approval_approver']
+    (state, expires_at) [name: 'idx_platform_role_approval_pending']
+  }
+
+  checks {
+    `(scope_type = 'platform' AND scope_id IS NULL) OR (scope_type <> 'platform' AND scope_id IS NOT NULL)` [name: 'chk_platform_role_approval_scope']
+    `valid_until IS NULL OR valid_until > valid_from` [name: 'chk_platform_role_approval_validity']
+    `expires_at > requested_at` [name: 'chk_platform_role_approval_expiry']
+    `approved_by_player_id IS NULL OR approved_by_player_id <> requested_by_player_id` [name: 'chk_platform_role_approval_separation']
+    `(state <> 'approved') OR (approved_by_player_id IS NOT NULL AND decided_at IS NOT NULL)` [name: 'chk_platform_role_approval_approved']
+    `(state NOT IN ('rejected', 'cancelled')) OR decided_at IS NOT NULL` [name: 'chk_platform_role_approval_decided']
+  }
+
+  Note: 'Two-person evidence for high-risk platform-role grants or extensions. Scope existence and agreement with the resulting assignment are enforced by migration triggers.'
+}
+
+Table identity.platform_role_assignment {
+  id uuid [pk, not null, note: 'Application-generated UUIDv7']
+  player_id uuid [not null]
+  role identity.platform_role [not null]
+  scope_type identity.role_scope_type [not null, default: 'platform']
+  scope_id uuid
+  valid_from timestamptz [not null, default: `now()`]
+  valid_until timestamptz
+  granted_by_player_id uuid [not null]
+  approval_id uuid [unique]
+  grant_audit_event_id uuid [not null, unique]
+  reason text [not null]
+  revoked_at timestamptz
+  revoked_by_player_id uuid
+  revocation_reason text
+  revocation_audit_event_id uuid [unique]
+  ~created_record
+
+  indexes {
+    (player_id, role, valid_from) [name: 'idx_platform_role_assignment_player']
+    (role, valid_until) [name: 'idx_platform_role_assignment_role']
+    (granted_by_player_id, created_at) [name: 'idx_platform_role_assignment_granter']
+    (revoked_by_player_id, revoked_at) [name: 'idx_platform_role_assignment_revoker']
+  }
+
+  checks {
+    `(scope_type = 'platform' AND scope_id IS NULL) OR (scope_type <> 'platform' AND scope_id IS NOT NULL)` [name: 'chk_platform_role_assignment_scope']
+    `valid_until IS NULL OR valid_until > valid_from` [name: 'chk_platform_role_assignment_validity']
+    `player_id <> granted_by_player_id` [name: 'chk_platform_role_assignment_no_self_grant']
+    `revoked_at IS NULL OR revoked_at >= valid_from` [name: 'chk_platform_role_assignment_revocation_time']
+    `(revoked_at IS NULL AND revoked_by_player_id IS NULL AND revocation_reason IS NULL AND revocation_audit_event_id IS NULL) OR (revoked_at IS NOT NULL AND revoked_by_player_id IS NOT NULL AND revocation_reason IS NOT NULL AND revocation_audit_event_id IS NOT NULL)` [name: 'chk_platform_role_assignment_revocation']
+  }
+
+  Note: 'Only staff/operator platform roles are assigned here. Player, lobby-host, map-creator, pending identity, and service capabilities remain derived from their owning boundaries.'
+}
+
+Table identity.authorization_audit_event {
+  id uuid [pk, not null, note: 'Application-generated UUIDv7']
+  actor_type identity.authorization_actor_type [not null]
+  actor_player_id uuid
+  actor_service_name varchar(128)
+  decision identity.authorization_decision [not null]
+  action varchar(128) [not null]
+  resource_type varchar(128)
+  resource_id uuid
+  subject_player_id uuid
+  role identity.platform_role
+  scope_type identity.role_scope_type
+  scope_id uuid
+  correlation_id uuid [not null]
+  reason_code varchar(128) [not null]
+  metadata jsonb [not null, default: '{}']
+  occurred_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (actor_player_id, occurred_at) [name: 'idx_authorization_audit_actor']
+    (actor_service_name, occurred_at) [name: 'idx_authorization_audit_service']
+    (subject_player_id, occurred_at) [name: 'idx_authorization_audit_subject']
+    (decision, action, occurred_at) [name: 'idx_authorization_audit_decision']
+    correlation_id [name: 'idx_authorization_audit_correlation']
+  }
+
+  checks {
+    `(actor_type = 'player' AND actor_player_id IS NOT NULL AND actor_service_name IS NULL) OR (actor_type = 'service' AND actor_player_id IS NULL AND actor_service_name IS NOT NULL)` [name: 'chk_authorization_audit_actor']
+    `(scope_type IS NULL AND scope_id IS NULL) OR (scope_type = 'platform' AND scope_id IS NULL) OR (scope_type IN ('map', 'tournament') AND scope_id IS NOT NULL)` [name: 'chk_authorization_audit_scope']
+  }
+
+  Note: 'Append-only, non-secret authorization evidence. Production retention is at least 180 days.'
+}
+
 Table social.friend_request {
   id uuid [pk, not null, note: 'Application-generated UUIDv7']
   requester_player_id uuid [not null]
@@ -1243,12 +1383,12 @@ Table game.match_publication_request {
 Table game.match_publication_outbox {
   id uuid [pk, not null, note: 'Application-generated UUIDv7']
   event_uuid uuid [not null, unique, note: 'Stable protocol UUIDv7 across retries']
-  batch_uuid uuid [not null, unique, note: 'Stable logical batch UUIDv7 across retries']
+  batch_uuid uuid [unique, note: 'Stable logical batch UUIDv7 across retries; initial batches only']
   event_type hive_projection.match_event_type [not null]
   schema_version smallint [not null]
   event_contract_version varchar(32) [not null]
-  publication_period_start timestamptz [not null]
-  publication_period_end timestamptz [not null]
+  publication_period_start timestamptz
+  publication_period_end timestamptz
   publisher_hive_account varchar(16) [not null]
   result_count smallint [not null]
   canonical_payload text [not null]
@@ -1276,7 +1416,7 @@ Table game.match_publication_outbox {
 
   checks {
     `schema_version > 0` [name: 'chk_match_outbox_schema_version']
-    `publication_period_end >= publication_period_start` [name: 'chk_match_outbox_period']
+    `(event_type = 'match_results_batch' AND batch_uuid IS NOT NULL AND publication_period_start IS NOT NULL AND publication_period_end IS NOT NULL AND publication_period_end >= publication_period_start) OR (event_type <> 'match_results_batch' AND batch_uuid IS NULL AND publication_period_start IS NULL AND publication_period_end IS NULL AND result_count = 1)` [name: 'chk_match_outbox_event_shape']
     `publisher_hive_account = lower(publisher_hive_account)` [name: 'chk_match_outbox_publisher_lower']
     `result_count > 0` [name: 'chk_match_outbox_result_count']
     `payload_byte_count > 0 AND octet_length(canonical_payload) = payload_byte_count` [name: 'chk_match_outbox_payload_size']
@@ -1286,7 +1426,7 @@ Table game.match_publication_outbox {
     `(state <> 'reverted') OR (operation_id IS NOT NULL AND reverted_at IS NOT NULL)` [name: 'chk_match_outbox_reverted']
   }
 
-  Note: 'Operational outbox, not the HAF projection. canonical_payload is the exact immutable application payload used across retries; parsed_payload is validated query data. Initial batching defaults to five minutes, 20 results, or 6 KiB, whichever is reached first; only production tuning is open. A retry may rebuild transaction headers but not event/batch UUIDs or payload bytes/hash.'
+  Note: 'Operational outbox, not the HAF projection. canonical_payload is the exact immutable application payload used across retries; parsed_payload is validated query data. Initial events carry a stable batch UUID and period; correction/invalidation events are single-result events and carry their original-batch lineage inside the event payload/change projection. Initial batching defaults to five minutes, 20 results, or 6 KiB, whichever is reached first; only production tuning is open. A retry may rebuild transaction headers but not logical IDs or payload bytes/hash.'
 }
 
 Table game.match_publication_item {
@@ -1961,9 +2101,40 @@ Table tournament.payout {
   }
 }
 
+Table hive_projection.block_checkpoint {
+  id uuid [pk, not null, note: 'Application-generated UUIDv7']
+  source varchar(64) [not null]
+  block_number bigint [not null]
+  block_id varchar(128) [not null]
+  previous_block_id varchar(128)
+  block_timestamp timestamptz [not null]
+  state hive_projection.operation_state [not null, default: 'included']
+  observed_at timestamptz [not null, default: `now()`]
+  irreversible_at timestamptz
+  reverted_at timestamptz
+
+  indexes {
+    (source, block_id) [unique, name: 'uq_block_checkpoint_source_id']
+    (source, block_number, block_id) [unique, name: 'uq_block_checkpoint_source_height_id']
+    (source, block_number) [name: 'idx_block_checkpoint_source_height']
+    (source, previous_block_id) [name: 'idx_block_checkpoint_parent']
+    (source, state, block_number) [name: 'idx_block_checkpoint_state']
+  }
+
+  checks {
+    `block_number >= 0` [name: 'chk_block_checkpoint_height']
+    `(state <> 'irreversible') OR irreversible_at IS NOT NULL` [name: 'chk_block_checkpoint_irreversible']
+    `(state <> 'reverted') OR reverted_at IS NOT NULL` [name: 'chk_block_checkpoint_reverted']
+    `(state = 'included' AND irreversible_at IS NULL AND reverted_at IS NULL) OR (state = 'irreversible' AND irreversible_at IS NOT NULL AND reverted_at IS NULL) OR (state = 'reverted' AND irreversible_at IS NULL AND reverted_at IS NOT NULL)` [name: 'chk_block_checkpoint_state_evidence']
+  }
+
+  Note: 'Retains reversible and replaced branch evidence, including blocks with no relevant operations. Migration adds one non-reverted checkpoint per source/height and prevents reverting an irreversible checkpoint.'
+}
+
 Table hive_projection.operation {
   id uuid [pk, not null, note: 'Application-generated UUIDv7']
-  source_operation_id varchar(128) [not null, unique, note: 'Stable HAF/HAfAH operation identity, including virtual operations']
+  checkpoint_id uuid [not null]
+  source_operation_id varchar(128) [not null, note: 'Stable HAF/HAfAH operation identity, including virtual operations']
   transaction_id varchar(128)
   operation_index integer [not null]
   is_virtual boolean [not null, default: false]
@@ -1976,12 +2147,17 @@ Table hive_projection.operation {
   application_id varchar(64)
   payload jsonb [not null]
   state hive_projection.operation_state [not null]
+  validation_state hive_projection.validation_state [not null, default: 'pending']
+  rejection_reason varchar(128)
+  validated_at timestamptz
   observed_at timestamptz [not null, default: `now()`]
   irreversible_at timestamptz
   reverted_at timestamptz
 
   indexes {
-    (transaction_id, operation_index) [unique, name: 'uq_hive_operation_tx_index']
+    checkpoint_id [name: 'idx_hive_operation_checkpoint']
+    source_operation_id [name: 'idx_hive_operation_source_id']
+    (transaction_id, operation_index) [name: 'idx_hive_operation_tx_index']
     (block_number, operation_index) [name: 'idx_hive_operation_block']
     (block_number, block_id, state) [name: 'idx_hive_operation_replay']
     (operation_type, is_virtual, block_number) [name: 'idx_hive_operation_type']
@@ -1991,22 +2167,28 @@ Table hive_projection.operation {
 
   checks {
     `operation_index >= 0 AND block_number >= 0` [name: 'chk_hive_operation_position']
-    `(is_virtual AND transaction_id IS NULL) OR (NOT is_virtual AND transaction_id IS NOT NULL)` [name: 'chk_hive_operation_transaction_identity']
+    `is_virtual OR transaction_id IS NOT NULL` [name: 'chk_hive_operation_transaction_identity']
     `primary_account = lower(primary_account)` [name: 'chk_hive_operation_account_lower']
     `(state <> 'irreversible') OR irreversible_at IS NOT NULL` [name: 'chk_hive_operation_irreversible']
     `(state <> 'reverted') OR reverted_at IS NOT NULL` [name: 'chk_hive_operation_reverted']
+    `(validation_state NOT IN ('accepted', 'rejected')) OR validated_at IS NOT NULL` [name: 'chk_hive_operation_validated']
+    `(validation_state <> 'rejected') OR rejection_reason IS NOT NULL` [name: 'chk_hive_operation_rejection']
+    `(state = 'included' AND irreversible_at IS NULL AND reverted_at IS NULL) OR (state = 'irreversible' AND irreversible_at IS NOT NULL AND reverted_at IS NULL) OR (state = 'reverted' AND irreversible_at IS NULL AND reverted_at IS NOT NULL)` [name: 'chk_hive_operation_state_evidence']
+    `(validation_state = 'pending' AND validated_at IS NULL AND rejection_reason IS NULL) OR (validation_state = 'accepted' AND validated_at IS NOT NULL AND rejection_reason IS NULL) OR (validation_state = 'rejected' AND validated_at IS NOT NULL AND rejection_reason IS NOT NULL)` [name: 'chk_hive_operation_validation_evidence']
   }
+
+  Note: 'Raw fork-aware operation evidence. Structurally malformed, unsupported, or unauthorized application operations remain here with a rejection reason and do not require a typed projection row.'
 }
 
 Table hive_projection.match_event {
   event_uuid uuid [pk, not null, note: 'Stable protocol UUIDv7']
-  batch_uuid uuid [not null, unique, note: 'Stable logical batch UUIDv7']
+  batch_uuid uuid [unique, note: 'Stable logical batch UUIDv7; initial batches only']
   operation_id uuid [not null, unique]
   event_type hive_projection.match_event_type [not null]
   schema_version smallint [not null]
   event_contract_version varchar(32) [not null]
-  publication_period_start timestamptz [not null]
-  publication_period_end timestamptz [not null]
+  publication_period_start timestamptz
+  publication_period_end timestamptz
   publisher_hive_account varchar(16) [not null]
   result_count smallint [not null]
   operation_state hive_projection.operation_state [not null]
@@ -2025,16 +2207,18 @@ Table hive_projection.match_event {
 
   checks {
     `schema_version > 0` [name: 'chk_match_event_schema_version']
-    `publication_period_end >= publication_period_start` [name: 'chk_match_event_period']
+    `(event_type = 'match_results_batch' AND batch_uuid IS NOT NULL AND publication_period_start IS NOT NULL AND publication_period_end IS NOT NULL AND publication_period_end >= publication_period_start) OR (event_type <> 'match_results_batch' AND batch_uuid IS NULL AND publication_period_start IS NULL AND publication_period_end IS NULL AND result_count = 1)` [name: 'chk_match_event_shape']
     `publisher_hive_account = lower(publisher_hive_account)` [name: 'chk_match_event_publisher_lower']
     `result_count > 0` [name: 'chk_match_event_result_count']
     `(event_type = 'match_results_batch') OR result_count = 1` [name: 'chk_match_event_change_count']
     `(operation_state <> 'irreversible') OR irreversible_at IS NOT NULL` [name: 'chk_match_event_irreversible']
     `(operation_state <> 'reverted') OR reverted_at IS NOT NULL` [name: 'chk_match_event_reverted']
     `(validation_state <> 'rejected') OR rejection_reason IS NOT NULL` [name: 'chk_match_event_rejection']
+    `(operation_state = 'included' AND irreversible_at IS NULL AND reverted_at IS NULL) OR (operation_state = 'irreversible' AND irreversible_at IS NOT NULL AND reverted_at IS NULL) OR (operation_state = 'reverted' AND irreversible_at IS NULL AND reverted_at IS NOT NULL)` [name: 'chk_match_event_state_evidence']
+    `(operation_state = 'reverted' AND validation_state = 'reverted' AND rejection_reason IS NULL) OR (operation_state <> 'reverted' AND validation_state = 'accepted' AND rejection_reason IS NULL)` [name: 'chk_match_event_validation_state']
   }
 
-  Note: 'Normalized HAF-derived event root. Full validated payload remains on operation.payload. Projector state follows the referenced operation through inclusion, fork rollback, replay, and irreversibility; only allow-listed publisher events are accepted.'
+  Note: 'Normalized HAF-derived event root. Initial batch events carry batch/period fields; correction and invalidation lineage is stored in match_result_change. Full validated payload remains on operation.payload. Projector state follows the referenced operation through inclusion, fork rollback, replay, and irreversibility; only allow-listed publisher events are accepted.'
 }
 
 Table hive_projection.match_result {
@@ -2108,7 +2292,7 @@ Table hive_projection.match_result_change {
   }
 
   checks {
-    `(change_type <> 'correction') OR (replacement_result_schema_version IS NOT NULL AND replacement_scoring_rule_version IS NOT NULL AND replacement_map_version_id IS NOT NULL AND replacement_map_content_sha256 IS NOT NULL AND replacement_server_build_version IS NOT NULL AND replacement_match_protocol_version IS NOT NULL AND replacement_public_result_sha256 IS NOT NULL)` [name: 'chk_match_result_change_correction']
+    `(change_type <> 'correction') OR (replacement_result_revision_id IS NOT NULL AND replacement_result_schema_version IS NOT NULL AND replacement_scoring_rule_version IS NOT NULL AND replacement_map_version_id IS NOT NULL AND replacement_map_content_sha256 IS NOT NULL AND replacement_server_build_version IS NOT NULL AND replacement_match_protocol_version IS NOT NULL AND replacement_public_result_sha256 IS NOT NULL)` [name: 'chk_match_result_change_correction']
     `(change_type <> 'invalidation') OR (replacement_result_revision_id IS NULL AND replacement_result_schema_version IS NULL AND replacement_scoring_rule_version IS NULL AND replacement_map_version_id IS NULL AND replacement_map_content_sha256 IS NULL AND replacement_server_build_version IS NULL AND replacement_match_protocol_version IS NULL AND replacement_public_result_sha256 IS NULL)` [name: 'chk_match_result_change_invalidation']
   }
 
@@ -2359,6 +2543,17 @@ Ref fk_auth_session_external: identity.auth_session.external_identity_id > ident
 Ref fk_player_preference_player: identity.player.id - identity.player_preference.player_id [delete: restrict, update: no action]
 Ref fk_platform_setting_player: identity.player_platform_setting.player_id > identity.player.id [delete: restrict, update: no action]
 Ref fk_player_appearance_player: identity.player.id - identity.player_appearance.player_id [delete: restrict, update: no action]
+Ref fk_platform_role_approval_target: identity.platform_role_approval.target_player_id > identity.player.id [delete: restrict, update: no action]
+Ref fk_platform_role_approval_requester: identity.platform_role_approval.requested_by_player_id > identity.player.id [delete: restrict, update: no action]
+Ref fk_platform_role_approval_approver: identity.platform_role_approval.approved_by_player_id > identity.player.id [delete: restrict, update: no action]
+Ref fk_platform_role_assignment_player: identity.platform_role_assignment.player_id > identity.player.id [delete: restrict, update: no action]
+Ref fk_platform_role_assignment_granter: identity.platform_role_assignment.granted_by_player_id > identity.player.id [delete: restrict, update: no action]
+Ref fk_platform_role_assignment_approval: identity.platform_role_assignment.approval_id > identity.platform_role_approval.id [delete: restrict, update: no action]
+Ref fk_platform_role_assignment_grant_audit: identity.platform_role_assignment.grant_audit_event_id > identity.authorization_audit_event.id [delete: restrict, update: no action]
+Ref fk_platform_role_assignment_revoker: identity.platform_role_assignment.revoked_by_player_id > identity.player.id [delete: restrict, update: no action]
+Ref fk_platform_role_assignment_revocation_audit: identity.platform_role_assignment.revocation_audit_event_id > identity.authorization_audit_event.id [delete: restrict, update: no action]
+Ref fk_authorization_audit_actor: identity.authorization_audit_event.actor_player_id > identity.player.id [delete: restrict, update: no action]
+Ref fk_authorization_audit_subject: identity.authorization_audit_event.subject_player_id > identity.player.id [delete: restrict, update: no action]
 
 Ref fk_friend_request_requester: social.friend_request.requester_player_id > identity.player.id [delete: restrict, update: no action]
 Ref fk_friend_request_recipient: social.friend_request.recipient_player_id > identity.player.id [delete: restrict, update: no action]
@@ -2458,6 +2653,7 @@ Ref fk_payout_tournament: tournament.payout.tournament_id > tournament.tournamen
 Ref fk_payout_entry: tournament.payout.(tournament_entry_id, tournament_id) > tournament.tournament_entry.(id, tournament_id) [delete: restrict, update: no action]
 Ref fk_payout_payment: tournament.payout.payment_transaction_id > commerce.payment_transaction.id [delete: restrict, update: no action]
 
+Ref fk_hive_operation_checkpoint: hive_projection.operation.checkpoint_id > hive_projection.block_checkpoint.id [delete: restrict, update: no action]
 Ref fk_match_event_operation: hive_projection.match_event.operation_id > hive_projection.operation.id [delete: restrict, update: no action]
 Ref fk_match_result_initial_event: hive_projection.match_result.initial_event_uuid > hive_projection.match_event.event_uuid [delete: restrict, update: no action]
 Ref fk_match_result_current_event: hive_projection.match_result.current_event_uuid > hive_projection.match_event.event_uuid [delete: restrict, update: no action]

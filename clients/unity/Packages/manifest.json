@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "com.heroiclabs.nakama-unity": "https://github.com/heroiclabs/nakama-unity.git?path=/Packages/Nakama#v3.21.1",
+    "com.unity.modules.jsonserialize": "1.0.0"
+  }
+}

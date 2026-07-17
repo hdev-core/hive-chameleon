@@ -1,0 +1,6 @@
+node_modules
+dist
+coverage
+clients/unity
+docs
+package-lock.json

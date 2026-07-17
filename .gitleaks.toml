@@ -1,0 +1,18 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fixed, non-secret identity and credential fixtures"
+regexTarget = "secret"
+regexes = [
+  '''01980abc-def0-7abc-8def-0123456789ab''',
+  '''01980abc-def1-7abc-9def-0123456789ab''',
+  '''0123456789abcdef0123456789abcdef''',
+  '''replace-with-at-least-32-random-characters''',
+]
+
+[[allowlists]]
+description = "Ignored Unity-generated caches and build products"
+paths = [
+  '''(^|/)clients/unity/(Library|Temp|Obj|Build|Builds|Logs|UserSettings)/''',
+]

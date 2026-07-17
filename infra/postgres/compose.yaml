@@ -1,0 +1,55 @@
+name: hive-chameleon-database
+
+services:
+  postgres:
+    image: postgres:17.7-bookworm@sha256:86e0b703649d7a792bd9243ee28afc9d8f7c6b2b5638077c9d6882d4d472bbfd
+    environment:
+      POSTGRES_DB: hive_chameleon
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - '${HC_POSTGRES_PORT:-5433}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d hive_chameleon']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  dbmate:
+    image: ghcr.io/amacneil/dbmate:2.34.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/hive_chameleon?sslmode=disable
+    volumes:
+      - ./migrations:/db/migrations:ro
+    command: ['--migrations-dir', '/db/migrations', '--no-dump-schema', '--wait', 'up']
+
+  schema-test:
+    image: postgres:17.7-bookworm@sha256:86e0b703649d7a792bd9243ee28afc9d8f7c6b2b5638077c9d6882d4d472bbfd
+    depends_on:
+      dbmate:
+        condition: service_completed_successfully
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./test:/tests:ro
+    entrypoint:
+      - /bin/bash
+      - -euo
+      - pipefail
+      - -c
+    command:
+      - >-
+        psql -h postgres -U postgres -d hive_chameleon -v ON_ERROR_STOP=1
+        -f /tests/001_schema.sql
+        -f /tests/002_constraints.sql
+        -f /tests/003_terminal_round.sql
+        -f /tests/004_projection_corrections.sql
+        -f /tests/005_database_roles.sql
+
+volumes:
+  postgres-data:

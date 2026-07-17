@@ -1,0 +1,41 @@
+{
+  "name": "hive-chameleon",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hive Chameleon application workspace",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "workers/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "contracts:check": "npm run openapi:check && npm run dbml:check",
+    "dbml:check": "dbml2sql docs/technical-specification/data-model/hive-chameleon.dbml --postgres -o /tmp/hive-chameleon.dbml.sql",
+    "dev": "npm run dev --workspace @hive-chameleon/api",
+    "format": "prettier --write .github apps packages workers runtime/nakama/*.mjs package.json tsconfig.base.json eslint.config.mjs",
+    "format:check": "prettier --check .github apps packages workers runtime/nakama/*.mjs package.json tsconfig.base.json eslint.config.mjs",
+    "lint": "eslint apps packages workers --no-error-on-unmatched-pattern",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "go:check": "cd runtime/nakama && test -z \"$(gofmt -l .)\" && go vet ./... && go test ./... && go test -race ./...",
+    "openapi:check": "redocly lint docs/technical-specification/architecture/openapi.yaml --extends=minimal",
+    "realtime:smoke": "bash scripts/check-nakama-bridge.sh",
+    "schema:check": "bash scripts/check-postgres-schema.sh",
+    "security:dependencies": "npm audit --audit-level=high",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run go:check && npm run contracts:check && npm run schema:check && npm run security:dependencies"
+  },
+  "devDependencies": {
+    "@dbml/cli": "8.3.1",
+    "@eslint/js": "10.0.1",
+    "@redocly/cli": "2.39.0",
+    "eslint": "10.7.0",
+    "prettier": "3.9.5",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.64.0"
+  }
+}

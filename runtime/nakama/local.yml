@@ -1,0 +1,33 @@
+name: hive-chameleon
+data_dir: /nakama/data
+
+logger:
+  level: DEBUG
+  stdout: true
+
+metrics:
+  namespace: hive_chameleon
+  prometheus_port: 7354
+
+runtime:
+  path: /nakama/data/modules
+
+socket:
+  port: 7350
+  max_message_size_bytes: 4096
+  read_timeout_ms: 10000
+  write_timeout_ms: 10000
+  idle_timeout_ms: 60000
+  write_wait_ms: 5000
+  pong_wait_ms: 10000
+  ping_period_ms: 8000
+
+session:
+  token_expiry_sec: 900
+  refresh_token_expiry_sec: 3600
+  single_session: true
+  single_socket: true
+  single_match: true
+
+console:
+  port: 7351

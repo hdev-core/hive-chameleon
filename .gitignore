@@ -107,3 +107,34 @@ InitTestScene*.unity*
 
 
 .DS_STORE
+
+# Node / TypeScript
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.npm/
+
+# Runtime configuration and credentials
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Nakama Go plugin and local runtime data
+*.so
+runtime/nakama/data/
+
+# Local containers and tooling
+.docker/
+.cache/
+
+# The Unity project lives below the repository root, so the root-anchored rules above do not
+# cover its generated directories.
+clients/unity/[Ll]ibrary/
+clients/unity/[Tt]emp/
+clients/unity/[Oo]bj/
+clients/unity/[Bb]uild/
+clients/unity/[Bb]uilds/
+clients/unity/[Ll]ogs/
+clients/unity/[Uu]ser[Ss]ettings/

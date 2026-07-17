@@ -69,17 +69,17 @@ The model follows the current Hive-layer decisions:
 
 ## 4. Schema organization
 
-The ERD contains 70 application tables grouped into the existing seven PostgreSQL schemas.
+The ERD contains 74 application tables grouped into the existing seven PostgreSQL schemas.
 
 | Schema | Tables | Responsibility | Primary roots |
 | --- | ---: | --- | --- |
-| `identity` | 12 | Direct/Google identity, account provisioning, custody/claim state, disclosure, profiles, sessions, settings | `external_identity`, `hive_account_provisioning`, `player` |
+| `identity` | 15 | Direct/Google identity, account provisioning, custody/claim state, disclosure, profiles, sessions, settings, staff-role grants, and authorization evidence | `external_identity`, `hive_account_provisioning`, `player` |
 | `social` | 5 | Friend requests, friendships, blocks, invitations, notifications | `friend_request`, `friendship` |
 | `game` | 17 | Lobby lifecycle, completed results/revisions, match-publication outbox, statistics, achievements | `lobby`, `game_round`, `match_publication_outbox` |
 | `content` | 9 | Maps, versions, assets, review, distribution, showcase workflow | `map`, `map_version` |
 | `commerce` | 8 | Collectible catalog and instances, loadout, offers, purchases, payments | `collectible_definition`, `payment_transaction` |
 | `tournament` | 8 | Tournament rules, entries, matches, aggregate scores, payouts | `tournament` |
-| `hive_projection` | 11 | Validated, fork-aware application projections of required Hive operations and public match events | `operation`, `match_event` |
+| `hive_projection` | 12 | Validated, fork-aware application projections of required Hive operations and public match events | `block_checkpoint`, `operation`, `match_event` |
 
 `hive_projection` is a logical security and ownership boundary. HAF should run in its own managed database or equivalent isolated schema/role boundary. A dedicated indexer reads from HAF or a public HAF/HAfAH service and writes only the application projections defined here.
 
@@ -101,6 +101,9 @@ The ERD contains 70 application tables grouped into the existing seven PostgreSQ
 | `identity.player_preference` | Cross-platform comfort, accessibility, audio, UI, and Streamer Mode settings | One-to-one with player |
 | `identity.player_platform_setting` | Platform-specific sensitivity and control mappings | One row per player/platform |
 | `identity.player_appearance` | Persistent lobby character form, size preset, pose, and paint artifact reference | One-to-one with player; cube uses only the approved `x1_0` size |
+| `identity.platform_role_approval` | Independent approval evidence for high-risk staff-role grants or extensions | Requester and approver must differ; approved scope, role, subject, and validity must exactly match the assignment |
+| `identity.platform_role_assignment` | Time-bounded staff/operator authorization | Global or typed resource scope, immutable grant evidence, non-overlapping active validity, and append-only grant/revocation audit references |
+| `identity.authorization_audit_event` | Non-secret authorization decision evidence | Append-only human/service allow, deny, grant, and revoke records with correlation and reason; retained at least 180 days in production |
 
 The pending-Google boundary is explicit: `external_identity`, its disclosure acknowledgment, and `hive_account_provisioning` exist before a player. `identity.player` and a playable `auth_session` are created only after the named Hive account is irreversible, its observed authorities match the four expected public keys, and initial RC support is verified. No guest or partly provisioned player row is created. A returning verified issuer/subject resumes the same external identity and logical job. The canonical Hive username is lowercase, unique, and immutable once the account is observed on Hive.
 
@@ -160,7 +163,7 @@ Friends, invitations, blocking, presence, and lobby activity remain off-chain. N
 | `game.round_like` | One Answer Check choice per voter | Target must be a participant in the same round; no self-like |
 | `game.round_result_revision` | Append-only initial/correction/invalidation chain | Initial snapshot points to immutable canonical result object; unique previous edge and sequential same-round trigger prevent branching |
 | `game.match_publication_request` | Durable per-revision publication request | Initial request is committed with the completed detailed result; one noncancelled initial request per round |
-| `game.match_publication_outbox` | Exact logical Hive event/batch payload and retry/finality state | Stable event/batch UUIDs and canonical text/hash survive transaction rebuilds; separate from HAF projection |
+| `game.match_publication_outbox` | Exact logical Hive event payload and retry/finality state | Stable event UUID and canonical text/hash survive retries; initial events also carry a stable batch UUID/period, while corrections and invalidations carry lineage inside their payload; separate from HAF projection |
 | `game.match_publication_item` | Ordered outbox-to-round/request membership | Each request enters one payload; initial batch positions/counts are validated; correction/invalidation has one item |
 | `game.player_mode_stat` | Rebuildable Casual/Infection summary cache | One row per player/mode; round history remains authoritative |
 | `game.achievement_definition` | Versioned off-chain achievement criteria | May reference a collectible badge definition |
@@ -227,8 +230,9 @@ There is no separate custom tournament-settlement, bracket, or payout-calculatio
 
 | Entity | Responsibility | Important relationships and rules |
 | --- | --- | --- |
-| `hive_projection.operation` | Fork-aware normalized envelope for a relevant Hive operation | Stable HAF/HAfAH operation ID covers transaction and virtual operations; normal transaction/index identity plus included, irreversible, or reverted state |
-| `hive_projection.match_event` | Normalized accepted match batch/correction/invalidation envelope | References one HAF operation; publisher, schema/event versions, period, count, validation, and finality are relational |
+| `hive_projection.block_checkpoint` | Per-source block/fork evidence, including blocks with no relevant operation | Retains old and replacement branches, parent identity, reversible/irreversible state, and one current block per source/height |
+| `hive_projection.operation` | Fork-aware raw envelope for a relevant Hive operation | Stable HAF/HAfAH identity, checkpoint, payload, validation/rejection evidence, and included/irreversible/reverted state; malformed or unauthorized events remain auditable without typed rows |
+| `hive_projection.match_event` | Normalized accepted match batch/correction/invalidation envelope | References one HAF operation; only initial batches carry a batch UUID and publication period, while correction/invalidation lineage remains in `match_result_change` |
 | `hive_projection.match_result` | Integrity/join projection for one accepted initial result item | One initial item per round; versions, map/version content hash, build/protocol, public result hash, current event, and reconciliation state |
 | `hive_projection.match_result_change` | Linear correction/invalidation edge | References original batch/event and exactly one superseded event; replacement integrity fields exist only for corrections |
 | `hive_projection.collectible_event` | Validated `collectible_issued` or `collectible_revoked` payload | Only allow-listed official issuer events can update domain ownership |
@@ -382,6 +386,9 @@ An unclaimed custodial player explicitly confirms an active-authority entry tran
 | Secrets | Only one-way hashes, public keys/authorities, and opaque non-secret references; all private signing, recovery, OIDC token, and service-key material is excluded |
 
 UUIDv7 generation belongs in the application/shared service library so deployments do not depend on a particular PostgreSQL major version's UUIDv7 function.
+The initial migrations enable `pgcrypto` to verify stored canonical-payload digests and
+`btree_gist` to exclude overlapping active role-validity ranges. They do not enable
+`uuid-ossp`; the database validates UUIDv7 version/variant bits without generating IDs.
 
 ## 9. Constraints and indexes represented in DBML
 
@@ -523,6 +530,28 @@ CREATE UNIQUE INDEX uq_rc_delegation_one_active_scope
         'active'::hive_projection.rc_delegation_status,
         'reclaiming'::hive_projection.rc_delegation_status
     );
+
+CREATE UNIQUE INDEX uq_block_checkpoint_current_height
+    ON hive_projection.block_checkpoint (source, block_number)
+    WHERE state <> 'reverted'::hive_projection.operation_state;
+
+CREATE UNIQUE INDEX uq_hive_operation_current_source_id
+    ON hive_projection.operation (source_operation_id)
+    WHERE state <> 'reverted'::hive_projection.operation_state;
+
+CREATE UNIQUE INDEX uq_hive_operation_current_tx_index
+    ON hive_projection.operation (transaction_id, operation_index)
+    WHERE transaction_id IS NOT NULL
+      AND state <> 'reverted'::hive_projection.operation_state;
+
+CREATE UNIQUE INDEX uq_platform_role_approval_one_pending
+    ON identity.platform_role_approval (
+      target_player_id,
+      role,
+      scope_type,
+      COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid)
+    )
+    WHERE state = 'pending'::identity.role_approval_state;
 ```
 
 `hive_account_provisioning.external_identity_id` is a full unique constraint rather than a partial index: the design retains and retries one logical job for the lifetime of the external identity, including its completed outcome. `match_result.round_id` similarly enforces one accepted initial Hive result per round. A separate current-chain-head index is unnecessary because one revision number per round, exactly one revision-one initial row, noninitial previous edges, and unique `previous_revision_id` produce one chain; its only leaf is the head. Those cross-row assumptions still require the triggers below.
@@ -532,6 +561,14 @@ An active-showcase uniqueness rule may be added when the publication workflow is
 ### 10.2 Required triggers or equivalent transactional service guarantees
 
 - Increment `row_version` and refresh `updated_at` on optimistic-lock aggregates.
+- Enforce non-overlapping unrevoked platform-role validity, exact typed scope existence, matching
+  append-only grant/revocation audit evidence, and an unexpired independent approval for
+  administrator/auditor grants or extensions.
+- Retain both branches of a Hive fork through block checkpoints, allow only one non-reverted
+  checkpoint per source/height, bind each raw operation to its exact checkpoint, and scope source
+  and transaction-position deduplication to non-reverted operations so replacement branches can
+  reuse their Hive identities without deleting old evidence. Retain rejected operation evidence
+  and prevent any irreversible checkpoint/operation from being reverted.
 - Treat `hive_account_provisioning.external_identity_id` as the serialized idempotency root. Make the requested username immutable after a matching account is observed; reconcile uncertain creation by account name and all expected public authorities before linking.
 - Require exactly one nondestroyed owner, active, posting, and memo `custody_key_reference` before `keys_ready`; only the custody adapter may transition destruction state/evidence. A `ready` transaction links the same external identity/job/username, player, initial RC row, and pre-provisioning disclosure acknowledgment.
 - Prevent creation of a playable Google `player` or `auth_session` before account/authority/RC verification. Never synthesize a guest identity for an incomplete job.
@@ -588,7 +625,7 @@ Retain external identity mappings needed for continuity; completed provisioning 
 
 ### 11.2 Operationally expirable records
 
-Expired/revoked sessions, lobby access tokens, invitations, read notifications, and expired/failed transaction-intent retry details can be archived or purged by scheduled policy after their troubleshooting window. Provisioning and publication retry telemetry may be compacted only after the immutable outcome and chain references remain reconstructable. Raw secrets are never retained for audit. Exact retention durations belong in the later security/non-functional-needs card.
+Expired/revoked sessions, lobby access tokens, invitations, read notifications, and expired/failed transaction-intent retry details can be archived or purged by scheduled policy after their troubleshooting window. Provisioning and publication retry telemetry may be compacted only after the immutable outcome and chain references remain reconstructable. Raw secrets are never retained for audit. The [non-functional requirements](../non-functional-requirements.md) set the security-audit minimum; remaining domain-record durations require an approved retention policy before production.
 
 ### 11.3 Initial scaling decision
 
@@ -622,32 +659,41 @@ The model is deliberately broad enough to support the approved P0/P1 product flo
 - Production Hive service-account names and operational custody procedures.
 - Final approval of the provisional `hive.chameleon` application namespace.
 
-User roles and administrative permissions are intentionally deferred to the dedicated **Define user roles & permissions** card. The reviewer and issuer references in this model establish data relationships, not authorization by themselves.
+Human, resource-scoped, and service permissions are defined in the
+[roles and permissions design](../roles-and-permissions.md). Durable platform-role assignments,
+independent high-risk approvals, and append-only authorization audit events are implemented here;
+reviewer and issuer references alone do not grant authorization.
 
 ## 13. Validation and usage
 
-Import `hive-chameleon.dbml` into [dbdiagram.io](https://dbdiagram.io/) or another DBML-compatible renderer to inspect the ERD. Validate and export it locally with:
+Import `hive-chameleon.dbml` into [dbdiagram.io](https://dbdiagram.io/) or another
+DBML-compatible renderer to inspect the ERD. From the repository root, validate and export it with:
 
 ```bash
 NPM_CONFIG_CACHE=/tmp/npm-cache \
   npx --yes --package @dbml/cli \
-  dbml2sql hive-chameleon.dbml --postgres \
+  dbml2sql docs/technical-specification/data-model/hive-chameleon.dbml --postgres \
   -o /tmp/hive-chameleon.sql
 ```
 
-The source currently compiles successfully with the DBML CLI. A successful export validates DBML syntax and relationship resolution; the generated SQL still needs project migrations for the partial indexes, triggers, security roles, extensions, and deployment-specific choices described above.
+The source currently compiles successfully with the DBML CLI. A successful export validates DBML
+syntax and relationship resolution. The ordered release schema lives in
+`infra/postgres/migrations`; it adds the partial indexes, triggers, security roles, and extensions
+that DBML cannot express. `infra/postgres/compose.yaml` applies those migrations to a clean
+PostgreSQL 17 database and runs the executable schema/constraint tests.
 
-## 14. Card acceptance checklist
+## 14. Implemented scope
 
-- [x] Core product entities are represented in PostgreSQL-oriented DBML.
-- [x] Primary keys, foreign keys, cardinalities, enums, indexes, and checks are defined.
-- [x] Direct-Hive and Google identity, pending provisioning, custody references, claim/recovery, and disclosure acknowledgment have explicit boundaries without stored secrets.
-- [x] Batched match publication separates immutable operational results/outbox data from fork-aware HAF projections and append-only corrections/invalidations.
-- [x] Collectible ownership, community posts/votes, sponsor-backed initial RC, later RC support,
-  and payment projections have explicit authority boundaries.
-- [x] Live Nakama/Redis state and object-storage content are excluded from relational persistence.
-- [x] Completed versus aborted round persistence is defined.
-- [x] Map versioning, review, and platform distribution are modeled.
-- [x] Tournament entry, scoring, payment, and payout relationships are modeled.
-- [x] PostgreSQL-only integrity requirements missing from DBML are documented.
-- [x] The DBML source exports successfully to PostgreSQL SQL.
+- Core product entities are represented in PostgreSQL-oriented DBML with primary keys, foreign
+  keys, cardinalities, enums, indexes, and checks.
+- Direct-Hive and Google identity, pending provisioning, custody references, claim/recovery, and
+  disclosure acknowledgment have explicit boundaries without stored secrets.
+- Batched match publication separates immutable operational results/outbox data from fork-aware
+  HAF projections and append-only corrections/invalidations.
+- Collectible ownership, community posts/votes, sponsor-backed initial RC, later RC support, and
+  payment projections have explicit authority boundaries.
+- Live Nakama/Redis state and object-storage content are excluded from relational persistence.
+- Completed versus aborted round persistence, map version/review/distribution, and tournament
+  entry/scoring/payment/payout relationships are modeled.
+- PostgreSQL-only integrity rules are executable migrations and tests, and the DBML source exports
+  successfully to PostgreSQL SQL.
