@@ -1,7 +1,8 @@
 # Chameleon — Deployment & Infrastructure Guide
 
 Infra reference for **hive-chameleon** — the most infrastructure-rich project in the cohort:
-a TypeScript + **Go workers** + **Postgres** monorepo (`apps/ workers/ runtime/ infra/`, Dockerised).
+a **Unity game client** (WebGL + desktop) backed by a TypeScript (NestJS) + **Go/Nakama workers** +
+**Postgres** monorepo (`apps/ workers/ runtime/ infra/`, Dockerised).
 
 **Your team**
 - **Mohammad Ibrahim** — currently sole owner: architecture, data model, auth/identity, Hive
@@ -13,33 +14,45 @@ a TypeScript + **Go workers** + **Postgres** monorepo (`apps/ workers/ runtime/ 
 
 | Layer | What you use | Where it runs |
 |-------|--------------|---------------|
-| Frontend | TypeScript app (`apps/*`) | **Vercel** |
+| Game client | **Unity** — WebGL (browser) + desktop (Win/macOS/Linux) | WebGL → static host (Hetzner Object Storage or a static CDN); desktop → downloadable builds (not web-hosted) |
+| API | NestJS (TypeScript) | **always-on** → local now, **Hetzner** later |
+| Realtime | Nakama (Go) | **always-on** → local now, **Hetzner** later |
+| Workers / runtime | Hive gateway, HAF projector, publishers | **always-on** → local now, **Hetzner** later |
 | Database | Postgres (heavy PL/pgSQL) | **Supabase** *or* self-hosted (you have `infra/` + Dockerfile) |
-| **Go workers / runtime** | your background services | **always-on** → local now, **Hetzner** later |
-| Signing | secp256k1 via KMS/HSM | see note below |
-| Auth | Keychain + custodial Google provisioner | Hive-native, **not** Supabase Auth |
+| Signing | secp256k1 via managed KMS/HSM | isolated custody boundary — see note below |
+| Auth | Keychain (WebGL) + HiveAuth (desktop) + custodial Google provisioner | Hive-native, **not** Supabase Auth |
 
-You're **full-stack with persistent Go workers** — those can't run on Vercel (serverless). Given
-you already have `infra/` + a `Dockerfile`, a **Docker deploy on our Hetzner box** is the natural
-home for the workers when you go live (see §4).
+Two things make you different from the other cohort projects:
+1. **Your client is Unity, not a React/Vercel web app** — it builds to WebGL (static files) + native
+   desktop binaries, so the cohort "Vercel + `deploy.yml`" flow does **not** apply to it (see §3).
+2. **You're backend-heavy with persistent services** (NestJS, Nakama, Go workers) that can't run on
+   serverless — given your `infra/` + `Dockerfile`, a **Docker deploy on Hetzner** is their home (see §4).
 
 ---
 
 ## 2. "I can't deploy / connect X" — how access works
 
-Connecting Supabase / Vercel / Render to a repo in the **`hdev-core`** org needs an **org owner
+Connecting Supabase / a static host / Render to a repo in the **`hdev-core`** org needs an **org owner
 (Dr. Mohammad)** to authorize that service's GitHub app — you can't self-authorize. Request via your
-DevOps card, naming the **service** scoped to **hive-chameleon only**. The Vercel *Actions* method
-(§3A) needs no org app.
+DevOps card, naming the **service** scoped to **hive-chameleon only**.
 
 ---
 
-## 3. Frontend → Vercel
+## 3. Client → Unity builds (WebGL + desktop)
 
-**A) GitHub Actions + token (recommended).** Create a Vercel project (set the Root Directory to your
-web app inside `apps/`), add repo secrets `VERCEL_TOKEN` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID`, add
-`deploy.yml` + `preview.yml` (see `HOSTING_GUIDE.md`). Push to `main` → auto-deploy; each PR → preview.
-**B)** Or the owner authorizes the Vercel app (scoped to hive-chameleon) and you import it.
+Your Unity client is **not** a React/Vercel app, so the cohort `deploy.yml`/`preview.yml` (built for
+Vite/React) don't apply. Instead:
+
+- **WebGL (browser):** Unity exports static files (`Build/` + `index.html`). Serve them from **Hetzner
+  Object Storage** (matches your NFR asset store) over HTTPS/presigned delivery, or any static host.
+  No serverless runtime involved.
+- **Desktop (Win/macOS/Linux):** ship as **downloadable builds** (e.g. GitHub Releases + a download
+  page) — these are distributed binaries, not web-hosted.
+- **Builds/CI:** Unity WebGL + desktop builds need a **licensed Unity CI runner** (e.g. game-ci) — set
+  this up before staging promotion (it's already on your roadmap's decision gates). Your PR CI still
+  runs the TS/Go/schema/OpenAPI checks; the Unity compile/build check runs when the licensed runner is available.
+- *If* you add a separate TS web portal under `apps/` (admin/landing), that one **can** use the
+  standard Vercel + Actions method — but the game client itself follows the above.
 
 ## 3b. Database → Postgres
 
