@@ -1,3 +1,5 @@
+import { parseHiveChameleonEvent, type HiveChameleonEvent } from '@hive-chameleon/hive-gateway';
+
 import { HafProjectorError } from '../errors.js';
 import type { BlockCheckpoint, HafBlock, OperationDecision, ProjectionCursor } from '../model.js';
 import type { ProjectionStore } from './projection-store.js';
@@ -41,6 +43,21 @@ interface CheckpointRow extends Record<string, unknown> {
   readonly observed_at: Date | string;
   readonly irreversible_at: Date | string | null;
   readonly reverted_at: Date | string | null;
+}
+
+interface IrreversibleOperationRow extends Record<string, unknown> {
+  readonly id: string;
+  readonly transaction_id: string | null;
+  readonly block_number: string | number;
+  readonly block_timestamp: Date | string;
+  readonly primary_account: string;
+  readonly payload: unknown;
+  readonly match_event_uuid: string | null;
+}
+
+interface ProjectionIdentityRow extends Record<string, unknown> {
+  readonly id: string;
+  readonly revision_id?: string;
 }
 
 export class PostgresProjectionStore implements ProjectionStore {
@@ -143,7 +160,10 @@ export class PostgresProjectionStore implements ProjectionStore {
       );
 
       for (const decision of decisions) {
-        await this.insertOperation(client, checkpointId, decision, observedAt);
+        const operationId = await this.insertOperation(client, checkpointId, decision, observedAt);
+        if (decision.validationState === 'accepted' && isMatchEvent(decision.event)) {
+          await this.upsertIncludedMatchEvent(client, operationId, decision);
+        }
       }
 
       await client.query<Record<string, never>>(
@@ -174,6 +194,21 @@ export class PostgresProjectionStore implements ProjectionStore {
         );
       }
 
+      await client.query<Record<string, never>>(
+        `UPDATE hive_projection.match_event AS event
+            SET operation_state = 'reverted',
+                validation_state = 'reverted',
+                irreversible_at = NULL,
+                reverted_at = $3
+           FROM hive_projection.operation AS operation
+           JOIN hive_projection.block_checkpoint AS checkpoint
+             ON checkpoint.id = operation.checkpoint_id
+          WHERE event.operation_id = operation.id
+            AND checkpoint.source = $1
+            AND checkpoint.block_number > $2
+            AND event.operation_state = 'included'`,
+        [source, ancestorBlock, revertedAt],
+      );
       await client.query<Record<string, never>>(
         `UPDATE hive_projection.operation AS operation
             SET state = 'reverted', reverted_at = $3
@@ -217,6 +252,21 @@ export class PostgresProjectionStore implements ProjectionStore {
       }
 
       await client.query<Record<string, never>>(
+        `UPDATE hive_projection.match_event AS event
+            SET operation_state = 'irreversible',
+                validation_state = 'accepted',
+                irreversible_at = $3,
+                reverted_at = NULL
+           FROM hive_projection.operation AS operation
+           JOIN hive_projection.block_checkpoint AS checkpoint
+             ON checkpoint.id = operation.checkpoint_id
+          WHERE event.operation_id = operation.id
+            AND checkpoint.source = $1
+            AND checkpoint.block_number <= $2
+            AND event.operation_state = 'included'`,
+        [source, blockNumber, irreversibleAt],
+      );
+      await client.query<Record<string, never>>(
         `UPDATE hive_projection.operation AS operation
             SET state = 'irreversible', irreversible_at = $3
            FROM hive_projection.block_checkpoint AS checkpoint
@@ -244,6 +294,7 @@ export class PostgresProjectionStore implements ProjectionStore {
           WHERE source = $1`,
         [source, blockNumber, irreversibleAt],
       );
+      await this.materializeIrreversibleEvents(client, source, blockNumber, irreversibleAt);
     });
   }
 
@@ -281,8 +332,9 @@ export class PostgresProjectionStore implements ProjectionStore {
     checkpointId: string,
     decision: OperationDecision,
     observedAt: string,
-  ): Promise<void> {
+  ): Promise<string> {
     const evidence = decision.evidence;
+    const operationId = this.nextUuidV7();
     await client.query<Record<string, never>>(
       `INSERT INTO hive_projection.operation
         (id, checkpoint_id, source_operation_id, transaction_id, operation_index, is_virtual,
@@ -295,7 +347,7 @@ export class PostgresProjectionStore implements ProjectionStore {
          $12, $13, $14::jsonb, 'included', $15,
          $16, $17, $15)`,
       [
-        this.nextUuidV7(),
+        operationId,
         checkpointId,
         evidence.sourceOperationId,
         evidence.transactionId,
@@ -313,6 +365,468 @@ export class PostgresProjectionStore implements ProjectionStore {
         decision.validationState,
         decision.rejectionReason ?? null,
       ],
+    );
+    return operationId;
+  }
+
+  private async upsertIncludedMatchEvent(
+    client: SqlClientPort,
+    operationId: string,
+    decision: OperationDecision,
+  ): Promise<void> {
+    const event = decision.event;
+    if (!isMatchEvent(event)) {
+      return;
+    }
+    const fields = matchEventFields(event);
+    const values = [
+      event.event_id,
+      fields.batchId,
+      operationId,
+      event.type,
+      event.v,
+      `match-event-${event.event_version}`,
+      fields.periodStart,
+      fields.periodEnd,
+      fields.publisher,
+      fields.resultCount,
+      decision.evidence.blockTimestamp,
+    ] as const;
+
+    const replay = await client.query<Record<string, never>>(
+      `UPDATE hive_projection.match_event
+          SET operation_id = $2,
+              operation_state = 'included',
+              validation_state = 'accepted',
+              rejection_reason = NULL,
+              included_at = $3,
+              irreversible_at = NULL,
+              reverted_at = NULL
+        WHERE event_uuid = $1
+          AND operation_state = 'reverted'`,
+      [event.event_id, operationId, decision.evidence.blockTimestamp],
+    );
+    if (replay.rowCount !== 0) {
+      return;
+    }
+
+    // Duplicate logical events on another included transaction are retained as raw operations but
+    // do not replace the first binding. A reverted binding is replaced only by the exact-payload
+    // replay path above, which the database trigger independently verifies.
+    await client.query<Record<string, never>>(
+      `INSERT INTO hive_projection.match_event
+        (event_uuid, batch_uuid, operation_id, event_type, schema_version,
+         event_contract_version, publication_period_start, publication_period_end,
+         publisher_hive_account, result_count, operation_state, validation_state, included_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'included', 'accepted', $11)
+       ON CONFLICT DO NOTHING`,
+      values,
+    );
+  }
+
+  private async materializeIrreversibleEvents(
+    client: SqlClientPort,
+    source: string,
+    blockNumber: number,
+    irreversibleAt: string,
+  ): Promise<void> {
+    const result = await client.query<IrreversibleOperationRow>(
+      `SELECT operation.id,
+              operation.transaction_id,
+              operation.block_number,
+              operation.block_timestamp,
+              operation.primary_account,
+              operation.payload,
+              match_event.event_uuid AS match_event_uuid
+         FROM hive_projection.operation AS operation
+         JOIN hive_projection.block_checkpoint AS checkpoint
+           ON checkpoint.id = operation.checkpoint_id
+         LEFT JOIN hive_projection.match_event AS match_event
+           ON match_event.operation_id = operation.id
+        WHERE checkpoint.source = $1
+          AND checkpoint.block_number <= $2
+          AND operation.state = 'irreversible'
+          AND operation.irreversible_at = $3
+          AND operation.validation_state = 'accepted'
+          AND operation.application_id = 'hive.chameleon'
+        ORDER BY operation.block_number, operation.operation_index, operation.id`,
+      [source, blockNumber, irreversibleAt],
+    );
+
+    for (const row of result.rows) {
+      const event = eventFromOperationPayload(row.payload);
+      switch (event.type) {
+        case 'match_results_batch':
+          if (row.match_event_uuid !== event.event_id) break;
+          await this.materializeInitialMatchResults(client, event, irreversibleAt);
+          break;
+        case 'match_result_corrected':
+          if (row.match_event_uuid !== event.event_id) break;
+          await this.materializeMatchCorrection(client, event, irreversibleAt);
+          break;
+        case 'match_result_invalidated':
+          if (row.match_event_uuid !== event.event_id) break;
+          await this.materializeMatchInvalidation(client, event);
+          break;
+        case 'collectible_issued':
+          await this.materializeCollectibleIssue(client, row, event, irreversibleAt);
+          break;
+        case 'collectible_revoked':
+          await this.materializeCollectibleRevocation(client, row, event);
+          break;
+      }
+    }
+  }
+
+  private async materializeInitialMatchResults(
+    client: SqlClientPort,
+    event: Extract<HiveChameleonEvent, { type: 'match_results_batch' }>,
+    irreversibleAt: string,
+  ): Promise<void> {
+    for (const [position, result] of event.data.results.entries()) {
+      await client.query<Record<string, never>>(
+        `WITH local_result AS (
+           SELECT round.id AS round_id,
+                  matching_revision.id AS revision_id
+             FROM game.game_round AS round
+             JOIN content.map_version AS map_version
+               ON map_version.id = round.map_version_id
+              AND map_version.id = $7
+              AND map_version.map_id = $8
+             LEFT JOIN LATERAL (
+               SELECT revision.id
+                 FROM game.round_result_revision AS revision
+                WHERE revision.round_id = round.id
+                  AND revision.result_schema_version = $5
+                  AND revision.scoring_rule_version = $6
+                  AND revision.canonical_complete_result_sha256 = $12
+                ORDER BY revision.revision_number DESC
+                LIMIT 1
+             ) AS matching_revision ON true
+            WHERE round.id = $4
+              AND EXISTS (
+                SELECT 1
+                  FROM content.map_asset AS asset
+                 WHERE asset.map_version_id = map_version.id
+                   AND asset.kind = 'package'
+                   AND asset.sha256 = $9
+              )
+         )
+         INSERT INTO hive_projection.match_result
+          (id, initial_event_uuid, result_position, round_id, result_schema_version,
+           scoring_rule_version, map_version_id, map_content_sha256,
+           server_build_version, match_protocol_version, public_result_sha256,
+           current_state, current_event_uuid, matched_result_revision_id,
+           reconciliation_state, reconciled_at)
+         SELECT $1, $2, $3, local_result.round_id, $5,
+                $6, $7, $9, $10, $11, $12,
+                'current', $2, local_result.revision_id,
+                CASE WHEN local_result.revision_id IS NULL THEN 'pending'
+                     ELSE 'matched' END::hive_projection.reconciliation_state,
+                CASE WHEN local_result.revision_id IS NULL THEN NULL ELSE $13::timestamptz END
+           FROM local_result
+         ON CONFLICT (round_id) DO NOTHING`,
+        [
+          this.nextUuidV7(),
+          event.event_id,
+          position,
+          result.round_id,
+          result.result_schema,
+          result.scoring_rules,
+          result.map.version_id,
+          result.map.map_id,
+          result.map.content_sha256,
+          result.server.build,
+          result.server.protocol,
+          result.result_sha256,
+          irreversibleAt,
+        ],
+      );
+    }
+  }
+
+  private async materializeMatchCorrection(
+    client: SqlClientPort,
+    event: Extract<HiveChameleonEvent, { type: 'match_result_corrected' }>,
+    irreversibleAt: string,
+  ): Promise<void> {
+    const replacement = event.data.replacement_result;
+    const lookup = await client.query<ProjectionIdentityRow>(
+      `SELECT result.id,
+              revision.id AS revision_id
+         FROM hive_projection.match_result AS result
+         JOIN game.round_result_revision AS revision
+           ON revision.round_id = result.round_id
+          AND revision.revision_type = 'correction'
+          AND revision.reason_code = $5
+          AND revision.result_schema_version = $6
+          AND revision.scoring_rule_version = $7
+          AND revision.canonical_complete_result_sha256 = $12
+        WHERE result.round_id = $1
+          AND result.initial_event_uuid = $2
+          AND result.current_event_uuid = $3
+          AND EXISTS (
+            SELECT 1
+              FROM content.map_version AS map_version
+             WHERE map_version.id = $8
+               AND map_version.map_id = $9
+               AND EXISTS (
+                 SELECT 1
+                   FROM content.map_asset AS asset
+                  WHERE asset.map_version_id = map_version.id
+                    AND asset.kind = 'package'
+                    AND asset.sha256 = $10
+               )
+          )
+        ORDER BY revision.revision_number DESC
+        LIMIT 1`,
+      [
+        event.data.round_id,
+        event.data.original_event_id,
+        event.data.supersedes_event_id,
+        event.event_id,
+        event.data.reason_code,
+        replacement.result_schema,
+        replacement.scoring_rules,
+        replacement.map.version_id,
+        replacement.map.map_id,
+        replacement.map.content_sha256,
+        replacement.server.build,
+        replacement.result_sha256,
+      ],
+    );
+    const projected = lookup.rows[0];
+    if (projected?.revision_id === undefined) {
+      return;
+    }
+
+    const inserted = await client.query<Record<string, never>>(
+      `INSERT INTO hive_projection.match_result_change
+        (event_uuid, projected_result_id, round_id, original_batch_uuid,
+         original_event_uuid, supersedes_event_uuid, change_type, reason_code,
+         replacement_result_revision_id, replacement_result_schema_version,
+         replacement_scoring_rule_version, replacement_map_version_id,
+         replacement_map_content_sha256, replacement_server_build_version,
+         replacement_match_protocol_version, replacement_public_result_sha256)
+       VALUES
+        ($1, $2, $3, $4, $5, $6, 'correction', $7,
+         $8, $9, $10, $11, $12, $13, $14, $15)
+       ON CONFLICT (event_uuid) DO NOTHING`,
+      [
+        event.event_id,
+        projected.id,
+        event.data.round_id,
+        event.data.original_batch_id,
+        event.data.original_event_id,
+        event.data.supersedes_event_id,
+        event.data.reason_code,
+        projected.revision_id,
+        replacement.result_schema,
+        replacement.scoring_rules,
+        replacement.map.version_id,
+        replacement.map.content_sha256,
+        replacement.server.build,
+        replacement.server.protocol,
+        replacement.result_sha256,
+      ],
+    );
+    if (inserted.rowCount === 0) {
+      return;
+    }
+    await client.query<Record<string, never>>(
+      `UPDATE hive_projection.match_result
+          SET current_event_uuid = $2,
+              current_state = 'corrected',
+              matched_result_revision_id = $3,
+              reconciliation_state = 'matched',
+              reconciled_at = $4,
+              divergence_detected_at = NULL,
+              divergence_reason_code = NULL
+        WHERE id = $1
+          AND current_event_uuid = $5`,
+      [
+        projected.id,
+        event.event_id,
+        projected.revision_id,
+        irreversibleAt,
+        event.data.supersedes_event_id,
+      ],
+    );
+  }
+
+  private async materializeMatchInvalidation(
+    client: SqlClientPort,
+    event: Extract<HiveChameleonEvent, { type: 'match_result_invalidated' }>,
+  ): Promise<void> {
+    const lookup = await client.query<ProjectionIdentityRow>(
+      `SELECT result.id
+         FROM hive_projection.match_result AS result
+        WHERE result.round_id = $1
+          AND result.initial_event_uuid = $2
+          AND result.current_event_uuid = $3
+        LIMIT 1`,
+      [event.data.round_id, event.data.original_event_id, event.data.supersedes_event_id],
+    );
+    const projected = lookup.rows[0];
+    if (projected === undefined) {
+      return;
+    }
+    const inserted = await client.query<Record<string, never>>(
+      `INSERT INTO hive_projection.match_result_change
+        (event_uuid, projected_result_id, round_id, original_batch_uuid,
+         original_event_uuid, supersedes_event_uuid, change_type, reason_code)
+       VALUES ($1, $2, $3, $4, $5, $6, 'invalidation', $7)
+       ON CONFLICT (event_uuid) DO NOTHING`,
+      [
+        event.event_id,
+        projected.id,
+        event.data.round_id,
+        event.data.original_batch_id,
+        event.data.original_event_id,
+        event.data.supersedes_event_id,
+        event.data.reason_code,
+      ],
+    );
+    if (inserted.rowCount === 0) {
+      return;
+    }
+    await client.query<Record<string, never>>(
+      `UPDATE hive_projection.match_result
+          SET current_event_uuid = $2,
+              current_state = 'invalidated'
+        WHERE id = $1
+          AND current_event_uuid = $3`,
+      [projected.id, event.event_id, event.data.supersedes_event_id],
+    );
+  }
+
+  private async materializeCollectibleIssue(
+    client: SqlClientPort,
+    operation: IrreversibleOperationRow,
+    event: Extract<HiveChameleonEvent, { type: 'collectible_issued' }>,
+    irreversibleAt: string,
+  ): Promise<void> {
+    if (operation.transaction_id === null) {
+      return;
+    }
+    const inserted = await client.query<Record<string, never>>(
+      `INSERT INTO hive_projection.collectible_event
+        (event_id, operation_id, schema_version, event_type, collectible_id,
+         collectible_definition_id, owner_hive_username, issuer_hive_username,
+         metadata_uri, metadata_sha256, issuance_reason, payment_transaction_id,
+         occurred_at, validation_state)
+       SELECT $1, $2, $3, 'issued', $4,
+              definition.id, player.hive_username, $5,
+              $6, $7, $8, payment.id,
+              $9, 'accepted'
+         FROM commerce.collectible_definition AS definition
+         JOIN identity.player AS player ON player.hive_username = $10
+         LEFT JOIN commerce.payment_transaction AS payment
+           ON payment.external_transaction_id = $11
+        WHERE definition.definition_code = $12
+          AND definition.kind::text = $13
+          AND definition.metadata_uri = $6
+          AND definition.metadata_sha256 = $7
+          AND ($11::text IS NULL OR payment.id IS NOT NULL)
+       ON CONFLICT (event_id) DO NOTHING`,
+      [
+        event.event_id,
+        operation.id,
+        event.v,
+        event.data.collectible_id,
+        event.data.issuer,
+        event.data.metadata_uri,
+        event.data.metadata_sha256,
+        event.data.reason,
+        event.occurred_at,
+        event.data.owner,
+        event.data.payment_tx_id ?? null,
+        event.data.definition_id,
+        event.data.kind,
+      ],
+    );
+    if (inserted.rowCount === 0) {
+      return;
+    }
+    await client.query<Record<string, never>>(
+      `INSERT INTO commerce.collectible_instance
+        (id, collectible_definition_id, owner_player_id, issuer_hive_account,
+         issuance_reason, metadata_uri, metadata_sha256, state, issued_event_id,
+         issued_hive_transaction_id, issued_hive_block_number, irreversible_at,
+         payment_transaction_id)
+       SELECT event.collectible_id,
+              event.collectible_definition_id,
+              player.id,
+              event.issuer_hive_username,
+              event.issuance_reason,
+              event.metadata_uri,
+              event.metadata_sha256,
+              'finalized',
+              event.event_id,
+              $2,
+              $3,
+              $4,
+              event.payment_transaction_id
+         FROM hive_projection.collectible_event AS event
+         JOIN identity.player AS player
+           ON player.hive_username = event.owner_hive_username
+        WHERE event.event_id = $1
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        event.event_id,
+        operation.transaction_id,
+        parseDatabaseInteger(operation.block_number),
+        irreversibleAt,
+      ],
+    );
+  }
+
+  private async materializeCollectibleRevocation(
+    client: SqlClientPort,
+    operation: IrreversibleOperationRow,
+    event: Extract<HiveChameleonEvent, { type: 'collectible_revoked' }>,
+  ): Promise<void> {
+    const inserted = await client.query<Record<string, never>>(
+      `INSERT INTO hive_projection.collectible_event
+        (event_id, operation_id, schema_version, event_type, collectible_id,
+         collectible_definition_id, owner_hive_username, issuer_hive_username,
+         metadata_uri, metadata_sha256, issuance_reason, payment_transaction_id,
+         occurred_at, validation_state)
+       SELECT $1, $2, $3, 'revoked', issued.collectible_id,
+              issued.collectible_definition_id, issued.owner_hive_username, $4,
+              issued.metadata_uri, issued.metadata_sha256, issued.issuance_reason,
+              issued.payment_transaction_id, $5, 'accepted'
+         FROM hive_projection.collectible_event AS issued
+         JOIN commerce.collectible_instance AS instance
+           ON instance.id = issued.collectible_id
+          AND instance.issued_event_id = issued.event_id
+          AND instance.state = 'finalized'
+        WHERE issued.event_id = $6
+          AND issued.event_type = 'issued'
+          AND issued.collectible_id = $7
+       ON CONFLICT (event_id) DO NOTHING`,
+      [
+        event.event_id,
+        operation.id,
+        event.v,
+        operation.primary_account,
+        event.occurred_at,
+        event.data.issued_event_id,
+        event.data.collectible_id,
+      ],
+    );
+    if (inserted.rowCount === 0) {
+      return;
+    }
+    await client.query<Record<string, never>>(
+      `UPDATE commerce.collectible_instance
+          SET state = 'revoked',
+              revoked_event_id = $2,
+              revoked_at = $3
+        WHERE id = $1
+          AND issued_event_id = $4
+          AND state = 'finalized'`,
+      [event.data.collectible_id, event.event_id, event.occurred_at, event.data.issued_event_id],
     );
   }
 
@@ -348,6 +862,61 @@ export class PostgresProjectionStore implements ProjectionStore {
       }
     }
   }
+}
+
+type ProjectedMatchEvent = Extract<
+  HiveChameleonEvent,
+  {
+    type: 'match_results_batch' | 'match_result_corrected' | 'match_result_invalidated';
+  }
+>;
+
+function isMatchEvent(event: HiveChameleonEvent | undefined): event is ProjectedMatchEvent {
+  return (
+    event !== undefined &&
+    (event.type === 'match_results_batch' ||
+      event.type === 'match_result_corrected' ||
+      event.type === 'match_result_invalidated')
+  );
+}
+
+function matchEventFields(event: ProjectedMatchEvent): {
+  readonly batchId: string | null;
+  readonly periodStart: string | null;
+  readonly periodEnd: string | null;
+  readonly publisher: string;
+  readonly resultCount: number;
+} {
+  if (event.type === 'match_results_batch') {
+    return {
+      batchId: event.data.batch_id,
+      periodStart: event.data.period_start,
+      periodEnd: event.data.period_end,
+      publisher: event.data.publisher,
+      resultCount: event.data.result_count,
+    };
+  }
+  return {
+    batchId: null,
+    periodStart: null,
+    periodEnd: null,
+    publisher: event.data.publisher,
+    resultCount: 1,
+  };
+}
+
+function eventFromOperationPayload(payload: unknown): HiveChameleonEvent {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new HafProjectorError('cursor_conflict', 'Accepted operation payload is not an object');
+  }
+  const serialized = (payload as Record<string, unknown>).json;
+  if (typeof serialized !== 'string') {
+    throw new HafProjectorError(
+      'cursor_conflict',
+      'Accepted operation payload does not contain an event string',
+    );
+  }
+  return parseHiveChameleonEvent(serialized);
 }
 
 function initialCursor(source: string): ProjectionCursor {

@@ -15,10 +15,11 @@ the all-zero HAfAH sentinel normalize to no transaction identity.
 
 Persistence is the `ProjectionStore` port. The PostgreSQL implementation uses #22's
 `hive_projection.block_checkpoint`, raw operation validation fields, and `sync_cursor` in one
-transaction per applied block. Accepted decisions retain the typed event for the #26 materializer;
-#24 deliberately does not populate match or collectible business projections ahead of that
-pipeline. The included in-memory store is exported only from the testing subpath and refuses
-production use.
+transaction per applied block. Accepted match envelopes are retained immediately as reversible
+typed evidence. Match-result/current-head and collectible ownership views are materialized only
+when the source operation becomes irreversible, so a pre-LIB fork can revert pending evidence
+without corrupting the business view. The included in-memory store is exported only from the
+testing subpath and refuses production use.
 
 ## Run the worker
 

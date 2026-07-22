@@ -136,9 +136,21 @@ SELECT pg_temp.assert_true(
 SELECT pg_temp.assert_true(
   has_table_privilege('hc_provisioning', 'identity.hive_account_provisioning', 'UPDATE')
   AND has_column_privilege('hc_match_publisher', 'game.match_publication_outbox', 'state', 'UPDATE')
+  AND has_table_privilege('hc_match_publisher', 'identity.player', 'SELECT')
+  AND has_schema_privilege('hc_match_publisher', 'identity', 'USAGE')
+  AND has_schema_privilege('hc_match_publisher', 'content', 'USAGE')
+  AND has_schema_privilege('hc_match_publisher', 'tournament', 'USAGE')
+  AND has_table_privilege('hc_match_publisher', 'game.round_participant', 'SELECT')
+  AND has_table_privilege('hc_match_publisher', 'content.map_asset', 'SELECT')
+  AND has_table_privilege('hc_match_publisher', 'tournament.match_game_round', 'SELECT')
+  AND has_column_privilege('hc_match_publisher', 'game.match_publication_outbox', 'updated_at', 'UPDATE')
+  AND has_function_privilege('hc_match_publisher', 'public.digest(bytea,text)', 'EXECUTE')
   AND has_table_privilege('hc_collectible_issuer', 'hive_projection.transaction_intent', 'INSERT')
+  AND has_column_privilege('hc_collectible_issuer', 'hive_projection.transaction_intent', 'updated_at', 'UPDATE')
   AND has_table_privilege('hc_treasury', 'hive_projection.transaction_intent', 'INSERT')
   AND has_table_privilege('hc_rc_support', 'hive_projection.transaction_intent', 'INSERT')
+  AND has_column_privilege('hc_projector', 'commerce.collectible_instance', 'state', 'UPDATE')
+  AND has_column_privilege('hc_projector', 'commerce.collectible_instance', 'issued_event_id', 'INSERT')
   AND has_table_privilege('hc_projector', 'hive_projection.block_checkpoint', 'UPDATE'),
   'each workload has its required narrow mutation surface'
 );
@@ -196,6 +208,8 @@ SELECT pg_temp.assert_true(
   AND NOT has_table_privilege('hc_treasury', 'game.match_publication_outbox', 'INSERT')
   AND NOT has_table_privilege('hc_rc_support', 'commerce.collectible_instance', 'INSERT')
   AND NOT has_table_privilege('hc_collectible_issuer', 'tournament.payout', 'UPDATE')
+  AND NOT has_column_privilege('hc_projector', 'commerce.collectible_instance', 'owner_player_id', 'UPDATE')
+  AND NOT has_column_privilege('hc_projector', 'commerce.collectible_instance', 'issued_event_id', 'UPDATE')
   AND NOT has_table_privilege('hc_projector', 'identity.auth_session', 'SELECT'),
   'role-specific grants do not leak sensitive columns or neighboring service domains'
 );
