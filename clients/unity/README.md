@@ -48,3 +48,17 @@ Production CORS entries must use HTTPS.
 Unity builds are currently a local release gate. CI runs the checks that do not require a Unity
 license; add an appropriately isolated licensed runner before making Unity builds a required
 hosted check.
+
+## Public showcase build
+
+From the repository root, build an offline WebGL showcase without serializing any development
+credentials:
+
+```bash
+npm run unity:webgl:build
+```
+
+The command explicitly removes the three development realtime variables from the Unity process,
+then validates the generated `index.html`, loader, data, framework, and WebAssembly files. Deploy
+the result to the already linked Vercel project with `npm run unity:webgl:deploy`. Do not publish a
+WebGL build created manually with development credentials.
