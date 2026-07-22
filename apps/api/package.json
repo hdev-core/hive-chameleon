@@ -4,12 +4,12 @@
   "private": true,
   "description": "Hive Chameleon NestJS product API",
   "scripts": {
-    "build": "nest build",
+    "build": "npm run build --workspace @hive-chameleon/database && npm run build --workspace @hive-chameleon/hive-gateway && nest build",
     "dev": "nest start --watch",
     "start": "node dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "npm run build --workspace @hive-chameleon/database && npm run build --workspace @hive-chameleon/hive-gateway && tsc --noEmit"
   },
   "dependencies": {
     "@heroiclabs/nakama-js": "2.8.0",
