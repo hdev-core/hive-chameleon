@@ -1,13 +1,14 @@
 import { Module } from '@nestjs/common';
 import { Client } from '@heroiclabs/nakama-js';
 
-import { DevelopmentRealtimePrincipalGuard } from './development-realtime-principal.guard';
+import { AuthModule } from '../auth/auth.module';
 import { RealtimeController } from './realtime.controller';
 import { loadRealtimeConfig, REALTIME_CONFIG, type RealtimeConfig } from './realtime.config';
 import { RealtimeService } from './realtime.service';
 import { NAKAMA_AUTH_CLIENT, type NakamaAuthClient } from './realtime.types';
 
 @Module({
+  imports: [AuthModule],
   controllers: [RealtimeController],
   providers: [
     {
@@ -34,7 +35,6 @@ import { NAKAMA_AUTH_CLIENT, type NakamaAuthClient } from './realtime.types';
         );
       },
     },
-    DevelopmentRealtimePrincipalGuard,
     RealtimeService,
   ],
   exports: [RealtimeService],

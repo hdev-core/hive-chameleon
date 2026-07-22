@@ -2,6 +2,7 @@ import {
   Controller,
   Header,
   HttpCode,
+  HttpException,
   HttpStatus,
   Inject,
   Post,
@@ -10,12 +11,12 @@ import {
   UseGuards,
 } from '@nestjs/common';
 
-import { DevelopmentRealtimePrincipalGuard } from './development-realtime-principal.guard';
+import { AccessSessionGuard } from '../auth/access-session.guard';
 import { RealtimeService } from './realtime.service';
 import type { RealtimeHttpRequest, RealtimeSessionResponse } from './realtime.types';
 
 @Controller('realtime')
-@UseGuards(DevelopmentRealtimePrincipalGuard)
+@UseGuards(AccessSessionGuard)
 export class RealtimeController {
   constructor(@Inject(RealtimeService) private readonly realtimeService: RealtimeService) {}
 
@@ -23,7 +24,7 @@ export class RealtimeController {
   @HttpCode(HttpStatus.CREATED)
   @Header('Cache-Control', 'no-store')
   async createSession(@Req() request: RealtimeHttpRequest): Promise<RealtimeSessionResponse> {
-    if (!request.realtimePrincipal) {
+    if (!request.authPrincipal) {
       throw new UnauthorizedException({
         code: 'playable_session_required',
         detail: 'A playable game session is required to mint a realtime credential.',
@@ -31,6 +32,20 @@ export class RealtimeController {
         title: 'Unauthorized',
       });
     }
-    return this.realtimeService.createSession(request.realtimePrincipal);
+    if (!request.authPrincipal.disclosureAcknowledged) {
+      throw new HttpException(
+        {
+          code: 'public_record_disclosure_required',
+          detail: 'Acknowledge the current permanent-public-record disclosure before playing.',
+          status: 428,
+          title: 'Disclosure acknowledgment required',
+        },
+        428,
+      );
+    }
+    return this.realtimeService.createSession({
+      authSessionId: request.authPrincipal.authSessionId,
+      playerId: request.authPrincipal.playerId,
+    });
   }
 }

@@ -1,5 +1,7 @@
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 
+export type DatabasePool = Pool;
+
 export type TransactionIsolation = 'read committed' | 'repeatable read' | 'serializable';
 
 export interface TransactionOptions {

@@ -2,6 +2,7 @@ export {
   checkDatabaseConnection,
   createDatabasePool,
   withTransaction,
+  type DatabasePool,
   type TransactionIsolation,
   type TransactionOptions,
 } from './client.js';

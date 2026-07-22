@@ -1,4 +1,5 @@
 import type { BridgePrincipal } from './bridge-assertion';
+import type { AuthHttpRequest } from '../auth/auth.types';
 
 export interface NakamaSessionResult {
   expires_at?: number;
@@ -15,8 +16,7 @@ export interface NakamaAuthClient {
   ): Promise<NakamaSessionResult>;
 }
 
-export interface RealtimeHttpRequest {
-  headers: Record<string, string | string[] | undefined>;
+export interface RealtimeHttpRequest extends AuthHttpRequest {
   realtimePrincipal?: BridgePrincipal;
 }
 

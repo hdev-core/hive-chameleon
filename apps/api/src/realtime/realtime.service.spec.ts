@@ -45,10 +45,7 @@ describe('RealtimeService', () => {
   });
 
   it('fails closed when realtime configuration is absent', async () => {
-    const service = new RealtimeService(
-      { developmentPrincipal: null, nakama: null, nodeEnvironment: 'test' },
-      null,
-    );
+    const service = new RealtimeService({ nakama: null, nodeEnvironment: 'test' }, null);
 
     await expect(service.createSession(principal)).rejects.toBeInstanceOf(
       ServiceUnavailableException,
@@ -58,7 +55,6 @@ describe('RealtimeService', () => {
 
 function config(): RealtimeConfig {
   return {
-    developmentPrincipal: null,
     nakama: {
       assertionTtlSeconds: 30,
       bridgeHmacKey: Buffer.from('0123456789abcdef0123456789abcdef'),

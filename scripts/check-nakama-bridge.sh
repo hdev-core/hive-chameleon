@@ -4,7 +4,9 @@ set -euo pipefail
 
 repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 compose_file="${repository_root}/runtime/nakama/compose.yaml"
+application_compose_file="${repository_root}/infra/postgres/compose.yaml"
 project_name="${HIVE_CHAMELEON_NAKAMA_PROJECT:-hive-chameleon-nakama-smoke-$$}"
+application_project_name="${project_name}-application"
 api_log="$(mktemp "${TMPDIR:-/tmp}/hive-chameleon-api-smoke.XXXXXX")"
 api_pid=""
 
@@ -12,6 +14,13 @@ compose() {
   docker compose \
     --project-name "${project_name}" \
     --file "${compose_file}" \
+    "$@"
+}
+
+application_compose() {
+  docker compose \
+    --project-name "${application_project_name}" \
+    --file "${application_compose_file}" \
     "$@"
 }
 
@@ -28,7 +37,8 @@ const secretNames = [
   'NAKAMA_REFRESH_ENCRYPTION_KEY',
   'NAKAMA_CONSOLE_PASSWORD',
   'NAKAMA_CONSOLE_SIGNING_KEY',
-  'REALTIME_DEV_BEARER_TOKEN',
+  'AUTH_TOKEN_SECRET',
+  'AUTH_IDENTITY_LOOKUP_KEY',
 ];
 
 let output = fs.readFileSync(process.argv[2], 'utf8');
@@ -63,6 +73,7 @@ cleanup() {
   fi
 
   compose down --volumes --remove-orphans --rmi local || cleanup_status=$?
+  application_compose down --volumes --remove-orphans || cleanup_status=$?
   rm -f "${api_log}"
 
   if [[ ${status} -eq 0 && ${cleanup_status} -ne 0 ]]; then
@@ -175,16 +186,46 @@ export NAKAMA_CONSOLE_PORT=0
 export NAKAMA_METRICS_PORT=0
 
 export NODE_ENV=development
-export REALTIME_DEV_PRINCIPAL_ENABLED=true
-export REALTIME_DEV_DISCLOSURE_ACKNOWLEDGED=true
-export REALTIME_DEV_PLAYER_ID="$(random_uuid_v7)"
-export REALTIME_DEV_AUTH_SESSION_ID="$(random_uuid_v7)"
-export REALTIME_DEV_BEARER_TOKEN="$(random_hex 32)"
+export SMOKE_PLAYER_ID="$(random_uuid_v7)"
+export SMOKE_AUTH_SESSION_ID="$(random_uuid_v7)"
+export SMOKE_DISCLOSURE_ACK_ID="$(random_uuid_v7)"
+export AUTH_TOKEN_SECRET="$(random_base64url 32)"
+export AUTH_IDENTITY_LOOKUP_KEY="$(random_base64url 32)"
+export HC_POSTGRES_PORT="$(free_port)"
+export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:${HC_POSTGRES_PORT}/hive_chameleon?sslmode=disable"
 
 cd "${repository_root}"
 
 echo "Building the NestJS bridge and isolated Nakama runtime..."
 npm run build --workspace @hive-chameleon/api
+application_compose up --detach postgres
+application_compose run --rm dbmate
+application_compose exec --no-TTY postgres psql \
+  -U postgres \
+  -d hive_chameleon \
+  -v ON_ERROR_STOP=1 \
+  -v player_id="${SMOKE_PLAYER_ID}" \
+  -v session_id="${SMOKE_AUTH_SESSION_ID}" \
+  -v disclosure_ack_id="${SMOKE_DISCLOSURE_ACK_ID}" <<'SQL'
+INSERT INTO identity.player (id, hive_username, hive_control_state)
+VALUES (:'player_id', 'smoke-user', 'external_self_custodial');
+
+INSERT INTO identity.auth_session (
+  id, player_id, refresh_token_hash, platform, authentication_method,
+  hive_signing_provider, hive_control_state_at_issue, custodial_signing_eligible,
+  issued_at, expires_at
+) VALUES (
+  :'session_id', :'player_id', repeat('a', 64), 'linux', 'direct_hive_challenge',
+  'keychain', 'external_self_custodial', false, now(), now() + interval '1 hour'
+);
+
+INSERT INTO identity.public_record_disclosure_acknowledgment (
+  id, disclosure_version, player_id, source, acknowledged_at
+) VALUES (
+  :'disclosure_ack_id', '2026-07-22', :'player_id',
+  'direct_hive_pre_participation', now()
+);
+SQL
 compose up --build --detach nakama
 wait_for_nakama
 

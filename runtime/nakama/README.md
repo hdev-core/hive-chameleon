@@ -35,13 +35,10 @@ set +a
 npm run dev
 ```
 
-The development principal is deliberately unavailable unless explicitly enabled, acknowledged,
-and supplied through the configured bearer token. Production configuration rejects this mode.
-The Unity desktop development client reads `HIVE_CHAMELEON_API_URL`, `NAKAMA_SERVER_KEY`, and
-`REALTIME_DEV_BEARER_TOKEN` from its environment. With no local credentials it stays offline and
-the scaffold build continues normally. WebGL cannot inherit desktop environment variables, so its
-local-only values must be injected by the development build pipeline; never serialize them into a
-production scene or build.
+Realtime issuance now requires a real NestJS access token backed by an active PostgreSQL session;
+the former fixed development principal has been removed. Unity obtains the token through the auth
+API before requesting a Nakama credential. Never serialize API, Nakama, or signing credentials
+into a scene or production build.
 
 ## Realtime contract boundary
 
@@ -60,12 +57,12 @@ The documented lobby RPC names and `match.reconnect` are registered but return
 `feature_not_ready` with gRPC `UNIMPLEMENTED`. This is intentional: later gameplay cards replace
 the stubs with authoritative behavior without allowing a placeholder to report false success.
 
-With the compose stack and NestJS API running from the same environment, exercise the complete
-bridge, same-assertion replay denial, and non-bridge authentication denial without printing
-credentials:
+The repository smoke command starts disposable application and Nakama databases, seeds one
+short-lived real API session, and exercises the complete bridge, same-assertion replay denial, and
+non-bridge authentication denial without printing credentials:
 
 ```bash
-node runtime/nakama/smoke.mjs
+npm run realtime:smoke
 ```
 
 Nakama's WebSocket protocol reports the intentional RPC runtime exception as realtime code `7`
