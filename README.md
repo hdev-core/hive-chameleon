@@ -30,6 +30,10 @@ The API then exposes:
 - `GET http://localhost:3000/api/v1/health/live`
 - `GET http://localhost:3000/api/v1/health/ready`
 
+Authentication and Google-to-Hive provisioning configuration is documented in
+[`apps/api/README.md`](apps/api/README.md). The API intentionally fails closed for durable identity
+operations when PostgreSQL or an approved external provider is not configured.
+
 Build the Nakama module with the runtime-compatible toolchain:
 
 ```bash

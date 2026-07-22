@@ -5,9 +5,9 @@ import { Client, Session } from '@heroiclabs/nakama-js';
 const requiredEnvironment = [
   'NAKAMA_SERVER_KEY',
   'NAKAMA_BRIDGE_HMAC_KEY',
-  'REALTIME_DEV_AUTH_SESSION_ID',
-  'REALTIME_DEV_BEARER_TOKEN',
-  'REALTIME_DEV_PLAYER_ID',
+  'AUTH_TOKEN_SECRET',
+  'SMOKE_AUTH_SESSION_ID',
+  'SMOKE_PLAYER_ID',
 ];
 
 for (const name of requiredEnvironment) {
@@ -33,8 +33,8 @@ const client = new Client(
 let deviceAuthenticationRejected = false;
 try {
   await client.authenticateDevice(randomBytes(32).toString('hex'), true, undefined, {
-    app_auth_session_id: process.env.REALTIME_DEV_AUTH_SESSION_ID,
-    app_player_id: process.env.REALTIME_DEV_PLAYER_ID,
+    app_auth_session_id: process.env.SMOKE_AUTH_SESSION_ID,
+    app_player_id: process.env.SMOKE_PLAYER_ID,
     bridge_version: 'v1',
   });
 } catch {
@@ -46,9 +46,9 @@ if (!deviceAuthenticationRejected) {
 }
 
 const replayAssertion = createBridgeAssertion({
-  authSessionId: process.env.REALTIME_DEV_AUTH_SESSION_ID,
+  authSessionId: process.env.SMOKE_AUTH_SESSION_ID,
   bridgeKey: process.env.NAKAMA_BRIDGE_HMAC_KEY,
-  playerId: process.env.REALTIME_DEV_PLAYER_ID,
+  playerId: process.env.SMOKE_PLAYER_ID,
 });
 const directBridgeSession = await client.authenticateCustom(replayAssertion, true);
 
@@ -64,7 +64,7 @@ if (!bridgeAssertionReplayRejected) {
 
 let customIdentityPreclaimRejected = false;
 try {
-  await client.linkCustom(directBridgeSession, { id: process.env.REALTIME_DEV_AUTH_SESSION_ID });
+  await client.linkCustom(directBridgeSession, { id: process.env.SMOKE_AUTH_SESSION_ID });
 } catch {
   customIdentityPreclaimRejected = true;
 }
@@ -74,7 +74,7 @@ if (!customIdentityPreclaimRejected) {
 
 const response = await fetch(apiUrl, {
   headers: {
-    authorization: `Bearer ${process.env.REALTIME_DEV_BEARER_TOKEN}`,
+    authorization: `Bearer ${createAccessToken()}`,
   },
   method: 'POST',
 });
@@ -140,6 +140,27 @@ function createBridgeAssertion({ authSessionId, bridgeKey, playerId }) {
     .update(payload)
     .digest('base64url');
   return `${payload}.${signature}`;
+}
+
+function createAccessToken() {
+  const now = Math.floor(Date.now() / 1_000);
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(
+    JSON.stringify({
+      aud: 'hive-chameleon-client',
+      exp: now + 300,
+      iat: now,
+      iss: 'hive-chameleon-api',
+      sid: process.env.SMOKE_AUTH_SESSION_ID,
+      sub: process.env.SMOKE_PLAYER_ID,
+      typ: 'access',
+    }),
+  ).toString('base64url');
+  const signingInput = `${header}.${payload}`;
+  const signature = createHmac('sha256', Buffer.from(process.env.AUTH_TOKEN_SECRET, 'base64url'))
+    .update(signingInput)
+    .digest('base64url');
+  return `${signingInput}.${signature}`;
 }
 
 function compactUuid(value) {

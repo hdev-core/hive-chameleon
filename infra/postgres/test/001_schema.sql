@@ -24,14 +24,22 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(*) = 74
+    SELECT count(*) = 75
       FROM information_schema.tables
      WHERE table_schema IN (
        'identity', 'social', 'game', 'content', 'commerce', 'tournament', 'hive_projection'
      )
        AND table_type = 'BASE TABLE'
   ),
-  'all 74 modeled tables exist'
+  'all 75 modeled tables exist'
+);
+
+SELECT pg_temp.assert_true(
+  has_table_privilege('hc_api', 'identity.hive_login_challenge', 'SELECT')
+  AND has_table_privilege('hc_api', 'identity.hive_login_challenge', 'INSERT')
+  AND has_table_privilege('hc_api', 'identity.hive_login_challenge', 'UPDATE')
+  AND NOT has_table_privilege('hc_nakama', 'identity.hive_login_challenge', 'SELECT'),
+  'only the product API can create and consume direct-Hive challenges'
 );
 
 SELECT pg_temp.assert_true(
