@@ -3,6 +3,7 @@ export * from './canonical/json.js';
 export * from './contracts.js';
 export * from './errors.js';
 export * from './gateway.js';
+export * from './http-signer-client.js';
 export * from './official-signer-policy.js';
 export * from './policy.js';
 export * from './protocol/index.js';

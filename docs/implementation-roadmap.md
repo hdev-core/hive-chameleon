@@ -69,7 +69,7 @@ directories. #25 and #26 integrate those tracks afterward.
 | M2B — Realtime base | #23: Nakama server/plugin, scoped NestJS session bridge, lobby RPC skeletons, Unity socket adapter, integration test | M1 | 8–12 pd |
 | M2C — Hive base | #24: WAX gateway, provider-neutral signer boundary, fork-aware HAF cursor/projector, operation validation and tests | M1 | 8–12 pd |
 | M3A — Identity end to end | #25: Keychain/HiveAuth challenge login, Google OIDC, sponsor-backed provisioning, custody references/intents, claim states | M2A + M2C + external gates | 12–18 pd |
-| M3B — Public-event pipeline | #26: terminal commit/outbox, canonical match batching, publisher policy, collectible issue/revoke foundation | M2A + M2C | 8–12 pd |
+| M3B — Public-event pipeline | #26: [terminal commit/outbox, canonical match batching, publisher policy, and collectible issue/revoke foundation](./technical-specification/publication-pipeline.md) | M2A + M2C | 8–12 pd |
 | M4 — Playable P0 loop | Lobby lifecycle, host migration, nomination, Casual/Infection authoritative round, reconnect, result/Answer Check, one map | M2B + identity session | 35–50 pd |
 | M5 — P0 integration and hardening | Cross-platform end-to-end path, Hive outage/degradation, load/restore/security tests, WebGL/desktop builds, demo polish | M3–M4 | 15–25 pd |
 | M6 — P1 product layer | Friends/invites/Streamer Mode, controller, cosmetics/shop, controlled tournament, map attribution/showcase | P0 accepted | 40–60 pd |
