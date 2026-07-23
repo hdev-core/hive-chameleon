@@ -41,10 +41,15 @@ type realtimeInitializer interface {
 	RegisterBeforeLinkCustom(func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, *api.AccountCustom) (*api.AccountCustom, error)) error
 	RegisterBeforeUnlinkCustom(func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, *api.AccountCustom) (*api.AccountCustom, error)) error
 	RegisterBeforeUpdateAccount(func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, *api.UpdateAccountRequest) (*api.UpdateAccountRequest, error)) error
+	RegisterMatch(string, func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule) (runtime.Match, error)) error
 	RegisterRpc(string, func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, string) (string, error)) error
 }
 
-func registerRealtime(initializer realtimeInitializer, verifier *bridgeVerifier) error {
+func registerRealtime(
+	initializer realtimeInitializer,
+	verifier *bridgeVerifier,
+	lobbies *lobbyService,
+) error {
 	if err := initializer.RegisterBeforeAuthenticateCustom(verifier.beforeAuthenticateCustom); err != nil {
 		return fmt.Errorf("register custom authentication bridge: %w", err)
 	}
@@ -113,10 +118,40 @@ func registerRealtime(initializer realtimeInitializer, verifier *bridgeVerifier)
 		}
 	}
 
+	lobbyRPCs := map[string]func(
+		context.Context,
+		runtime.Logger,
+		*sql.DB,
+		runtime.NakamaModule,
+		string,
+	) (string, error){
+		"lobby.create":               lobbies.createRPC,
+		"lobby.join":                 lobbies.joinRPC,
+		"lobby.leave":                lobbies.leaveRPC,
+		"lobby.update_configuration": lobbies.updateConfigurationRPC,
+		"lobby.start":                lobbies.startRPC,
+	}
 	for _, name := range realtimeRPCNames {
-		if err := initializer.RegisterRpc(name, featureNotReadyRPC); err != nil {
+		handler := featureNotReadyRPC
+		if lobbyHandler := lobbyRPCs[name]; lobbyHandler != nil {
+			handler = lobbyHandler
+		}
+		if err := initializer.RegisterRpc(name, handler); err != nil {
 			return fmt.Errorf("register RPC %s: %w", name, err)
 		}
+	}
+	if err := initializer.RegisterMatch(
+		lobbyMatchModule,
+		func(
+			_ context.Context,
+			_ runtime.Logger,
+			_ *sql.DB,
+			_ runtime.NakamaModule,
+		) (runtime.Match, error) {
+			return &persistentLobbyMatch{store: lobbies.store}, nil
+		},
+	); err != nil {
+		return fmt.Errorf("register persistent lobby match: %w", err)
 	}
 
 	return nil

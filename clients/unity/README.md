@@ -45,6 +45,38 @@ API's comma-separated `HTTP_CORS_ALLOWED_ORIGINS` setting (for example,
 same-origin reverse proxy needs no CORS setting.
 Production CORS entries must use HTTPS.
 
+## Persistent lobby development panel
+
+Card #30 adds a development-only `OnGUI` panel after the scoped Nakama connection succeeds. It
+supports creating or joining a lobby, copying its ID, updating the configuration, requesting a
+start, leaving, and observing the authoritative host/member/version snapshot.
+
+Run the migrated application database, Nakama, and API as described in
+`runtime/nakama/README.md`. Launch the editor or a desktop development player with:
+
+```bash
+HIVE_CHAMELEON_API_URL=http://127.0.0.1:3000 \
+NAKAMA_SERVER_KEY=replace-with-the-local-public-server-key \
+REALTIME_DEV_BEARER_TOKEN=replace-with-a-current-local-access-token \
+  /path/to/Unity -projectPath "$PWD/clients/unity"
+```
+
+The token must be a current access token issued by the local API for a seeded or authenticated
+player who acknowledged the public-match disclosure. It is not a permanent development bypass.
+
+For a host-migration check, use separate valid player tokens in two clients:
+
+1. Create a lobby in the first client and copy its lobby ID.
+2. Join that ID in the second client.
+3. Configure and start from the first client; the default configuration requires two players.
+4. Stop or close the host client.
+5. Confirm the second client's Host field changes to its player UUID and the lobby Version
+   advances. Its configuration button must now succeed.
+
+No 3D models or gameplay assets are required for this panel. Without the three realtime
+environment values, Play Mode remains intentionally offline and logs that local credentials were
+not supplied.
+
 Unity builds are currently a local release gate. CI runs the checks that do not require a Unity
 license; add an appropriately isolated licensed runner before making Unity builds a required
 hosted check.

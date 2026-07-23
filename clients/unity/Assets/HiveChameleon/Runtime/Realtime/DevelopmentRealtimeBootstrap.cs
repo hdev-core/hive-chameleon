@@ -65,11 +65,19 @@ namespace HiveChameleon.Realtime
             {
                 IRealtimeCredentialProvider credentialProvider =
                     new HttpRealtimeCredentialProvider(resolvedApiBaseUrl, resolvedBearerToken);
-                _connection = new NakamaRealtimeConnection(resolvedServerKey);
+                var nakamaConnection = new NakamaRealtimeConnection(resolvedServerKey);
+                _connection = nakamaConnection;
                 RealtimeSessionCredential credential = await credentialProvider.GetCredentialAsync(
                     _shutdown.Token
                 );
                 await _connection.ConnectAsync(credential, _shutdown.Token);
+
+                DevelopmentLobbyPanel panel = GetComponent<DevelopmentLobbyPanel>();
+                if (panel == null)
+                {
+                    panel = gameObject.AddComponent<DevelopmentLobbyPanel>();
+                }
+                panel.Initialize(nakamaConnection, _shutdown.Token);
             }
             catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
             {

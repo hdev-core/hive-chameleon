@@ -8,6 +8,7 @@ application_compose_file="${repository_root}/infra/postgres/compose.yaml"
 project_name="${HIVE_CHAMELEON_NAKAMA_PROJECT:-hive-chameleon-nakama-smoke-$$}"
 application_project_name="${project_name}-application"
 api_log="$(mktemp "${TMPDIR:-/tmp}/hive-chameleon-api-smoke.XXXXXX")"
+nakama_log="$(mktemp "${TMPDIR:-/tmp}/hive-chameleon-nakama-smoke.XXXXXX")"
 api_pid=""
 
 compose() {
@@ -24,8 +25,8 @@ application_compose() {
     "$@"
 }
 
-redact_api_log() {
-  node - "${api_log}" <<'NODE'
+redact_log() {
+  node - "$1" <<'NODE'
 const fs = require('node:fs');
 
 const secretNames = [
@@ -37,6 +38,7 @@ const secretNames = [
   'NAKAMA_REFRESH_ENCRYPTION_KEY',
   'NAKAMA_CONSOLE_PASSWORD',
   'NAKAMA_CONSOLE_SIGNING_KEY',
+  'HC_NAKAMA_DATABASE_URL',
   'AUTH_TOKEN_SECRET',
   'AUTH_IDENTITY_LOOKUP_KEY',
 ];
@@ -69,12 +71,19 @@ cleanup() {
 
   if [[ ${status} -ne 0 && -s "${api_log}" ]]; then
     echo "NestJS smoke log (credentials redacted):" >&2
-    redact_api_log
+    redact_log "${api_log}"
+  fi
+  if [[ ${status} -ne 0 ]]; then
+    compose logs --no-color --tail 120 nakama >"${nakama_log}" 2>&1 || true
+    if [[ -s "${nakama_log}" ]]; then
+      echo "Nakama smoke log (credentials redacted):" >&2
+      redact_log "${nakama_log}"
+    fi
   fi
 
   compose down --volumes --remove-orphans --rmi local || cleanup_status=$?
   application_compose down --volumes --remove-orphans || cleanup_status=$?
-  rm -f "${api_log}"
+  rm -f "${api_log}" "${nakama_log}"
 
   if [[ ${status} -eq 0 && ${cleanup_status} -ne 0 ]]; then
     status=${cleanup_status}
@@ -187,12 +196,16 @@ export NAKAMA_METRICS_PORT=0
 
 export NODE_ENV=development
 export SMOKE_PLAYER_ID="$(random_uuid_v7)"
+export SMOKE_PLAYER_TWO_ID="$(random_uuid_v7)"
 export SMOKE_AUTH_SESSION_ID="$(random_uuid_v7)"
+export SMOKE_AUTH_SESSION_TWO_ID="$(random_uuid_v7)"
 export SMOKE_DISCLOSURE_ACK_ID="$(random_uuid_v7)"
+export SMOKE_DISCLOSURE_ACK_TWO_ID="$(random_uuid_v7)"
 export AUTH_TOKEN_SECRET="$(random_base64url 32)"
 export AUTH_IDENTITY_LOOKUP_KEY="$(random_base64url 32)"
 export HC_POSTGRES_PORT="$(free_port)"
 export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:${HC_POSTGRES_PORT}/hive_chameleon?sslmode=disable"
+export HC_NAKAMA_DATABASE_URL="postgres://postgres:postgres@host.docker.internal:${HC_POSTGRES_PORT}/hive_chameleon?sslmode=disable"
 
 cd "${repository_root}"
 
@@ -205,26 +218,41 @@ application_compose exec --no-TTY postgres psql \
   -d hive_chameleon \
   -v ON_ERROR_STOP=1 \
   -v player_id="${SMOKE_PLAYER_ID}" \
+  -v player_two_id="${SMOKE_PLAYER_TWO_ID}" \
   -v session_id="${SMOKE_AUTH_SESSION_ID}" \
-  -v disclosure_ack_id="${SMOKE_DISCLOSURE_ACK_ID}" <<'SQL'
-INSERT INTO identity.player (id, hive_username, hive_control_state)
-VALUES (:'player_id', 'smoke-user', 'external_self_custodial');
+  -v session_two_id="${SMOKE_AUTH_SESSION_TWO_ID}" \
+  -v disclosure_ack_id="${SMOKE_DISCLOSURE_ACK_ID}" \
+  -v disclosure_ack_two_id="${SMOKE_DISCLOSURE_ACK_TWO_ID}" <<'SQL'
+INSERT INTO identity.player (id, hive_username, hive_control_state) VALUES
+  (:'player_id', 'smoke-user', 'external_self_custodial'),
+  (:'player_two_id', 'smoke-user-two', 'external_self_custodial');
 
 INSERT INTO identity.auth_session (
   id, player_id, refresh_token_hash, platform, authentication_method,
   hive_signing_provider, hive_control_state_at_issue, custodial_signing_eligible,
   issued_at, expires_at
-) VALUES (
-  :'session_id', :'player_id', repeat('a', 64), 'linux', 'direct_hive_challenge',
-  'keychain', 'external_self_custodial', false, now(), now() + interval '1 hour'
-);
+) VALUES
+  (
+    :'session_id', :'player_id', repeat('a', 64), 'linux', 'direct_hive_challenge',
+    'keychain', 'external_self_custodial', false, now(), now() + interval '1 hour'
+  ),
+  (
+    :'session_two_id', :'player_two_id', repeat('b', 64), 'linux',
+    'direct_hive_challenge', 'keychain', 'external_self_custodial', false,
+    now(), now() + interval '1 hour'
+  );
 
 INSERT INTO identity.public_record_disclosure_acknowledgment (
   id, disclosure_version, player_id, source, acknowledged_at
-) VALUES (
-  :'disclosure_ack_id', '2026-07-22', :'player_id',
-  'direct_hive_pre_participation', now()
-);
+) VALUES
+  (
+    :'disclosure_ack_id', '2026-07-22', :'player_id',
+    'direct_hive_pre_participation', now()
+  ),
+  (
+    :'disclosure_ack_two_id', '2026-07-22', :'player_two_id',
+    'direct_hive_pre_participation', now()
+  );
 SQL
 compose up --build --detach nakama
 wait_for_nakama
