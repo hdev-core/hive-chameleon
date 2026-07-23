@@ -128,6 +128,7 @@ func registerRealtime(
 		"lobby.create":               lobbies.createRPC,
 		"lobby.join":                 lobbies.joinRPC,
 		"lobby.leave":                lobbies.leaveRPC,
+		"lobby.nominate_hunter":      lobbies.nominateHunterRPC,
 		"lobby.update_configuration": lobbies.updateConfigurationRPC,
 		"lobby.start":                lobbies.startRPC,
 	}

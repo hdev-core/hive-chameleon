@@ -5,13 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sort"
 
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
 const (
-	lobbyMatchTickRate = 1
-	lobbyStateOpcode   = 1
+	lobbyMatchTickRate      = 1
+	lobbyStateOpcode        = 1
+	roundRoleAssignedOpcode = 2
+	roundPhaseChangedOpcode = 3
 )
 
 type persistentLobbyMatch struct {
@@ -29,6 +32,8 @@ type persistentLobbyState struct {
 	Presences        map[string]lobbyPresence
 	PendingPlayerIDs map[string]string
 	PendingLeaves    map[string]string
+	Nominations      map[string]bool
+	Round            *roundSnapshot
 }
 
 func (m *persistentLobbyMatch) MatchInit(
@@ -48,13 +53,21 @@ func (m *persistentLobbyMatch) MatchInit(
 		logger.Error("persistent lobby match could not load open lobby %s: %v", lobbyID, err)
 		return nil, lobbyMatchTickRate, ""
 	}
+	round, err := m.store.ActiveRound(ctx, lobbyID)
+	if err != nil {
+		logger.Error("persistent lobby match could not load active round %s: %v", lobbyID, err)
+		return nil, lobbyMatchTickRate, ""
+	}
 	state := &persistentLobbyState{
 		LobbyID:          lobbyID,
 		Snapshot:         snapshot,
 		Presences:        make(map[string]lobbyPresence),
 		PendingPlayerIDs: make(map[string]string),
 		PendingLeaves:    make(map[string]string),
+		Nominations:      make(map[string]bool),
+		Round:            round,
 	}
+	applyLiveLobbyState(state, snapshot)
 	return state, lobbyMatchTickRate, lobbyMatchLabel(snapshot)
 }
 
@@ -118,6 +131,7 @@ func (m *persistentLobbyMatch) MatchJoin(
 		}
 	}
 	m.refreshAndBroadcast(ctx, logger, dispatcher, state)
+	m.broadcastRoundState(logger, dispatcher, state)
 	return state
 }
 
@@ -143,6 +157,7 @@ func (m *persistentLobbyMatch) MatchLeave(
 		if !exists {
 			continue
 		}
+		delete(state.Nominations, tracked.PlayerID)
 		reason := "host_left"
 		if presence.GetReason() == runtime.PresenceReasonDisconnect {
 			reason = "host_disconnected"
@@ -236,9 +251,10 @@ func (m *persistentLobbyMatch) MatchSignal(
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
-		state.Snapshot = snapshot
+		applyLiveLobbyState(state, snapshot)
 		m.broadcastState(logger, dispatcher, state)
-		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: snapshot})
+		m.broadcastRoundState(logger, dispatcher, state)
+		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
 	case "leave":
 		if signal.PlayerID == "" {
 			return state, encodeLobbySignalError(
@@ -258,15 +274,57 @@ func (m *persistentLobbyMatch) MatchSignal(
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
-		state.Snapshot = snapshot
+		delete(state.Nominations, signal.PlayerID)
+		applyLiveLobbyState(state, snapshot)
 		kickPlayerPresences(dispatcher, state, signal.PlayerID)
 		if closed {
 			// Let the signal response reach the caller before MatchLoop terminates the now-closed
 			// authoritative match on its next tick.
-			return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: snapshot})
+			return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
 		}
 		m.broadcastState(logger, dispatcher, state)
-		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: snapshot})
+		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
+	case "nominate_hunter":
+		if signal.Nomination == nil || signal.Nomination.LobbyID != state.LobbyID {
+			return state, encodeLobbySignalError(
+				newLobbyProblem(grpcInvalidArgument, "invalid hunter nomination signal"),
+			)
+		}
+		if state.Round != nil {
+			return state, encodeLobbySignalError(
+				newLobbyProblem(
+					grpcFailedPrecondition,
+					"hunter nomination is closed after round start",
+				),
+			)
+		}
+		if state.Nominations[signal.PlayerID] == signal.Nomination.Nominated {
+			if signal.Nomination.ExpectedLobbyVersion != state.Snapshot.RowVersion {
+				return state, encodeLobbySignalError(
+					newLobbyProblem(
+						grpcAborted,
+						"lobby version changed; refresh state and retry",
+					),
+				)
+			}
+			return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
+		}
+		snapshot, err := m.store.RecordNominationChange(
+			ctx,
+			signal.PlayerID,
+			*signal.Nomination,
+		)
+		if err != nil {
+			return state, encodeLobbySignalError(err)
+		}
+		if signal.Nomination.Nominated {
+			state.Nominations[signal.PlayerID] = true
+		} else {
+			delete(state.Nominations, signal.PlayerID)
+		}
+		applyLiveLobbyState(state, snapshot)
+		m.broadcastState(logger, dispatcher, state)
+		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
 	case "update_configuration":
 		if signal.UpdateConfiguration == nil ||
 			signal.UpdateConfiguration.LobbyID != state.LobbyID {
@@ -282,24 +340,38 @@ func (m *persistentLobbyMatch) MatchSignal(
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
-		state.Snapshot = snapshot
+		applyLiveLobbyState(state, snapshot)
 		m.broadcastState(logger, dispatcher, state)
-		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: snapshot})
+		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
 	case "start":
 		if signal.Start == nil || signal.Start.LobbyID != state.LobbyID {
 			return state, encodeLobbySignalError(
 				newLobbyProblem(grpcInvalidArgument, "invalid lobby start signal"),
 			)
 		}
-		snapshot, err := m.store.AcceptStart(ctx, signal.PlayerID, *signal.Start)
+		if state.Round != nil {
+			return state, encodeLobbySignalError(
+				newLobbyProblem(grpcFailedPrecondition, "lobby already has an active round"),
+			)
+		}
+		snapshot, round, err := m.store.StartRound(
+			ctx,
+			signal.PlayerID,
+			*signal.Start,
+			state.Nominations,
+		)
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
-		state.Snapshot = snapshot
+		state.Round = &round
+		applyLiveLobbyState(state, snapshot)
 		m.broadcastState(logger, dispatcher, state)
+		m.broadcastRoundState(logger, dispatcher, state)
+		publicRound := round.Public()
 		return state, encodeLobbySignalResponse(lobbyRPCResponse{
-			Lobby:         snapshot,
+			Lobby:         state.Snapshot,
 			StartAccepted: true,
+			Round:         &publicRound,
 		})
 	default:
 		return state, encodeLobbySignalError(
@@ -328,7 +400,7 @@ func (m *persistentLobbyMatch) flushPendingLeaves(
 		return false, err
 	}
 	clear(state.PendingLeaves)
-	state.Snapshot = snapshot
+	applyLiveLobbyState(state, snapshot)
 	return closed, nil
 }
 
@@ -343,7 +415,7 @@ func (m *persistentLobbyMatch) refreshAndBroadcast(
 		logger.Error("refresh lobby state after match join: %v", err)
 		return
 	}
-	state.Snapshot = snapshot
+	applyLiveLobbyState(state, snapshot)
 	m.broadcastState(logger, dispatcher, state)
 }
 
@@ -362,6 +434,51 @@ func (m *persistentLobbyMatch) broadcastState(
 	}
 	if err := dispatcher.MatchLabelUpdate(lobbyMatchLabel(state.Snapshot)); err != nil {
 		logger.Error("update lobby match label: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastRoundState(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+) {
+	if state.Round == nil {
+		return
+	}
+	publicRound := state.Round.Public()
+	phasePayload, err := json.Marshal(publicRound)
+	if err != nil {
+		logger.Error("encode round phase broadcast: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundPhaseChangedOpcode,
+		phasePayload,
+		nil,
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast round phase: %v", err)
+	}
+	for _, assignment := range state.Round.RoleAssignments {
+		presences := presencesForPlayer(state, assignment.PlayerID)
+		if len(presences) == 0 {
+			continue
+		}
+		payload, err := json.Marshal(assignment)
+		if err != nil {
+			logger.Error("encode private role assignment: %v", err)
+			continue
+		}
+		if err := dispatcher.BroadcastMessage(
+			roundRoleAssignedOpcode,
+			payload,
+			presences,
+			nil,
+			true,
+		); err != nil {
+			logger.Error("broadcast private role assignment: %v", err)
+		}
 	}
 }
 
@@ -395,6 +512,37 @@ func kickPlayerPresences(
 	if len(presences) > 0 {
 		_ = dispatcher.MatchKick(presences)
 	}
+}
+
+func presencesForPlayer(
+	state *persistentLobbyState,
+	playerID string,
+) []runtime.Presence {
+	presences := make([]runtime.Presence, 0, 1)
+	for _, tracked := range state.Presences {
+		if tracked.PlayerID == playerID {
+			presences = append(presences, tracked.Presence)
+		}
+	}
+	return presences
+}
+
+func applyLiveLobbyState(state *persistentLobbyState, snapshot lobbySnapshot) {
+	memberIDs := make(map[string]struct{}, len(snapshot.Members))
+	for _, member := range snapshot.Members {
+		memberIDs[member.PlayerID] = struct{}{}
+	}
+	nominees := make([]string, 0, len(state.Nominations))
+	for playerID := range state.Nominations {
+		if _, member := memberIDs[playerID]; member {
+			nominees = append(nominees, playerID)
+		} else {
+			delete(state.Nominations, playerID)
+		}
+	}
+	sort.Strings(nominees)
+	snapshot.HunterNomineeIDs = nominees
+	state.Snapshot = snapshot
 }
 
 func lobbyMatchLabel(snapshot lobbySnapshot) string {

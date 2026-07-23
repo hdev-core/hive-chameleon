@@ -16,7 +16,9 @@ namespace HiveChameleon.Realtime
         private string _password = string.Empty;
         private string _regionCode = "local";
         private string _maxPlayers = "10";
+        private string _mapVersionId = string.Empty;
         private string _status = "Connected. Create or join a lobby.";
+        private bool _nominated;
         private bool _busy;
 
         public void Initialize(
@@ -31,10 +33,14 @@ namespace HiveChameleon.Realtime
             if (_connection != null)
             {
                 _connection.LobbyStateChanged -= HandleLobbyStateChanged;
+                _connection.RoundStateChanged -= HandleRoundStateChanged;
+                _connection.RoundRoleAssigned -= HandleRoundRoleAssigned;
                 _lifetime?.Dispose();
             }
             _connection = connection;
             _connection.LobbyStateChanged += HandleLobbyStateChanged;
+            _connection.RoundStateChanged += HandleRoundStateChanged;
+            _connection.RoundRoleAssigned += HandleRoundRoleAssigned;
             _lifetime = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
         }
 
@@ -136,6 +142,12 @@ namespace HiveChameleon.Realtime
                     + $"{lobby.configuration.hunting_duration_seconds}s · "
                     + $"Shells: {lobby.configuration.shell_limit}"
             );
+            GUILayout.Label($"Map version: {lobby.configuration.map_version_id}");
+            GUILayout.Label($"Hunter nominations: {lobby.hunter_nominee_player_ids.Length}");
+            foreach (string nomineePlayerId in lobby.hunter_nominee_player_ids)
+            {
+                GUILayout.Label($"  • {nomineePlayerId}");
+            }
 
             if (GUILayout.Button("Copy Lobby ID"))
             {
@@ -144,25 +156,62 @@ namespace HiveChameleon.Realtime
             }
 
             GUI.enabled = !_busy && _connection.State == RealtimeConnectionState.Connected;
-            if (GUILayout.Button("Configure: add one shell"))
+            RoundSnapshot round = _connection.CurrentRound;
+            if (round == null)
             {
-                LobbyConfigurationDraft configuration =
-                    LobbyConfigurationDraft.FromSnapshot(lobby.configuration);
-                configuration.ShellLimit = Mathf.Min(100, configuration.ShellLimit + 1);
-                Execute(
-                    () =>
-                        _connection.UpdateLobbyConfigurationAsync(
-                            configuration,
-                            _lifetime.Token
-                        ),
-                    "Host configuration accepted."
-                );
+                if (GUILayout.Button(_nominated ? "Withdraw Hunter nomination" : "Nominate me as Hunter"))
+                {
+                    bool nextNomination = !_nominated;
+                    Execute(
+                        () =>
+                            _connection.NominateHunterAsync(
+                                nextNomination,
+                                _lifetime.Token
+                            ),
+                        nextNomination
+                            ? "Hunter nomination accepted."
+                            : "Hunter nomination withdrawn.",
+                        () => _nominated = nextNomination
+                    );
+                }
+
+                GUILayout.Label("Published map version ID");
+                _mapVersionId = GUILayout.TextField(_mapVersionId);
+                if (GUILayout.Button("Configure: use map + add one shell"))
+                {
+                    LobbyConfigurationDraft configuration =
+                        LobbyConfigurationDraft.FromSnapshot(lobby.configuration);
+                    configuration.MapVersionId = _mapVersionId.Trim();
+                    configuration.ShellLimit = Mathf.Min(100, configuration.ShellLimit + 1);
+                    Execute(
+                        () =>
+                            _connection.UpdateLobbyConfigurationAsync(
+                                configuration,
+                                _lifetime.Token
+                            ),
+                        "Host configuration accepted."
+                    );
+                }
+                if (GUILayout.Button("Start authoritative round"))
+                {
+                    Execute(
+                        () => _connection.StartLobbyAsync(_lifetime.Token),
+                        "Round created; the server assigned private roles."
+                    );
+                }
             }
-            if (GUILayout.Button("Start"))
+            else
             {
-                Execute(
-                    () => _connection.StartLobbyAsync(_lifetime.Token),
-                    "Start accepted. Round scaffolding follows in card #31."
+                GUILayout.Space(8);
+                GUILayout.Label(
+                    $"Round #{round.sequence_number}: {round.status} ({round.id})"
+                );
+                RoundRoleAssignment assignment = _connection.CurrentRoleAssignment;
+                GUILayout.Label(
+                    assignment == null
+                        ? "Own role: waiting for private server assignment"
+                        : $"Own role: {assignment.role}"
+                            + (assignment.hunter_volunteer ? " (volunteered)" : "")
                 );
             }
             if (GUILayout.Button("Leave"))
@@ -184,7 +233,8 @@ namespace HiveChameleon.Realtime
 
         private async void Execute(
             Func<Task<LobbyRpcResponse>> operation,
-            string successMessage
+            string successMessage,
+            Action onSuccess = null
         )
         {
             if (_busy || _lifetime == null)
@@ -197,6 +247,7 @@ namespace HiveChameleon.Realtime
             {
                 LobbyRpcResponse response = await operation();
                 _joinLobbyId = response.lobby.id;
+                onSuccess?.Invoke();
                 _status = successMessage;
             }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -217,9 +268,23 @@ namespace HiveChameleon.Realtime
         private void HandleLobbyStateChanged(LobbySnapshot lobby)
         {
             _joinLobbyId = lobby.id;
+            if (!string.IsNullOrWhiteSpace(lobby.configuration.map_version_id))
+            {
+                _mapVersionId = lobby.configuration.map_version_id;
+            }
             _status = lobby.closed
                 ? "Lobby closed."
                 : $"Lobby state updated to version {lobby.row_version}.";
+        }
+
+        private void HandleRoundStateChanged(RoundSnapshot round)
+        {
+            _status = $"Round {round.sequence_number} entered {round.status}.";
+        }
+
+        private void HandleRoundRoleAssigned(RoundRoleAssignment assignment)
+        {
+            _status = $"Private server role assigned: {assignment.role}.";
         }
 
         private void OnDestroy()
@@ -227,6 +292,8 @@ namespace HiveChameleon.Realtime
             if (_connection != null)
             {
                 _connection.LobbyStateChanged -= HandleLobbyStateChanged;
+                _connection.RoundStateChanged -= HandleRoundStateChanged;
+                _connection.RoundRoleAssigned -= HandleRoundRoleAssigned;
             }
             _lifetime?.Cancel();
             _lifetime?.Dispose();

@@ -38,7 +38,26 @@ namespace HiveChameleon.Realtime
         public long row_version;
         public bool closed;
         public LobbyMemberSnapshot[] members = Array.Empty<LobbyMemberSnapshot>();
+        public string[] hunter_nominee_player_ids = Array.Empty<string>();
         public LobbyConfigurationSnapshot configuration = new LobbyConfigurationSnapshot();
+    }
+
+    [Serializable]
+    public sealed class RoundSnapshot
+    {
+        public string id = string.Empty;
+        public int sequence_number;
+        public string status = string.Empty;
+        public string started_at = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class RoundRoleAssignment
+    {
+        public string round_id = string.Empty;
+        public string player_id = string.Empty;
+        public string role = string.Empty;
+        public bool hunter_volunteer;
     }
 
     [Serializable]
@@ -47,6 +66,7 @@ namespace HiveChameleon.Realtime
         public string match_id = string.Empty;
         public LobbySnapshot lobby = new LobbySnapshot();
         public bool start_accepted;
+        public RoundSnapshot round;
     }
 
     public sealed class LobbyConfigurationDraft
@@ -117,6 +137,14 @@ namespace HiveChameleon.Realtime
     {
         public string lobby_id = string.Empty;
         public long expected_lobby_version;
+    }
+
+    [Serializable]
+    internal sealed class NominateHunterCommand
+    {
+        public string lobby_id = string.Empty;
+        public long expected_lobby_version;
+        public bool nominated;
     }
 
     [Serializable]

@@ -10,6 +10,7 @@ const requiredEnvironment = [
   'SMOKE_AUTH_SESSION_TWO_ID',
   'SMOKE_PLAYER_ID',
   'SMOKE_PLAYER_TWO_ID',
+  'SMOKE_MAP_VERSION_ID',
 ];
 
 for (const name of requiredEnvironment) {
@@ -107,8 +108,10 @@ const secondSession = await client.authenticateCustom(
 );
 const hostSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
 const guestSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
-const hostStates = trackLobbyStates(hostSocket);
-const guestStates = trackLobbyStates(guestSocket);
+const returningHostSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
+const hostStates = trackMatchStates(hostSocket);
+const guestStates = trackMatchStates(guestSocket);
+const returningHostStates = trackMatchStates(returningHostSocket);
 
 try {
   await hostSocket.connect(session, true, 1_000);
@@ -143,22 +146,91 @@ try {
     throw new Error('lobby.join resolved a different authoritative match');
   }
   await guestSocket.joinMatch(joined.match_id);
-  await guestStates.waitFor(
+  await guestStates.waitForLobby(
     (state) => state.id === created.lobby.id && state.members.length === 2,
     'two-player lobby state',
   );
 
-  const configured = await lobbyRpc(hostSocket, 'lobby.update_configuration', {
-    expected_lobby_version: joined.lobby.row_version,
+  hostSocket.disconnect(false);
+  const migrated = await guestStates.waitForLobby(
+    (state) =>
+      state.id === created.lobby.id &&
+      state.current_host_player_id === process.env.SMOKE_PLAYER_TWO_ID &&
+      state.members.length === 1,
+    'host migration after disconnect',
+  );
+
+  const migratedHostUpdate = await lobbyRpc(guestSocket, 'lobby.update_configuration', {
+    expected_lobby_version: migrated.row_version,
+    lobby_id: created.lobby.id,
+    shell_limit: 9,
+  });
+  assertLobby(migratedHostUpdate, {
+    host: process.env.SMOKE_PLAYER_TWO_ID,
+    members: 1,
+    version: 4,
+  });
+
+  await returningHostSocket.connect(session, true, 1_000);
+  const rejoined = await lobbyRpc(returningHostSocket, 'lobby.join', {
+    join_source: 'reconnect',
+    lobby_id: created.lobby.id,
+  });
+  assertLobby(rejoined, {
+    host: process.env.SMOKE_PLAYER_TWO_ID,
+    members: 2,
+    version: 5,
+  });
+  await returningHostSocket.joinMatch(rejoined.match_id);
+  await returningHostStates.waitForLobby(
+    (state) => state.id === created.lobby.id && state.members.length === 2,
+    'returning two-player lobby state',
+  );
+
+  let forgedRoleRejected = false;
+  try {
+    await lobbyRpc(guestSocket, 'lobby.nominate_hunter', {
+      expected_lobby_version: rejoined.lobby.row_version,
+      lobby_id: created.lobby.id,
+      nominated: true,
+      role: 'hunter',
+    });
+  } catch {
+    forgedRoleRejected = true;
+  }
+  if (!forgedRoleRejected) {
+    throw new Error('lobby.nominate_hunter accepted a client-supplied role');
+  }
+
+  const nominated = await lobbyRpc(guestSocket, 'lobby.nominate_hunter', {
+    expected_lobby_version: rejoined.lobby.row_version,
+    lobby_id: created.lobby.id,
+    nominated: true,
+  });
+  assertLobby(nominated, {
+    host: process.env.SMOKE_PLAYER_TWO_ID,
+    members: 2,
+    version: 6,
+  });
+  if (
+    nominated.lobby.hunter_nominee_player_ids.length !== 1 ||
+    nominated.lobby.hunter_nominee_player_ids[0] !== process.env.SMOKE_PLAYER_TWO_ID
+  ) {
+    throw new Error('authenticated Hunter nomination was not published in lobby state');
+  }
+
+  const configured = await lobbyRpc(guestSocket, 'lobby.update_configuration', {
+    expected_lobby_version: nominated.lobby.row_version,
     hiding_duration_seconds: 90,
     hunting_duration_seconds: 240,
     lobby_id: created.lobby.id,
+    map_version_id: process.env.SMOKE_MAP_VERSION_ID,
     shell_limit: 8,
   });
   assertLobby(configured, {
-    host: process.env.SMOKE_PLAYER_ID,
+    host: process.env.SMOKE_PLAYER_TWO_ID,
     members: 2,
-    version: 3,
+    version: 7,
   });
   if (
     configured.lobby.configuration.hiding_duration_seconds !== 90 ||
@@ -168,32 +240,51 @@ try {
     throw new Error('host configuration was not persisted');
   }
 
-  const started = await lobbyRpc(hostSocket, 'lobby.start', {
+  const started = await lobbyRpc(guestSocket, 'lobby.start', {
     expected_lobby_version: configured.lobby.row_version,
     lobby_id: created.lobby.id,
   });
   assertLobby(started, {
-    host: process.env.SMOKE_PLAYER_ID,
+    host: process.env.SMOKE_PLAYER_TWO_ID,
     members: 2,
-    version: 4,
+    version: 8,
   });
-  if (started.start_accepted !== true) {
-    throw new Error('lobby.start was not accepted');
+  if (
+    started.start_accepted !== true ||
+    typeof started.round?.id !== 'string' ||
+    started.round.status !== 'preparing' ||
+    started.round.sequence_number !== 1
+  ) {
+    throw new Error('lobby.start did not create a preparing round');
   }
 
-  hostSocket.disconnect(false);
-  const migrated = await guestStates.waitFor(
-    (state) =>
-      state.id === created.lobby.id &&
-      state.current_host_player_id === process.env.SMOKE_PLAYER_TWO_ID &&
-      state.members.length === 1,
-    'host migration after disconnect',
+  const guestRole = await guestStates.waitForRole(
+    (assignment) => assignment.player_id === process.env.SMOKE_PLAYER_TWO_ID,
+    'nominated guest role assignment',
+  );
+  const returningHostRole = await returningHostStates.waitForRole(
+    (assignment) => assignment.player_id === process.env.SMOKE_PLAYER_ID,
+    'returning host role assignment',
+  );
+  if (
+    guestRole.round_id !== started.round.id ||
+    guestRole.role !== 'hunter' ||
+    guestRole.hunter_volunteer !== true ||
+    returningHostRole.round_id !== started.round.id ||
+    returningHostRole.role !== 'hider' ||
+    returningHostRole.hunter_volunteer !== false
+  ) {
+    throw new Error('server role assignment did not prioritize the authenticated volunteer');
+  }
+  await guestStates.waitForRound(
+    (round) => round.id === started.round.id && round.status === 'preparing',
+    'public preparing-round state',
   );
 
   let staleVersionRejected = false;
   try {
     await lobbyRpc(guestSocket, 'lobby.update_configuration', {
-      expected_lobby_version: started.lobby.row_version,
+      expected_lobby_version: configured.lobby.row_version,
       lobby_id: created.lobby.id,
       shell_limit: 9,
     });
@@ -204,18 +295,25 @@ try {
     throw new Error('new host command accepted a stale lobby version');
   }
 
-  const migratedHostUpdate = await lobbyRpc(guestSocket, 'lobby.update_configuration', {
-    expected_lobby_version: migrated.row_version,
-    lobby_id: created.lobby.id,
-    shell_limit: 9,
-  });
-  if (
-    migratedHostUpdate.lobby.current_host_player_id !== process.env.SMOKE_PLAYER_TWO_ID ||
-    migratedHostUpdate.lobby.configuration.shell_limit !== 9
-  ) {
-    throw new Error('migrated host could not configure the persistent lobby');
+  let lateNominationRejected = false;
+  try {
+    await lobbyRpc(returningHostSocket, 'lobby.nominate_hunter', {
+      expected_lobby_version: started.lobby.row_version,
+      lobby_id: created.lobby.id,
+      nominated: true,
+    });
+  } catch {
+    lateNominationRejected = true;
+  }
+  if (!lateNominationRejected) {
+    throw new Error('Hunter nomination remained open after round start');
   }
 
+  returningHostSocket.disconnect(false);
+  await guestStates.waitForLobby(
+    (state) => state.id === created.lobby.id && state.members.length === 1,
+    'round participant disconnect',
+  );
   const closed = await lobbyRpc(guestSocket, 'lobby.leave', {
     lobby_id: created.lobby.id,
   });
@@ -229,14 +327,19 @@ try {
       bridgeAssertionReplayRejected,
       customIdentityPreclaimRejected,
       deviceAuthenticationRejected,
-      lobbyLifecycle: 'create_join_configure_start_leave',
+      lobbyLifecycle: 'create_join_migrate_rejoin_nominate_configure_start_leave',
       hostMigration: 'disconnect',
+      roundScaffolding: 'preparing',
+      serverAssignedRoles: true,
+      forgedRoleRejected,
+      lateNominationRejected,
       staleHostVersionRejected: staleVersionRejected,
     }),
   );
 } finally {
   hostSocket.disconnect(false);
   guestSocket.disconnect(false);
+  returningHostSocket.disconnect(false);
 }
 
 function createBridgeAssertion({ authSessionId, bridgeKey, playerId }) {
@@ -308,39 +411,50 @@ function assertLobby(response, expected) {
   }
 }
 
-function trackLobbyStates(socket) {
-  let latest;
-  const waiters = new Set();
+function trackMatchStates(socket) {
+  const latest = new Map();
+  const waiters = new Map([
+    [1, new Set()],
+    [2, new Set()],
+    [3, new Set()],
+  ]);
   socket.onmatchdata = (message) => {
-    if (Number(message.op_code) !== 1) {
+    const opcode = Number(message.op_code);
+    const opcodeWaiters = waiters.get(opcode);
+    if (!opcodeWaiters) {
       return;
     }
     const state = JSON.parse(new TextDecoder().decode(message.data));
-    latest = state;
-    for (const waiter of waiters) {
+    latest.set(opcode, state);
+    for (const waiter of opcodeWaiters) {
       if (waiter.predicate(state)) {
         clearTimeout(waiter.timeout);
-        waiters.delete(waiter);
+        opcodeWaiters.delete(waiter);
         waiter.resolve(state);
       }
     }
   };
+  function waitFor(opcode, predicate, description) {
+    const current = latest.get(opcode);
+    if (current && predicate(current)) {
+      return Promise.resolve(current);
+    }
+    return new Promise((resolve, reject) => {
+      const opcodeWaiters = waiters.get(opcode);
+      const waiter = {
+        predicate,
+        resolve,
+        timeout: setTimeout(() => {
+          opcodeWaiters.delete(waiter);
+          reject(new Error(`Timed out waiting for ${description}`));
+        }, 10_000),
+      };
+      opcodeWaiters.add(waiter);
+    });
+  }
   return {
-    waitFor(predicate, description) {
-      if (latest && predicate(latest)) {
-        return Promise.resolve(latest);
-      }
-      return new Promise((resolve, reject) => {
-        const waiter = {
-          predicate,
-          resolve,
-          timeout: setTimeout(() => {
-            waiters.delete(waiter);
-            reject(new Error(`Timed out waiting for ${description}`));
-          }, 10_000),
-        };
-        waiters.add(waiter);
-      });
-    },
+    waitForLobby: (predicate, description) => waitFor(1, predicate, description),
+    waitForRole: (predicate, description) => waitFor(2, predicate, description),
+    waitForRound: (predicate, description) => waitFor(3, predicate, description),
   };
 }

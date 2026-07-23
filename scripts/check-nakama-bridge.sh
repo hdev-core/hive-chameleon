@@ -201,6 +201,10 @@ export SMOKE_AUTH_SESSION_ID="$(random_uuid_v7)"
 export SMOKE_AUTH_SESSION_TWO_ID="$(random_uuid_v7)"
 export SMOKE_DISCLOSURE_ACK_ID="$(random_uuid_v7)"
 export SMOKE_DISCLOSURE_ACK_TWO_ID="$(random_uuid_v7)"
+export SMOKE_MAP_ID="$(random_uuid_v7)"
+export SMOKE_MAP_VERSION_ID="$(random_uuid_v7)"
+export SMOKE_MAP_DESKTOP_DISTRIBUTION_ID="$(random_uuid_v7)"
+export SMOKE_MAP_WEB_DISTRIBUTION_ID="$(random_uuid_v7)"
 export AUTH_TOKEN_SECRET="$(random_base64url 32)"
 export AUTH_IDENTITY_LOOKUP_KEY="$(random_base64url 32)"
 export HC_POSTGRES_PORT="$(free_port)"
@@ -222,10 +226,41 @@ application_compose exec --no-TTY postgres psql \
   -v session_id="${SMOKE_AUTH_SESSION_ID}" \
   -v session_two_id="${SMOKE_AUTH_SESSION_TWO_ID}" \
   -v disclosure_ack_id="${SMOKE_DISCLOSURE_ACK_ID}" \
-  -v disclosure_ack_two_id="${SMOKE_DISCLOSURE_ACK_TWO_ID}" <<'SQL'
+  -v disclosure_ack_two_id="${SMOKE_DISCLOSURE_ACK_TWO_ID}" \
+  -v map_id="${SMOKE_MAP_ID}" \
+  -v map_version_id="${SMOKE_MAP_VERSION_ID}" \
+  -v map_desktop_distribution_id="${SMOKE_MAP_DESKTOP_DISTRIBUTION_ID}" \
+  -v map_web_distribution_id="${SMOKE_MAP_WEB_DISTRIBUTION_ID}" <<'SQL'
 INSERT INTO identity.player (id, hive_username, hive_control_state) VALUES
   (:'player_id', 'smoke-user', 'external_self_custodial'),
   (:'player_two_id', 'smoke-user-two', 'external_self_custodial');
+
+INSERT INTO content.map (
+  id, origin, slug, title, description, lifecycle
+) VALUES (
+  :'map_id', 'official', 'm4-smoke-scaffold', 'M4 Smoke Scaffold',
+  'Non-visual map record for authoritative round scaffolding tests.', 'published'
+);
+
+INSERT INTO content.map_version (
+  id, map_id, version_number, manifest, status, license_declaration_version,
+  license_accepted_at, technical_validation, submitted_at, approved_at, published_at
+) VALUES (
+  :'map_version_id', :'map_id', 'm4-smoke-1', '{}', 'published', 'dev-1',
+  now(), '{"validated":true}', now(), now(), now()
+);
+
+INSERT INTO content.map_distribution (
+  id, map_version_id, platform, state, required_game_build_version, published_at
+) VALUES
+  (
+    :'map_desktop_distribution_id', :'map_version_id', 'desktop', 'available',
+    'hive-chameleon-m4-dev', now()
+  ),
+  (
+    :'map_web_distribution_id', :'map_version_id', 'web', 'available',
+    'hive-chameleon-m4-dev', now()
+  );
 
 INSERT INTO identity.auth_session (
   id, player_id, refresh_token_hash, platform, authentication_method,
@@ -276,3 +311,35 @@ wait_for_api
 
 echo "Exercising the NestJS-to-Nakama bridge contract..."
 node runtime/nakama/smoke.mjs
+application_compose exec --no-TTY postgres psql \
+  -U postgres \
+  -d hive_chameleon \
+  -v ON_ERROR_STOP=1 <<'SQL'
+DO $$
+DECLARE
+  round_count integer;
+  invalid_round_count integer;
+  live_participant_count integer;
+BEGIN
+  SELECT count(*),
+         count(*) FILTER (
+           WHERE status <> 'aborted'
+              OR sequence_number <> 1
+              OR hunter_count <> 1
+              OR game_server_build_version <> 'hive-chameleon-m4-dev'
+              OR protocol_version <> 'm4-v1'
+         )
+    INTO round_count, invalid_round_count
+    FROM game.game_round;
+
+  SELECT count(*) INTO live_participant_count
+    FROM game.round_participant;
+
+  IF round_count <> 1 OR invalid_round_count <> 0 OR live_participant_count <> 0 THEN
+    RAISE EXCEPTION
+      'round scaffold persistence mismatch: rounds %, invalid %, terminal participants %',
+      round_count, invalid_round_count, live_participant_count;
+  END IF;
+END;
+$$;
+SQL

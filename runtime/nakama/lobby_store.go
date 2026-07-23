@@ -278,6 +278,14 @@ func (s *postgresLobbyStore) Join(
 	if activeMembers >= int(maxPlayers) {
 		return lobbySnapshot{}, newLobbyProblem(grpcFailedPrecondition, "lobby is full")
 	}
+	if active, err := activeRoundExists(ctx, tx, request.LobbyID); err != nil {
+		return lobbySnapshot{}, err
+	} else if active {
+		return lobbySnapshot{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"cannot join while a round is active",
+		)
+	}
 
 	membershipID, err := newUUIDV7(s.now().UTC())
 	if err != nil {
@@ -369,6 +377,14 @@ func (s *postgresLobbyStore) UpdateConfiguration(
 	if err != nil {
 		return lobbySnapshot{}, err
 	}
+	if active, err := activeRoundExists(ctx, tx, request.LobbyID); err != nil {
+		return lobbySnapshot{}, err
+	} else if active {
+		return lobbySnapshot{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"cannot configure while a round is active",
+		)
+	}
 	next, err := applyConfigurationPatch(current, request, maxPlayers)
 	if err != nil {
 		return lobbySnapshot{}, err
@@ -423,63 +439,6 @@ func (s *postgresLobbyStore) UpdateConfiguration(
 	}
 	if err := tx.Commit(); err != nil {
 		return lobbySnapshot{}, fmt.Errorf("commit lobby configuration: %w", err)
-	}
-	return snapshot, nil
-}
-
-func (s *postgresLobbyStore) AcceptStart(
-	ctx context.Context,
-	playerID string,
-	request startLobbyRequest,
-) (lobbySnapshot, error) {
-	tx, err := s.begin(ctx)
-	if err != nil {
-		return lobbySnapshot{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	configuration, _, err := lockHostConfiguration(
-		ctx,
-		tx,
-		request.LobbyID,
-		playerID,
-		request.ExpectedLobbyVersion,
-	)
-	if err != nil {
-		return lobbySnapshot{}, err
-	}
-	var activeMembers int
-	if err := tx.QueryRowContext(
-		ctx,
-		`SELECT count(*)::integer
-		   FROM game.lobby_membership
-		  WHERE lobby_id = $1
-		    AND left_at IS NULL`,
-		request.LobbyID,
-	).Scan(&activeMembers); err != nil {
-		return lobbySnapshot{}, fmt.Errorf("count start-eligible lobby members: %w", err)
-	}
-	if activeMembers < int(configuration.HunterCount)+1 {
-		return lobbySnapshot{}, newLobbyProblem(
-			grpcFailedPrecondition,
-			"lobby needs the configured hunters plus at least one hider",
-		)
-	}
-	if _, err := tx.ExecContext(
-		ctx,
-		`UPDATE game.lobby
-		    SET row_version = row_version + 1
-		  WHERE id = $1`,
-		request.LobbyID,
-	); err != nil {
-		return lobbySnapshot{}, fmt.Errorf("advance lobby version for start: %w", err)
-	}
-	snapshot, err := loadLobbySnapshot(ctx, tx, request.LobbyID)
-	if err != nil {
-		return lobbySnapshot{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return lobbySnapshot{}, fmt.Errorf("commit lobby start acceptance: %w", err)
 	}
 	return snapshot, nil
 }
@@ -643,6 +602,21 @@ func (s *postgresLobbyStore) Leave(
 			lobbyID,
 		); err != nil {
 			return lobbySnapshot{}, false, fmt.Errorf("advance lobby version after leave: %w", err)
+		}
+	}
+	if closed {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE game.game_round
+			    SET status = 'aborted',
+			        ended_at = $2,
+			        abort_reason = 'lobby_closed'
+			  WHERE lobby_id = $1
+			    AND status NOT IN ('completed', 'aborted')`,
+			lobbyID,
+			now,
+		); err != nil {
+			return lobbySnapshot{}, false, fmt.Errorf("abort active round with empty lobby: %w", err)
 		}
 	}
 
@@ -828,6 +802,7 @@ func loadLobbySnapshot(
 		return lobbySnapshot{}, fmt.Errorf("load lobby snapshot: %w", err)
 	}
 	snapshot.Closed = closedAt.Valid
+	snapshot.HunterNomineeIDs = make([]string, 0)
 	if mapVersionID.Valid {
 		snapshot.Configuration.MapVersionID = &mapVersionID.String
 	}
