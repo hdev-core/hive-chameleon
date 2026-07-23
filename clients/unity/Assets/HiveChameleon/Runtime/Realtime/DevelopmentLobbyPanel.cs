@@ -53,7 +53,7 @@ namespace HiveChameleon.Realtime
 
             GUILayout.BeginArea(new Rect(12, 12, 430, Mathf.Max(260, Screen.height - 24)));
             GUILayout.BeginVertical(GUI.skin.box);
-            GUILayout.Label("Hive Chameleon · Persistent Lobby #30");
+            GUILayout.Label("Hive Chameleon · Lobby & Round Development");
             GUILayout.Label($"Realtime: {_connection.State}");
             GUILayout.Label(_status);
 
