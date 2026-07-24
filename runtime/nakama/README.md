@@ -55,11 +55,24 @@ The runtime also denies Nakama's built-in custom-ID link/unlink, account update,
 deletion endpoints. Account identity and lifecycle remain product-API responsibilities, so a
 client cannot preclaim another player UUID or detach its bridged identity.
 
-`lobby.create`, `lobby.join`, `lobby.leave`, `lobby.update_configuration`, and `lobby.start` now
-drive a persistent PostgreSQL lifecycle through a Nakama-authoritative match. Host commands lock
-and recheck both the current open `game.lobby_host_assignment` and the caller's expected lobby
-version. Disconnecting or leaving closes the membership and migrates the host in one serializable
-transaction; the empty lobby closes without treating host ownership as a permanent role.
+`lobby.create`, `lobby.join`, `lobby.leave`, `lobby.update_configuration`,
+`lobby.nominate_hunter`, and `lobby.start` drive the lobby and pre-round lifecycle through a
+Nakama-authoritative match. Host commands lock and recheck both the current open
+`game.lobby_host_assignment` and the caller's expected lobby version. Disconnecting or leaving
+closes the membership and migrates the host in one serializable transaction; the empty lobby
+closes without treating host ownership as a permanent role.
+
+Hunter nomination is a toggle for the authenticated caller only. The match publishes the current
+nominee IDs in `lobby.state`, but never accepts a player ID or role from the client. At start,
+PostgreSQL locks the exact host, lobby version, membership, configuration, and published map
+version; the server then prioritizes nominees and cryptographically fills any remaining Hunter
+slots. It inserts a durable `game.game_round` header in `preparing` state while live assignments
+remain private authoritative-match state. Opcode `2` carries one recipient's role assignment;
+opcode `3` carries the public round phase. Terminal `game.round_participant` evidence is still
+written only when the round ends.
+
+An empty lobby aborts its active nonterminal round transactionally. Reconnect restoration and
+subsequent phase simulation are deliberately left to their dedicated M4 cards.
 
 The runtime opens the application connection from `HC_NAKAMA_DATABASE_URL`. Production supplies a
 dedicated login granted membership in the `hc_nakama` group role. Nakama's injected `*sql.DB`
@@ -68,9 +81,10 @@ continues to point only at Nakama's internal database and is never used for appl
 The remaining future RPCs stay registered as explicit `feature_not_ready` stubs until their cards
 replace them with authoritative behavior.
 
-The repository smoke command starts disposable application and Nakama databases, seeds one
-short-lived real API session, and exercises the complete bridge, same-assertion replay denial, and
-non-bridge authentication denial without printing credentials:
+The repository smoke command starts disposable application and Nakama databases, seeds two
+short-lived real API sessions plus a published non-visual map record, and exercises the complete
+bridge, host migration, nomination, server-only role assignment, round creation, same-assertion
+replay denial, and non-bridge authentication denial without printing credentials:
 
 ```bash
 npm run realtime:smoke

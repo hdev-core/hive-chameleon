@@ -55,8 +55,14 @@ namespace HiveChameleon.Realtime
                 || string.IsNullOrWhiteSpace(resolvedBearerToken)
             )
             {
+                DevelopmentLobbyPanel previewPanel = GetComponent<DevelopmentLobbyPanel>();
+                if (previewPanel == null)
+                {
+                    previewPanel = gameObject.AddComponent<DevelopmentLobbyPanel>();
+                }
+                previewPanel.InitializePreview();
                 Debug.Log(
-                    "Realtime development connection is disabled; local credentials were not supplied."
+                    "Realtime development connection is disabled; showing the credential-free visual preview."
                 );
                 return;
             }

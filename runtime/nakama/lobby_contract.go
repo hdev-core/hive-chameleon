@@ -95,6 +95,12 @@ type startLobbyRequest struct {
 	ExpectedLobbyVersion int64  `json:"expected_lobby_version"`
 }
 
+type nominateHunterRequest struct {
+	LobbyID              string `json:"lobby_id"`
+	ExpectedLobbyVersion int64  `json:"expected_lobby_version"`
+	Nominated            bool   `json:"nominated"`
+}
+
 type lobbyMemberSnapshot struct {
 	PlayerID string    `json:"player_id"`
 	JoinedAt time.Time `json:"joined_at"`
@@ -125,13 +131,15 @@ type lobbySnapshot struct {
 	RowVersion          int64                      `json:"row_version"`
 	Closed              bool                       `json:"closed"`
 	Members             []lobbyMemberSnapshot      `json:"members"`
+	HunterNomineeIDs    []string                   `json:"hunter_nominee_player_ids"`
 	Configuration       lobbyConfigurationSnapshot `json:"configuration"`
 }
 
 type lobbyRPCResponse struct {
-	MatchID       string        `json:"match_id,omitempty"`
-	Lobby         lobbySnapshot `json:"lobby"`
-	StartAccepted bool          `json:"start_accepted,omitempty"`
+	MatchID       string               `json:"match_id,omitempty"`
+	Lobby         lobbySnapshot        `json:"lobby"`
+	StartAccepted bool                 `json:"start_accepted,omitempty"`
+	Round         *roundPublicSnapshot `json:"round,omitempty"`
 }
 
 type lobbyStore interface {
@@ -144,7 +152,18 @@ type lobbyStore interface {
 		string,
 		updateLobbyConfigurationRequest,
 	) (lobbySnapshot, error)
-	AcceptStart(context.Context, string, startLobbyRequest) (lobbySnapshot, error)
+	RecordNominationChange(
+		context.Context,
+		string,
+		nominateHunterRequest,
+	) (lobbySnapshot, error)
+	StartRound(
+		context.Context,
+		string,
+		startLobbyRequest,
+		map[string]bool,
+	) (lobbySnapshot, roundSnapshot, error)
+	ActiveRound(context.Context, string) (*roundSnapshot, error)
 	Leave(
 		context.Context,
 		string,
@@ -254,6 +273,10 @@ func validateHostVersion(lobbyID string, expectedVersion int64) error {
 		return newLobbyProblem(grpcInvalidArgument, "expected lobby version must be positive")
 	}
 	return nil
+}
+
+func validateNominateHunter(request nominateHunterRequest) error {
+	return validateHostVersion(request.LobbyID, request.ExpectedLobbyVersion)
 }
 
 func applyConfigurationPatch(

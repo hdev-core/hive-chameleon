@@ -9,6 +9,10 @@ namespace HiveChameleon.Realtime
 {
     public sealed class NakamaRealtimeConnection : IRealtimeConnection
     {
+        private const long LobbyStateOpcode = 1;
+        private const long RoundRoleAssignedOpcode = 2;
+        private const long RoundPhaseChangedOpcode = 3;
+
         private readonly string _serverKey;
         private IClient _client;
         private ISession _session;
@@ -29,7 +33,15 @@ namespace HiveChameleon.Realtime
 
         public LobbySnapshot CurrentLobby { get; private set; }
 
+        public RoundSnapshot CurrentRound { get; private set; }
+
+        public RoundRoleAssignment CurrentRoleAssignment { get; private set; }
+
         public event Action<LobbySnapshot> LobbyStateChanged;
+
+        public event Action<RoundSnapshot> RoundStateChanged;
+
+        public event Action<RoundRoleAssignment> RoundRoleAssigned;
 
         public async Task ConnectAsync(
             RealtimeSessionCredential credential,
@@ -193,6 +205,24 @@ namespace HiveChameleon.Realtime
             );
         }
 
+        public Task<LobbyRpcResponse> NominateHunterAsync(
+            bool nominated,
+            CancellationToken cancellationToken
+        )
+        {
+            LobbySnapshot lobby = RequireCurrentLobby();
+            return CallLobbyRpcAsync(
+                "lobby.nominate_hunter",
+                new NominateHunterCommand
+                {
+                    lobby_id = lobby.id,
+                    expected_lobby_version = lobby.row_version,
+                    nominated = nominated,
+                },
+                cancellationToken
+            );
+        }
+
         public async Task<LobbyRpcResponse> LeaveLobbyAsync(
             CancellationToken cancellationToken
         )
@@ -204,6 +234,8 @@ namespace HiveChameleon.Realtime
                 cancellationToken
             );
             _match = null;
+            CurrentRound = null;
+            CurrentRoleAssignment = null;
             return response;
         }
 
@@ -229,6 +261,10 @@ namespace HiveChameleon.Realtime
                 throw new InvalidOperationException($"{id} returned an invalid lobby response.");
             }
             PublishLobby(response.lobby);
+            if (response.round != null && !string.IsNullOrWhiteSpace(response.round.id))
+            {
+                PublishRound(response.round);
+            }
             return response;
         }
 
@@ -293,6 +329,9 @@ namespace HiveChameleon.Realtime
             _match = null;
             _session = null;
             _client = null;
+            CurrentLobby = null;
+            CurrentRound = null;
+            CurrentRoleAssignment = null;
         }
 
         private void HandleConnected()
@@ -315,23 +354,53 @@ namespace HiveChameleon.Realtime
 
         private void HandleMatchState(IMatchState matchState)
         {
-            if (matchState == null || matchState.OpCode != 1 || matchState.State == null)
+            if (matchState == null || matchState.State == null)
             {
                 return;
             }
             try
             {
                 string payload = Encoding.UTF8.GetString(matchState.State);
-                LobbySnapshot lobby = JsonUtility.FromJson<LobbySnapshot>(payload);
-                if (lobby == null || string.IsNullOrWhiteSpace(lobby.id))
+                switch (matchState.OpCode)
                 {
-                    throw new InvalidOperationException("Lobby state payload is invalid.");
+                    case LobbyStateOpcode:
+                        LobbySnapshot lobby = JsonUtility.FromJson<LobbySnapshot>(payload);
+                        if (lobby == null || string.IsNullOrWhiteSpace(lobby.id))
+                        {
+                            throw new InvalidOperationException("Lobby state payload is invalid.");
+                        }
+                        PublishLobby(lobby);
+                        break;
+                    case RoundRoleAssignedOpcode:
+                        RoundRoleAssignment assignment =
+                            JsonUtility.FromJson<RoundRoleAssignment>(payload);
+                        if (
+                            assignment == null
+                            || string.IsNullOrWhiteSpace(assignment.round_id)
+                            || string.IsNullOrWhiteSpace(assignment.player_id)
+                            || (assignment.role != "hunter" && assignment.role != "hider")
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Private round role payload is invalid."
+                            );
+                        }
+                        CurrentRoleAssignment = assignment;
+                        RoundRoleAssigned?.Invoke(assignment);
+                        break;
+                    case RoundPhaseChangedOpcode:
+                        RoundSnapshot round = JsonUtility.FromJson<RoundSnapshot>(payload);
+                        if (round == null || string.IsNullOrWhiteSpace(round.id))
+                        {
+                            throw new InvalidOperationException("Round phase payload is invalid.");
+                        }
+                        PublishRound(round);
+                        break;
                 }
-                PublishLobby(lobby);
             }
             catch (Exception exception)
             {
-                Debug.LogWarning($"Could not apply lobby state: {exception.Message}");
+                Debug.LogWarning($"Could not apply authoritative match state: {exception.Message}");
             }
         }
 
@@ -339,6 +408,12 @@ namespace HiveChameleon.Realtime
         {
             CurrentLobby = lobby;
             LobbyStateChanged?.Invoke(lobby);
+        }
+
+        private void PublishRound(RoundSnapshot round)
+        {
+            CurrentRound = round;
+            RoundStateChanged?.Invoke(round);
         }
     }
 }

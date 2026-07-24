@@ -36,6 +36,7 @@ type lobbySignal struct {
 	Type                string                           `json:"type"`
 	PlayerID            string                           `json:"player_id,omitempty"`
 	LeaveReason         string                           `json:"leave_reason,omitempty"`
+	Nomination          *nominateHunterRequest           `json:"nomination,omitempty"`
 	UpdateConfiguration *updateLobbyConfigurationRequest `json:"update_configuration,omitempty"`
 	Start               *startLobbyRequest               `json:"start,omitempty"`
 }
@@ -174,6 +175,39 @@ func (s *lobbyService) updateConfigurationRPC(
 	})
 	if err != nil {
 		return "", logLobbyFailure(logger, "lobby.update_configuration", err)
+	}
+	return encodeLobbyResponse(*response)
+}
+
+func (s *lobbyService) nominateHunterRPC(
+	ctx context.Context,
+	logger runtime.Logger,
+	_ *sql.DB,
+	nk runtime.NakamaModule,
+	payload string,
+) (string, error) {
+	playerID, err := trustedPlayerID(ctx)
+	if err != nil {
+		return "", asLobbyRuntimeError(err)
+	}
+	var request nominateHunterRequest
+	if err := decodeLobbyPayload(payload, &request); err != nil {
+		return "", asLobbyRuntimeError(err)
+	}
+	if err := validateNominateHunter(request); err != nil {
+		return "", asLobbyRuntimeError(err)
+	}
+	matchID, err := ensureLobbyMatch(ctx, nk, request.LobbyID)
+	if err != nil {
+		return "", logLobbyFailure(logger, "lobby.nominate_hunter match binding", err)
+	}
+	response, err := sendLobbySignal(ctx, nk, matchID, lobbySignal{
+		Type:       "nominate_hunter",
+		PlayerID:   playerID,
+		Nomination: &request,
+	})
+	if err != nil {
+		return "", logLobbyFailure(logger, "lobby.nominate_hunter", err)
 	}
 	return encodeLobbyResponse(*response)
 }
