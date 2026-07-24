@@ -55,6 +55,12 @@ Card #31 extends the same panel with Hunter nomination, published map-version se
 public preparing-round snapshot, and the current client's private server-assigned role. A client
 can volunteer or withdraw itself, but it cannot name another player or submit a role.
 
+Card #32 adds the first authoritative Casual loop to that panel. The host can apply the minimum
+10-second hiding/30-second hunting development configuration. Hiders see only their own private
+server-assigned hiding slot. Hunters choose among the public aim slots, but the client sends only a
+command ID and aim-slot intent; Nakama validates phase, role, shells, reload timing, and the
+server-owned slot contents before broadcasting a discovery or terminal outcome.
+
 Run the migrated application database, Nakama, and API as described in
 `runtime/nakama/README.md`. Launch the editor or a desktop development player with:
 
@@ -83,14 +89,24 @@ For the card #31 round-scaffolding check:
 1. Connect two clients and join the same lobby.
 2. In either client, select **Nominate me as Hunter**.
 3. In the host, paste a published map-version UUID and select
-   **Configure: use map + add one shell**.
+   **Configure Casual demo: 10s hide / 30s hunt**.
 4. Select **Start authoritative round**.
 5. Both clients must show the same public round UUID, sequence `1`, and `preparing` state.
 6. Each client must show only its own private role. With one configured Hunter and one nominee,
    the nominee must be the Hunter and the other player the Hider.
 
+For the card #32 Casual-round check:
+
+1. Apply the Casual demo configuration and start the round.
+2. Both clients must progress from `preparing` to `hiding` and `hunting` from server deadlines.
+3. Only the Hider client may display its private hiding slot.
+4. On the Hunter client, fire at aim slots. Misses consume shells and enforce the server reload.
+5. Finding the final Hider must broadcast one discovery and a terminal Hunter win. If the timer
+   expires first, the terminal state must report a Hider win.
+
 The runtime rejects configuration changes, new nominations, and new joins while the round is
-active. Later cards add phase simulation and the 60-second reconnect outcome.
+active. Later cards add durable terminal commit, Infection, Answer Check/scoring, polished
+map/round presentation, and the 60-second reconnect outcome.
 
 No 3D models or gameplay assets are required for this panel. Without the three realtime
 environment values, Play Mode remains intentionally offline and logs that local credentials were

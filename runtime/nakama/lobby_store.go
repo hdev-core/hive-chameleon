@@ -813,7 +813,7 @@ func loadLobbySnapshot(
 	snapshot.Members = make([]lobbyMemberSnapshot, 0, snapshot.MaxPlayers)
 	rows, err := queryer.QueryContext(
 		ctx,
-		`SELECT player_id::text, joined_at
+		`SELECT player_id::text, joined_at, hunter_nominated
 		   FROM game.lobby_membership
 		  WHERE lobby_id = $1
 		    AND left_at IS NULL
@@ -826,10 +826,21 @@ func loadLobbySnapshot(
 	defer rows.Close()
 	for rows.Next() {
 		var member lobbyMemberSnapshot
-		if err := rows.Scan(&member.PlayerID, &member.JoinedAt); err != nil {
+		var hunterNominated bool
+		if err := rows.Scan(
+			&member.PlayerID,
+			&member.JoinedAt,
+			&hunterNominated,
+		); err != nil {
 			return lobbySnapshot{}, fmt.Errorf("scan lobby member: %w", err)
 		}
 		snapshot.Members = append(snapshot.Members, member)
+		if hunterNominated {
+			snapshot.HunterNomineeIDs = append(
+				snapshot.HunterNomineeIDs,
+				member.PlayerID,
+			)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return lobbySnapshot{}, fmt.Errorf("iterate lobby members: %w", err)

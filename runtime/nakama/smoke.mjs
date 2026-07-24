@@ -221,11 +221,12 @@ try {
 
   const configured = await lobbyRpc(guestSocket, 'lobby.update_configuration', {
     expected_lobby_version: nominated.lobby.row_version,
-    hiding_duration_seconds: 90,
-    hunting_duration_seconds: 240,
+    hiding_duration_seconds: 10,
+    hunting_duration_seconds: 30,
     lobby_id: created.lobby.id,
     map_version_id: process.env.SMOKE_MAP_VERSION_ID,
-    shell_limit: 8,
+    reload_duration_ms: 100,
+    shell_limit: 6,
   });
   assertLobby(configured, {
     host: process.env.SMOKE_PLAYER_TWO_ID,
@@ -233,11 +234,18 @@ try {
     version: 7,
   });
   if (
-    configured.lobby.configuration.hiding_duration_seconds !== 90 ||
-    configured.lobby.configuration.hunting_duration_seconds !== 240 ||
-    configured.lobby.configuration.shell_limit !== 8
+    configured.lobby.configuration.hiding_duration_seconds !== 10 ||
+    configured.lobby.configuration.hunting_duration_seconds !== 30 ||
+    configured.lobby.configuration.reload_duration_ms !== 100 ||
+    configured.lobby.configuration.shell_limit !== 6
   ) {
     throw new Error('host configuration was not persisted');
+  }
+  if (
+    configured.lobby.hunter_nominee_player_ids.length !== 1 ||
+    configured.lobby.hunter_nominee_player_ids[0] !== process.env.SMOKE_PLAYER_TWO_ID
+  ) {
+    throw new Error('Hunter nomination did not survive a durable lobby snapshot refresh');
   }
 
   const started = await lobbyRpc(guestSocket, 'lobby.start', {
@@ -256,6 +264,9 @@ try {
     started.round.sequence_number !== 1
   ) {
     throw new Error('lobby.start did not create a preparing round');
+  }
+  if (started.lobby.hunter_nominee_player_ids.length !== 0) {
+    throw new Error('consumed Hunter nominations were not cleared at round start');
   }
 
   const guestRole = await guestStates.waitForRole(
@@ -280,6 +291,21 @@ try {
     (round) => round.id === started.round.id && round.status === 'preparing',
     'public preparing-round state',
   );
+  const guestPlayerState = await guestStates.waitForPlayerState(
+    (state) => state.round_id === started.round.id && state.role === 'hunter',
+    'private Hunter simulation state',
+  );
+  const hiderPlayerState = await returningHostStates.waitForPlayerState(
+    (state) =>
+      state.round_id === started.round.id && state.role === 'hider' && state.hiding_slot > 0,
+    'private Hider simulation state',
+  );
+  if (
+    guestPlayerState.shells_remaining !== 6 ||
+    hiderPlayerState.player_id !== process.env.SMOKE_PLAYER_ID
+  ) {
+    throw new Error('private Casual simulation state was not recipient-correct');
+  }
 
   let staleVersionRejected = false;
   try {
@@ -309,6 +335,84 @@ try {
     throw new Error('Hunter nomination remained open after round start');
   }
 
+  const hunting = await guestStates.waitForRound(
+    (round) => round.id === started.round.id && round.status === 'hunting',
+    'server-timed hunting phase',
+    20_000,
+  );
+  if (
+    hunting.hiders_remaining !== 1 ||
+    hunting.hiders_total !== 1 ||
+    hunting.target_slot_count < 3
+  ) {
+    throw new Error('public Casual hunting state is invalid');
+  }
+
+  await guestSocket.sendMatchState(
+    created.match_id,
+    10,
+    JSON.stringify({
+      aim_slot: hiderPlayerState.hiding_slot,
+      command_id: 'forged-hit',
+      hit: true,
+    }),
+  );
+  const forgedHit = await guestStates.waitForFireResult(
+    (result) => result.reason === 'invalid_command',
+    'client-declared hit rejection',
+  );
+  if (forgedHit.accepted) {
+    throw new Error('authoritative match accepted a client-declared hit');
+  }
+
+  await returningHostSocket.sendMatchState(
+    created.match_id,
+    10,
+    JSON.stringify({
+      aim_slot: hiderPlayerState.hiding_slot,
+      command_id: 'hider-forged-shot',
+    }),
+  );
+  const hiderFire = await returningHostStates.waitForFireResult(
+    (result) => result.command_id === 'hider-forged-shot',
+    'Hider fire rejection',
+  );
+  if (hiderFire.accepted || hiderFire.reason !== 'not_hunter') {
+    throw new Error('authoritative match accepted a Hider fire intent');
+  }
+
+  await guestSocket.sendMatchState(
+    created.match_id,
+    10,
+    JSON.stringify({
+      aim_slot: hiderPlayerState.hiding_slot,
+      command_id: 'authoritative-hit',
+    }),
+  );
+  const authoritativeHit = await guestStates.waitForFireResult(
+    (result) => result.command_id === 'authoritative-hit',
+    'authoritative Hunter fire result',
+  );
+  const discovery = await guestStates.waitForDiscovery(
+    (state) => state.round_id === started.round.id && state.sequence === 1,
+    'authoritative discovery event',
+  );
+  const terminalRound = await guestStates.waitForRound(
+    (round) => round.id === started.round.id && round.status === 'terminal',
+    'terminal Casual round',
+  );
+  if (
+    !authoritativeHit.accepted ||
+    !authoritativeHit.hit ||
+    authoritativeHit.hider_player_id !== process.env.SMOKE_PLAYER_ID ||
+    discovery.hider_player_id !== process.env.SMOKE_PLAYER_ID ||
+    terminalRound.winning_side !== 'hunters' ||
+    terminalRound.completion_reason !== 'all_hiders_found' ||
+    terminalRound.hiders_remaining !== 0
+  ) {
+    throw new Error('Casual round did not resolve an authoritative Hunter win');
+  }
+
   returningHostSocket.disconnect(false);
   await guestStates.waitForLobby(
     (state) => state.id === created.lobby.id && state.members.length === 1,
@@ -330,6 +434,8 @@ try {
       lobbyLifecycle: 'create_join_migrate_rejoin_nominate_configure_start_leave',
       hostMigration: 'disconnect',
       roundScaffolding: 'preparing',
+      casualRound: 'terminal_hunter_win',
+      clientDeclaredHitRejected: true,
       serverAssignedRoles: true,
       forgedRoleRejected,
       lateNominationRejected,
@@ -417,6 +523,9 @@ function trackMatchStates(socket) {
     [1, new Set()],
     [2, new Set()],
     [3, new Set()],
+    [4, new Set()],
+    [5, new Set()],
+    [6, new Set()],
   ]);
   socket.onmatchdata = (message) => {
     const opcode = Number(message.op_code);
@@ -434,7 +543,7 @@ function trackMatchStates(socket) {
       }
     }
   };
-  function waitFor(opcode, predicate, description) {
+  function waitFor(opcode, predicate, description, timeoutMs = 10_000) {
     const current = latest.get(opcode);
     if (current && predicate(current)) {
       return Promise.resolve(current);
@@ -447,7 +556,7 @@ function trackMatchStates(socket) {
         timeout: setTimeout(() => {
           opcodeWaiters.delete(waiter);
           reject(new Error(`Timed out waiting for ${description}`));
-        }, 10_000),
+        }, timeoutMs),
       };
       opcodeWaiters.add(waiter);
     });
@@ -455,6 +564,10 @@ function trackMatchStates(socket) {
   return {
     waitForLobby: (predicate, description) => waitFor(1, predicate, description),
     waitForRole: (predicate, description) => waitFor(2, predicate, description),
-    waitForRound: (predicate, description) => waitFor(3, predicate, description),
+    waitForRound: (predicate, description, timeoutMs) =>
+      waitFor(3, predicate, description, timeoutMs),
+    waitForDiscovery: (predicate, description) => waitFor(4, predicate, description),
+    waitForPlayerState: (predicate, description) => waitFor(5, predicate, description),
+    waitForFireResult: (predicate, description) => waitFor(6, predicate, description),
   };
 }

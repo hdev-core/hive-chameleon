@@ -1150,6 +1150,7 @@ Table game.lobby_membership {
   player_id uuid [not null]
   join_source game.lobby_join_source [not null]
   initially_spectator boolean [not null, default: false]
+  hunter_nominated boolean [not null, default: false, note: 'Durable until consumed transactionally at round start']
   joined_at timestamptz [not null, default: `now()`]
   left_at timestamptz
 
@@ -1162,7 +1163,7 @@ Table game.lobby_membership {
     `left_at IS NULL OR left_at >= joined_at` [name: 'chk_lobby_membership_left_time']
   }
 
-  Note: 'Migration adds a partial unique index on player_id WHERE left_at IS NULL. Runtime presence and reconnect reservation remain in Nakama/Redis.'
+  Note: 'Migration adds a partial unique index on player_id WHERE left_at IS NULL. Pre-round Hunter nomination survives match-handler restarts; runtime presence and reconnect reservation remain in Nakama/Redis.'
 }
 
 Table game.lobby_host_assignment {

@@ -161,9 +161,9 @@ type lobbyStore interface {
 		context.Context,
 		string,
 		startLobbyRequest,
-		map[string]bool,
 	) (lobbySnapshot, roundSnapshot, error)
 	ActiveRound(context.Context, string) (*roundSnapshot, error)
+	UpdateRoundPhase(context.Context, string, string) error
 	Leave(
 		context.Context,
 		string,
