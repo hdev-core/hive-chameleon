@@ -24,29 +24,58 @@ type roundRoleAssignment struct {
 	PlayerID        string `json:"player_id"`
 	Role            string `json:"role"`
 	HunterVolunteer bool   `json:"hunter_volunteer"`
+	HidingSlot      int    `json:"hiding_slot,omitempty"`
 }
 
 type roundSnapshot struct {
-	ID              string                `json:"id"`
-	SequenceNumber  int                   `json:"sequence_number"`
-	Status          string                `json:"status"`
-	StartedAt       time.Time             `json:"started_at"`
-	RoleAssignments []roundRoleAssignment `json:"-"`
+	ID                       string                `json:"id"`
+	SequenceNumber           int                   `json:"sequence_number"`
+	Mode                     string                `json:"mode"`
+	Status                   string                `json:"status"`
+	StartedAt                time.Time             `json:"started_at"`
+	PhaseDeadline            *time.Time            `json:"phase_deadline,omitempty"`
+	TargetSlotCount          int                   `json:"target_slot_count"`
+	HidersTotal              int                   `json:"hiders_total"`
+	HidersRemaining          int                   `json:"hiders_remaining"`
+	DiscoveredHiderPlayerIDs []string              `json:"discovered_hider_player_ids"`
+	WinningSide              string                `json:"winning_side,omitempty"`
+	CompletionReason         string                `json:"completion_reason,omitempty"`
+	HidingDurationSeconds    int                   `json:"-"`
+	HuntingDurationSeconds   int                   `json:"-"`
+	ShellLimit               int                   `json:"-"`
+	ReloadDurationMS         int                   `json:"-"`
+	RoleAssignments          []roundRoleAssignment `json:"-"`
 }
 
 type roundPublicSnapshot struct {
-	ID             string    `json:"id"`
-	SequenceNumber int       `json:"sequence_number"`
-	Status         string    `json:"status"`
-	StartedAt      time.Time `json:"started_at"`
+	ID                       string     `json:"id"`
+	SequenceNumber           int        `json:"sequence_number"`
+	Mode                     string     `json:"mode"`
+	Status                   string     `json:"status"`
+	StartedAt                time.Time  `json:"started_at"`
+	PhaseDeadline            *time.Time `json:"phase_deadline,omitempty"`
+	TargetSlotCount          int        `json:"target_slot_count"`
+	HidersTotal              int        `json:"hiders_total"`
+	HidersRemaining          int        `json:"hiders_remaining"`
+	DiscoveredHiderPlayerIDs []string   `json:"discovered_hider_player_ids"`
+	WinningSide              string     `json:"winning_side,omitempty"`
+	CompletionReason         string     `json:"completion_reason,omitempty"`
 }
 
 func (r roundSnapshot) Public() roundPublicSnapshot {
 	return roundPublicSnapshot{
-		ID:             r.ID,
-		SequenceNumber: r.SequenceNumber,
-		Status:         r.Status,
-		StartedAt:      r.StartedAt,
+		ID:                       r.ID,
+		SequenceNumber:           r.SequenceNumber,
+		Mode:                     r.Mode,
+		Status:                   r.Status,
+		StartedAt:                r.StartedAt,
+		PhaseDeadline:            r.PhaseDeadline,
+		TargetSlotCount:          r.TargetSlotCount,
+		HidersTotal:              r.HidersTotal,
+		HidersRemaining:          r.HidersRemaining,
+		DiscoveredHiderPlayerIDs: append([]string(nil), r.DiscoveredHiderPlayerIDs...),
+		WinningSide:              r.WinningSide,
+		CompletionReason:         r.CompletionReason,
 	}
 }
 
@@ -86,27 +115,6 @@ func (s *postgresLobbyStore) RecordNominationChange(
 		)
 	}
 
-	var member bool
-	if err := tx.QueryRowContext(
-		ctx,
-		`SELECT EXISTS (
-		   SELECT 1
-		     FROM game.lobby_membership
-		    WHERE lobby_id = $1
-		      AND player_id = $2
-		      AND left_at IS NULL
-		 )`,
-		request.LobbyID,
-		playerID,
-	).Scan(&member); err != nil {
-		return lobbySnapshot{}, fmt.Errorf("check hunter nomination membership: %w", err)
-	}
-	if !member {
-		return lobbySnapshot{}, newLobbyProblem(
-			grpcPermissionDenied,
-			"open lobby membership required",
-		)
-	}
 	if active, err := activeRoundExists(ctx, tx, request.LobbyID); err != nil {
 		return lobbySnapshot{}, err
 	} else if active {
@@ -116,6 +124,30 @@ func (s *postgresLobbyStore) RecordNominationChange(
 		)
 	}
 
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.lobby_membership
+		    SET hunter_nominated = $3
+		  WHERE lobby_id = $1
+		    AND player_id = $2
+		    AND left_at IS NULL`,
+		request.LobbyID,
+		playerID,
+		request.Nominated,
+	)
+	if err != nil {
+		return lobbySnapshot{}, fmt.Errorf("persist hunter nomination: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return lobbySnapshot{}, fmt.Errorf("read hunter nomination update count: %w", err)
+	}
+	if updated != 1 {
+		return lobbySnapshot{}, newLobbyProblem(
+			grpcPermissionDenied,
+			"open lobby membership required",
+		)
+	}
 	if _, err := tx.ExecContext(
 		ctx,
 		`UPDATE game.lobby
@@ -139,7 +171,6 @@ func (s *postgresLobbyStore) StartRound(
 	ctx context.Context,
 	playerID string,
 	request startLobbyRequest,
-	nominations map[string]bool,
 ) (lobbySnapshot, roundSnapshot, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -196,7 +227,7 @@ func (s *postgresLobbyStore) StartRound(
 
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT player_id::text
+		`SELECT player_id::text, hunter_nominated
 		   FROM game.lobby_membership
 		  WHERE lobby_id = $1
 		    AND left_at IS NULL
@@ -208,13 +239,18 @@ func (s *postgresLobbyStore) StartRound(
 		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("lock round participants: %w", err)
 	}
 	members := make([]string, 0, lobbyMaximumPlayers)
+	nominations := make(map[string]bool, lobbyMaximumPlayers)
 	for rows.Next() {
 		var memberID string
-		if err := rows.Scan(&memberID); err != nil {
+		var hunterNominated bool
+		if err := rows.Scan(&memberID, &hunterNominated); err != nil {
 			_ = rows.Close()
 			return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("scan round participant: %w", err)
 		}
 		members = append(members, memberID)
+		if hunterNominated {
+			nominations[memberID] = true
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("close round participant rows: %w", err)
@@ -236,6 +272,16 @@ func (s *postgresLobbyStore) StartRound(
 	)
 	if err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("assign authoritative round roles: %w", err)
+	}
+	targetSlotCount := 0
+	if configuration.Mode == "casual" {
+		targetSlotCount, err = assignCasualHidingSlots(assignments, rand.Reader)
+		if err != nil {
+			return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf(
+				"assign authoritative hiding slots: %w",
+				err,
+			)
+		}
 	}
 
 	var sequenceNumber int
@@ -297,16 +343,39 @@ func (s *postgresLobbyStore) StartRound(
 	); err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("advance lobby version for round start: %w", err)
 	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.lobby_membership
+		    SET hunter_nominated = false
+		  WHERE lobby_id = $1
+		    AND left_at IS NULL
+		    AND hunter_nominated`,
+		request.LobbyID,
+	); err != nil {
+		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf(
+			"consume hunter nominations at round start: %w",
+			err,
+		)
+	}
 	snapshot, err := loadLobbySnapshot(ctx, tx, request.LobbyID)
 	if err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, err
 	}
 	round := roundSnapshot{
-		ID:              roundID,
-		SequenceNumber:  sequenceNumber,
-		Status:          "preparing",
-		StartedAt:       startedAt,
-		RoleAssignments: assignments,
+		ID:                       roundID,
+		SequenceNumber:           sequenceNumber,
+		Mode:                     configuration.Mode,
+		Status:                   "preparing",
+		StartedAt:                startedAt,
+		TargetSlotCount:          targetSlotCount,
+		HidersTotal:              len(assignments) - int(configuration.HunterCount),
+		HidersRemaining:          len(assignments) - int(configuration.HunterCount),
+		DiscoveredHiderPlayerIDs: make([]string, 0),
+		HidingDurationSeconds:    configuration.HidingDurationSeconds,
+		HuntingDurationSeconds:   configuration.HuntingDurationSeconds,
+		ShellLimit:               configuration.ShellLimit,
+		ReloadDurationMS:         configuration.ReloadDurationMS,
+		RoleAssignments:          assignments,
 	}
 	if err := tx.Commit(); err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("commit round start: %w", err)
@@ -321,21 +390,64 @@ func (s *postgresLobbyStore) ActiveRound(
 	var round roundSnapshot
 	if err := s.database.QueryRowContext(
 		ctx,
-		`SELECT id::text, sequence_number, status::text, started_at
+		`SELECT id::text, sequence_number, mode::text, status::text, started_at,
+		        hiding_duration_seconds, hunting_duration_seconds, shell_limit,
+		        reload_duration_ms
 		   FROM game.game_round
 		  WHERE lobby_id = $1
 		    AND status NOT IN ('completed', 'aborted')
 		  ORDER BY sequence_number DESC
 		  LIMIT 1`,
 		lobbyID,
-	).Scan(&round.ID, &round.SequenceNumber, &round.Status, &round.StartedAt); err != nil {
+	).Scan(
+		&round.ID,
+		&round.SequenceNumber,
+		&round.Mode,
+		&round.Status,
+		&round.StartedAt,
+		&round.HidingDurationSeconds,
+		&round.HuntingDurationSeconds,
+		&round.ShellLimit,
+		&round.ReloadDurationMS,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("load active round: %w", err)
 	}
 	round.RoleAssignments = make([]roundRoleAssignment, 0)
+	round.DiscoveredHiderPlayerIDs = make([]string, 0)
 	return &round, nil
+}
+
+func (s *postgresLobbyStore) UpdateRoundPhase(
+	ctx context.Context,
+	roundID string,
+	status string,
+) error {
+	if status != "hiding" && status != "hunting" {
+		return fmt.Errorf("unsupported nonterminal round phase %q", status)
+	}
+	result, err := s.database.ExecContext(
+		ctx,
+		`UPDATE game.game_round
+		    SET status = $2::game.round_status
+		  WHERE id = $1
+		    AND status NOT IN ('completed', 'aborted')`,
+		roundID,
+		status,
+	)
+	if err != nil {
+		return fmt.Errorf("update round phase: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read updated round phase count: %w", err)
+	}
+	if updated != 1 {
+		return errors.New("active round is unavailable for phase update")
+	}
+	return nil
 }
 
 func activeRoundExists(ctx context.Context, queryer lobbyQueryer, lobbyID string) (bool, error) {

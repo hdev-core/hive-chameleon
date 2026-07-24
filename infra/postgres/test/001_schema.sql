@@ -44,6 +44,18 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
+    SELECT is_nullable = 'NO'
+       AND column_default = 'false'
+      FROM information_schema.columns
+     WHERE table_schema = 'game'
+       AND table_name = 'lobby_membership'
+       AND column_name = 'hunter_nominated'
+  ),
+  'Hunter nominations are durable non-null membership state'
+);
+
+SELECT pg_temp.assert_true(
+  (
     SELECT count(DISTINCT type.oid) = 77
       FROM pg_type type
       JOIN pg_namespace namespace ON namespace.oid = type.typnamespace

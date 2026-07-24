@@ -96,6 +96,37 @@ func TestNominationPayloadCannotSupplyAPlayerOrRole(t *testing.T) {
 	)
 }
 
+func TestApplyLiveLobbyStateRehydratesDurableNominationsAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	state := &persistentLobbyState{
+		Nominations: map[string]bool{"stale-player": true},
+	}
+	snapshot := lobbySnapshot{
+		Members: []lobbyMemberSnapshot{
+			{PlayerID: "player-a"},
+			{PlayerID: "player-b"},
+		},
+		HunterNomineeIDs: []string{"player-b"},
+	}
+
+	applyLiveLobbyState(state, snapshot)
+
+	if len(state.Nominations) != 1 || !state.Nominations["player-b"] {
+		t.Fatalf("durable nomination was not rehydrated: %#v", state.Nominations)
+	}
+	if state.Nominations["stale-player"] {
+		t.Fatal("stale in-memory nomination survived snapshot rehydration")
+	}
+	if len(state.Snapshot.HunterNomineeIDs) != 1 ||
+		state.Snapshot.HunterNomineeIDs[0] != "player-b" {
+		t.Fatalf(
+			"unexpected public nominee snapshot: %#v",
+			state.Snapshot.HunterNomineeIDs,
+		)
+	}
+}
+
 func TestPublicRoundSnapshotDoesNotExposeAssignments(t *testing.T) {
 	t.Parallel()
 
@@ -113,8 +144,9 @@ func TestPublicRoundSnapshotDoesNotExposeAssignments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode public round: %v", err)
 	}
-	if bytes.Contains(payload, []byte("hunter")) ||
-		bytes.Contains(payload, []byte("player_id")) {
+	if bytes.Contains(payload, []byte(`"role"`)) ||
+		bytes.Contains(payload, []byte(`"hiding_slot"`)) ||
+		bytes.Contains(payload, []byte("01900000-0000-7000-8000-000000000001")) {
 		t.Fatalf("public round leaked a private role assignment: %s", payload)
 	}
 }

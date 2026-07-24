@@ -47,8 +47,16 @@ namespace HiveChameleon.Realtime
     {
         public string id = string.Empty;
         public int sequence_number;
+        public string mode = string.Empty;
         public string status = string.Empty;
         public string started_at = string.Empty;
+        public string phase_deadline = string.Empty;
+        public int target_slot_count;
+        public int hiders_total;
+        public int hiders_remaining;
+        public string[] discovered_hider_player_ids = Array.Empty<string>();
+        public string winning_side = string.Empty;
+        public string completion_reason = string.Empty;
     }
 
     [Serializable]
@@ -58,6 +66,45 @@ namespace HiveChameleon.Realtime
         public string player_id = string.Empty;
         public string role = string.Empty;
         public bool hunter_volunteer;
+        public int hiding_slot;
+    }
+
+    [Serializable]
+    public sealed class RoundPlayerState
+    {
+        public string round_id = string.Empty;
+        public string player_id = string.Empty;
+        public string role = string.Empty;
+        public string status = string.Empty;
+        public int hiding_slot;
+        public int shells_remaining;
+        public string reload_until = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class RoundDiscoverySnapshot
+    {
+        public string round_id = string.Empty;
+        public string hunter_player_id = string.Empty;
+        public string hider_player_id = string.Empty;
+        public int sequence;
+        public int aim_slot;
+        public string occurred_at = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class HunterFireResult
+    {
+        public string round_id = string.Empty;
+        public string command_id = string.Empty;
+        public bool accepted;
+        public string reason = string.Empty;
+        public int aim_slot;
+        public bool hit;
+        public string hider_player_id = string.Empty;
+        public int shells_remaining;
+        public string reload_until = string.Empty;
+        public bool round_is_terminal;
     }
 
     [Serializable]
@@ -145,6 +192,13 @@ namespace HiveChameleon.Realtime
         public string lobby_id = string.Empty;
         public long expected_lobby_version;
         public bool nominated;
+    }
+
+    [Serializable]
+    internal sealed class HunterFireCommand
+    {
+        public string command_id = string.Empty;
+        public int aim_slot;
     }
 
     [Serializable]

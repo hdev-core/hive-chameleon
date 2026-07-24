@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -15,6 +16,10 @@ const (
 	lobbyStateOpcode        = 1
 	roundRoleAssignedOpcode = 2
 	roundPhaseChangedOpcode = 3
+	roundDiscoveryOpcode    = 4
+	roundPlayerStateOpcode  = 5
+	hunterFireResultOpcode  = 6
+	hunterFireCommandOpcode = 10
 )
 
 type persistentLobbyMatch struct {
@@ -34,6 +39,7 @@ type persistentLobbyState struct {
 	PendingLeaves    map[string]string
 	Nominations      map[string]bool
 	Round            *roundSnapshot
+	CasualRound      *casualRoundState
 }
 
 func (m *persistentLobbyMatch) MatchInit(
@@ -157,7 +163,6 @@ func (m *persistentLobbyMatch) MatchLeave(
 		if !exists {
 			continue
 		}
-		delete(state.Nominations, tracked.PlayerID)
 		reason := "host_left"
 		if presence.GetReason() == runtime.PresenceReasonDisconnect {
 			reason = "host_disconnected"
@@ -184,7 +189,7 @@ func (m *persistentLobbyMatch) MatchLoop(
 	dispatcher runtime.MatchDispatcher,
 	_ int64,
 	rawState interface{},
-	_ []runtime.MatchData,
+	messages []runtime.MatchData,
 ) interface{} {
 	state, ok := rawState.(*persistentLobbyState)
 	if !ok || state == nil {
@@ -193,18 +198,80 @@ func (m *persistentLobbyMatch) MatchLoop(
 	if state.Snapshot.Closed {
 		return nil
 	}
-	if len(state.PendingLeaves) == 0 {
+	if len(state.PendingLeaves) > 0 {
+		closed, err := m.flushPendingLeaves(ctx, state)
+		if err != nil {
+			logger.Error("retry persistent lobby departures: %v", err)
+			return state
+		}
+		if closed {
+			return nil
+		}
+		m.broadcastState(logger, dispatcher, state)
+	}
+
+	if state.Round == nil || state.CasualRound == nil {
 		return state
 	}
-	closed, err := m.flushPendingLeaves(ctx, state)
-	if err != nil {
-		logger.Error("retry persistent lobby departures: %v", err)
-		return state
+	now := time.Now().UTC()
+	phaseChanges := state.CasualRound.Advance(now)
+	if len(phaseChanges) > 0 {
+		state.CasualRound.Apply(state.Round)
+		for _, phase := range phaseChanges {
+			if phase != "hiding" && phase != "hunting" {
+				continue
+			}
+			if err := m.store.UpdateRoundPhase(ctx, state.Round.ID, phase); err != nil {
+				logger.Warn("persist best-effort round phase %s: %v", phase, err)
+			}
+		}
+		m.broadcastRoundState(logger, dispatcher, state)
 	}
-	if closed {
-		return nil
+
+	for _, message := range messages {
+		if message.GetOpCode() != hunterFireCommandOpcode {
+			continue
+		}
+		tracked, exists := state.Presences[message.GetSessionId()]
+		if !exists {
+			logger.Warn("ignoring round command from untracked presence")
+			continue
+		}
+		command, err := decodeHunterFireCommand(message.GetData())
+		if err != nil {
+			result := hunterFireResult{
+				RoundID:         state.Round.ID,
+				Reason:          "invalid_command",
+				RoundIsTerminal: state.CasualRound.Phase == "terminal",
+			}
+			if playerState, available := state.CasualRound.PlayerState(
+				tracked.PlayerID,
+			); available {
+				result.ShellsRemaining = playerState.ShellsRemaining
+				result.ReloadUntil = playerState.ReloadUntil
+			}
+			m.broadcastFireResult(logger, dispatcher, message, result)
+			continue
+		}
+		result, discovery := state.CasualRound.HandleFire(
+			tracked.PlayerID,
+			command,
+			now,
+		)
+		m.broadcastFireResult(logger, dispatcher, message, result)
+		m.broadcastRoundPlayerState(
+			logger,
+			dispatcher,
+			state,
+			tracked.PlayerID,
+		)
+		if discovery == nil {
+			continue
+		}
+		state.CasualRound.Apply(state.Round)
+		m.broadcastDiscovery(logger, dispatcher, *discovery)
+		m.broadcastRoundState(logger, dispatcher, state)
 	}
-	m.broadcastState(logger, dispatcher, state)
 	return state
 }
 
@@ -274,7 +341,6 @@ func (m *persistentLobbyMatch) MatchSignal(
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
-		delete(state.Nominations, signal.PlayerID)
 		applyLiveLobbyState(state, snapshot)
 		kickPlayerPresences(dispatcher, state, signal.PlayerID)
 		if closed {
@@ -317,11 +383,6 @@ func (m *persistentLobbyMatch) MatchSignal(
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
-		if signal.Nomination.Nominated {
-			state.Nominations[signal.PlayerID] = true
-		} else {
-			delete(state.Nominations, signal.PlayerID)
-		}
 		applyLiveLobbyState(state, snapshot)
 		m.broadcastState(logger, dispatcher, state)
 		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
@@ -354,16 +415,31 @@ func (m *persistentLobbyMatch) MatchSignal(
 				newLobbyProblem(grpcFailedPrecondition, "lobby already has an active round"),
 			)
 		}
+		if state.Snapshot.Configuration.Mode != "casual" {
+			return state, encodeLobbySignalError(
+				newLobbyProblem(
+					grpcFailedPrecondition,
+					"only Casual mode is available in the current authoritative runtime",
+				),
+			)
+		}
 		snapshot, round, err := m.store.StartRound(
 			ctx,
 			signal.PlayerID,
 			*signal.Start,
-			state.Nominations,
 		)
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
+		casualRound, err := newCasualRoundState(&round)
+		if err != nil {
+			logger.Error("initialize authoritative Casual round: %v", err)
+			return state, encodeLobbySignalError(
+				errors.New("authoritative Casual round initialization failed"),
+			)
+		}
 		state.Round = &round
+		state.CasualRound = casualRound
 		applyLiveLobbyState(state, snapshot)
 		m.broadcastState(logger, dispatcher, state)
 		m.broadcastRoundState(logger, dispatcher, state)
@@ -480,6 +556,88 @@ func (m *persistentLobbyMatch) broadcastRoundState(
 			logger.Error("broadcast private role assignment: %v", err)
 		}
 	}
+	if state.CasualRound == nil {
+		return
+	}
+	for _, playerID := range sortedPlayerIDs(state.CasualRound.Assignments) {
+		m.broadcastRoundPlayerState(logger, dispatcher, state, playerID)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastRoundPlayerState(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+	playerID string,
+) {
+	if state.CasualRound == nil {
+		return
+	}
+	playerState, available := state.CasualRound.PlayerState(playerID)
+	if !available {
+		return
+	}
+	presences := presencesForPlayer(state, playerID)
+	if len(presences) == 0 {
+		return
+	}
+	payload, err := json.Marshal(playerState)
+	if err != nil {
+		logger.Error("encode private round player state: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundPlayerStateOpcode,
+		payload,
+		presences,
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast private round player state: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastDiscovery(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	discovery roundDiscoverySnapshot,
+) {
+	payload, err := json.Marshal(discovery)
+	if err != nil {
+		logger.Error("encode authoritative discovery: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundDiscoveryOpcode,
+		payload,
+		nil,
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast authoritative discovery: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastFireResult(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	presence runtime.Presence,
+	result hunterFireResult,
+) {
+	payload, err := json.Marshal(result)
+	if err != nil {
+		logger.Error("encode private Hunter fire result: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		hunterFireResultOpcode,
+		payload,
+		[]runtime.Presence{presence},
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast private Hunter fire result: %v", err)
+	}
 }
 
 func bridgedPlayerIDForPresence(
@@ -532,13 +690,14 @@ func applyLiveLobbyState(state *persistentLobbyState, snapshot lobbySnapshot) {
 	for _, member := range snapshot.Members {
 		memberIDs[member.PlayerID] = struct{}{}
 	}
-	nominees := make([]string, 0, len(state.Nominations))
-	for playerID := range state.Nominations {
-		if _, member := memberIDs[playerID]; member {
-			nominees = append(nominees, playerID)
-		} else {
-			delete(state.Nominations, playerID)
+	state.Nominations = make(map[string]bool, len(snapshot.HunterNomineeIDs))
+	nominees := make([]string, 0, len(snapshot.HunterNomineeIDs))
+	for _, playerID := range snapshot.HunterNomineeIDs {
+		if _, member := memberIDs[playerID]; !member || state.Nominations[playerID] {
+			continue
 		}
+		state.Nominations[playerID] = true
+		nominees = append(nominees, playerID)
 	}
 	sort.Strings(nominees)
 	snapshot.HunterNomineeIDs = nominees

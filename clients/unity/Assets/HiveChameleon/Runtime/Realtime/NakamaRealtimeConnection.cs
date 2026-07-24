@@ -12,6 +12,10 @@ namespace HiveChameleon.Realtime
         private const long LobbyStateOpcode = 1;
         private const long RoundRoleAssignedOpcode = 2;
         private const long RoundPhaseChangedOpcode = 3;
+        private const long RoundDiscoveryOpcode = 4;
+        private const long RoundPlayerStateOpcode = 5;
+        private const long HunterFireResultOpcode = 6;
+        private const long HunterFireCommandOpcode = 10;
 
         private readonly string _serverKey;
         private IClient _client;
@@ -37,11 +41,23 @@ namespace HiveChameleon.Realtime
 
         public RoundRoleAssignment CurrentRoleAssignment { get; private set; }
 
+        public RoundPlayerState CurrentRoundPlayerState { get; private set; }
+
+        public RoundDiscoverySnapshot LastDiscovery { get; private set; }
+
+        public HunterFireResult LastFireResult { get; private set; }
+
         public event Action<LobbySnapshot> LobbyStateChanged;
 
         public event Action<RoundSnapshot> RoundStateChanged;
 
         public event Action<RoundRoleAssignment> RoundRoleAssigned;
+
+        public event Action<RoundPlayerState> RoundPlayerStateChanged;
+
+        public event Action<RoundDiscoverySnapshot> RoundDiscoveryReceived;
+
+        public event Action<HunterFireResult> HunterFireResolved;
 
         public async Task ConnectAsync(
             RealtimeSessionCredential credential,
@@ -223,6 +239,58 @@ namespace HiveChameleon.Realtime
             );
         }
 
+        public async Task<string> FireHunterAsync(
+            int aimSlot,
+            CancellationToken cancellationToken
+        )
+        {
+            RequireConnected();
+            if (_match == null || string.IsNullOrWhiteSpace(_match.Id))
+            {
+                throw new InvalidOperationException("Join an authoritative lobby match first.");
+            }
+            if (
+                CurrentRound == null
+                || string.IsNullOrWhiteSpace(CurrentRound.id)
+                || CurrentRound.status != "hunting"
+            )
+            {
+                throw new InvalidOperationException(
+                    "Hunter fire is available only during the hunting phase."
+                );
+            }
+            if (
+                CurrentRoleAssignment == null
+                || CurrentRoleAssignment.role != "hunter"
+            )
+            {
+                throw new InvalidOperationException(
+                    "Only a server-assigned Hunter can send a fire intent."
+                );
+            }
+            if (aimSlot < 1 || aimSlot > CurrentRound.target_slot_count)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(aimSlot),
+                    "Aim slot is outside the server-published target range."
+                );
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var command = new HunterFireCommand
+            {
+                command_id = Guid.NewGuid().ToString("N"),
+                aim_slot = aimSlot,
+            };
+            await _socket.SendMatchStateAsync(
+                _match.Id,
+                HunterFireCommandOpcode,
+                JsonUtility.ToJson(command)
+            );
+            cancellationToken.ThrowIfCancellationRequested();
+            return command.command_id;
+        }
+
         public async Task<LobbyRpcResponse> LeaveLobbyAsync(
             CancellationToken cancellationToken
         )
@@ -236,6 +304,9 @@ namespace HiveChameleon.Realtime
             _match = null;
             CurrentRound = null;
             CurrentRoleAssignment = null;
+            CurrentRoundPlayerState = null;
+            LastDiscovery = null;
+            LastFireResult = null;
             return response;
         }
 
@@ -332,6 +403,9 @@ namespace HiveChameleon.Realtime
             CurrentLobby = null;
             CurrentRound = null;
             CurrentRoleAssignment = null;
+            CurrentRoundPlayerState = null;
+            LastDiscovery = null;
+            LastFireResult = null;
         }
 
         private void HandleConnected()
@@ -396,6 +470,61 @@ namespace HiveChameleon.Realtime
                         }
                         PublishRound(round);
                         break;
+                    case RoundDiscoveryOpcode:
+                        RoundDiscoverySnapshot discovery =
+                            JsonUtility.FromJson<RoundDiscoverySnapshot>(payload);
+                        if (
+                            discovery == null
+                            || string.IsNullOrWhiteSpace(discovery.round_id)
+                            || string.IsNullOrWhiteSpace(discovery.hunter_player_id)
+                            || string.IsNullOrWhiteSpace(discovery.hider_player_id)
+                            || discovery.sequence < 1
+                            || discovery.aim_slot < 1
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Authoritative discovery payload is invalid."
+                            );
+                        }
+                        LastDiscovery = discovery;
+                        RoundDiscoveryReceived?.Invoke(discovery);
+                        break;
+                    case RoundPlayerStateOpcode:
+                        RoundPlayerState playerState =
+                            JsonUtility.FromJson<RoundPlayerState>(payload);
+                        if (
+                            playerState == null
+                            || string.IsNullOrWhiteSpace(playerState.round_id)
+                            || string.IsNullOrWhiteSpace(playerState.player_id)
+                            || (playerState.role != "hunter" && playerState.role != "hider")
+                            || (playerState.status != "active" && playerState.status != "found")
+                            || playerState.shells_remaining < 0
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Private round player-state payload is invalid."
+                            );
+                        }
+                        CurrentRoundPlayerState = playerState;
+                        RoundPlayerStateChanged?.Invoke(playerState);
+                        break;
+                    case HunterFireResultOpcode:
+                        HunterFireResult fireResult =
+                            JsonUtility.FromJson<HunterFireResult>(payload);
+                        if (
+                            fireResult == null
+                            || string.IsNullOrWhiteSpace(fireResult.round_id)
+                            || string.IsNullOrWhiteSpace(fireResult.reason)
+                            || fireResult.shells_remaining < 0
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Private Hunter fire-result payload is invalid."
+                            );
+                        }
+                        LastFireResult = fireResult;
+                        HunterFireResolved?.Invoke(fireResult);
+                        break;
                 }
             }
             catch (Exception exception)
@@ -412,6 +541,12 @@ namespace HiveChameleon.Realtime
 
         private void PublishRound(RoundSnapshot round)
         {
+            if (CurrentRound == null || CurrentRound.id != round.id)
+            {
+                CurrentRoundPlayerState = null;
+                LastDiscovery = null;
+                LastFireResult = null;
+            }
             CurrentRound = round;
             RoundStateChanged?.Invoke(round);
         }
