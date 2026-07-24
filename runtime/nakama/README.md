@@ -13,10 +13,12 @@ go vet ./...
 
 ## Local service
 
-Copy `.env.example` to `.env`, replace every placeholder, then start the isolated Nakama database,
-one-shot schema migration, and server:
+Copy `.env.example` to `.env` and replace every placeholder. Start and migrate the application
+PostgreSQL database first, then start the isolated Nakama database, one-shot Nakama schema
+migration, and server:
 
 ```bash
+docker compose -f infra/postgres/compose.yaml up -d postgres dbmate
 docker compose --env-file runtime/nakama/.env -f runtime/nakama/compose.yaml up --build
 ```
 
@@ -53,9 +55,18 @@ The runtime also denies Nakama's built-in custom-ID link/unlink, account update,
 deletion endpoints. Account identity and lifecycle remain product-API responsibilities, so a
 client cannot preclaim another player UUID or detach its bridged identity.
 
-The documented lobby RPC names and `match.reconnect` are registered but return
-`feature_not_ready` with gRPC `UNIMPLEMENTED`. This is intentional: later gameplay cards replace
-the stubs with authoritative behavior without allowing a placeholder to report false success.
+`lobby.create`, `lobby.join`, `lobby.leave`, `lobby.update_configuration`, and `lobby.start` now
+drive a persistent PostgreSQL lifecycle through a Nakama-authoritative match. Host commands lock
+and recheck both the current open `game.lobby_host_assignment` and the caller's expected lobby
+version. Disconnecting or leaving closes the membership and migrates the host in one serializable
+transaction; the empty lobby closes without treating host ownership as a permanent role.
+
+The runtime opens the application connection from `HC_NAKAMA_DATABASE_URL`. Production supplies a
+dedicated login granted membership in the `hc_nakama` group role. Nakama's injected `*sql.DB`
+continues to point only at Nakama's internal database and is never used for application schemas.
+
+The remaining future RPCs stay registered as explicit `feature_not_ready` stubs until their cards
+replace them with authoritative behavior.
 
 The repository smoke command starts disposable application and Nakama databases, seeds one
 short-lived real API session, and exercises the complete bridge, same-assertion replay denial, and

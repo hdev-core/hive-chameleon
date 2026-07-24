@@ -14,6 +14,7 @@ type fakeRealtimeInitializer struct {
 	accountGuardHook  int
 	nonBridgeAuthHook int
 	rpcs              map[string]func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, string) (string, error)
+	matches           map[string]func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule) (runtime.Match, error)
 }
 
 func (f *fakeRealtimeInitializer) RegisterBeforeDeleteAccount(_ func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule) error) error {
@@ -89,11 +90,33 @@ func (f *fakeRealtimeInitializer) RegisterRpc(name string, fn func(context.Conte
 	return nil
 }
 
+func (f *fakeRealtimeInitializer) RegisterMatch(
+	name string,
+	fn func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule) (runtime.Match, error),
+) error {
+	if f.matches == nil {
+		f.matches = make(
+			map[string]func(
+				context.Context,
+				runtime.Logger,
+				*sql.DB,
+				runtime.NakamaModule,
+			) (runtime.Match, error),
+		)
+	}
+	f.matches[name] = fn
+	return nil
+}
+
 func TestRegisterRealtimeReservesStableContracts(t *testing.T) {
 	t.Parallel()
 
 	initializer := &fakeRealtimeInitializer{}
-	if err := registerRealtime(initializer, &bridgeVerifier{key: testBridgeKey()}); err != nil {
+	if err := registerRealtime(
+		initializer,
+		&bridgeVerifier{key: testBridgeKey()},
+		&lobbyService{},
+	); err != nil {
 		t.Fatalf("register realtime: %v", err)
 	}
 	if initializer.authHook == nil {
@@ -112,6 +135,9 @@ func TestRegisterRealtimeReservesStableContracts(t *testing.T) {
 		if initializer.rpcs[name] == nil {
 			t.Errorf("RPC %s was not registered", name)
 		}
+	}
+	if initializer.matches[lobbyMatchModule] == nil {
+		t.Fatal("persistent lobby match was not registered")
 	}
 }
 
