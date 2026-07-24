@@ -65,7 +65,9 @@ npm run unity:webgl:deploy
 
 The build script removes all development realtime credentials before invoking Unity. The deploy
 script refuses to continue unless the expected WebGL files exist and the Vercel CLI is authenticated.
-The current production alias is <https://hive-chameleon.vercel.app>.
+The public build displays a clearly labelled, non-interactive lobby and round preview when those
+credentials are absent; live realtime actions still require the local development stack. The current
+production alias is <https://hive-chameleon.vercel.app>.
 
 ## 3b. Database → Postgres
 

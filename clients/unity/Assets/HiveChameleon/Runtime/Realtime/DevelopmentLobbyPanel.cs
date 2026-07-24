@@ -20,6 +20,7 @@ namespace HiveChameleon.Realtime
         private string _status = "Connected. Create or join a lobby.";
         private bool _nominated;
         private bool _busy;
+        private bool _previewMode;
 
         public void Initialize(
             NakamaRealtimeConnection connection,
@@ -42,11 +43,18 @@ namespace HiveChameleon.Realtime
             _connection.RoundStateChanged += HandleRoundStateChanged;
             _connection.RoundRoleAssigned += HandleRoundRoleAssigned;
             _lifetime = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
+            _previewMode = false;
+        }
+
+        public void InitializePreview()
+        {
+            _previewMode = true;
+            _status = "Credential-free visual preview · realtime actions are disabled.";
         }
 
         private void OnGUI()
         {
-            if (_connection == null)
+            if (_connection == null && !_previewMode)
             {
                 return;
             }
@@ -54,21 +62,67 @@ namespace HiveChameleon.Realtime
             GUILayout.BeginArea(new Rect(12, 12, 430, Mathf.Max(260, Screen.height - 24)));
             GUILayout.BeginVertical(GUI.skin.box);
             GUILayout.Label("Hive Chameleon · Lobby & Round Development");
-            GUILayout.Label($"Realtime: {_connection.State}");
+            GUILayout.Label(
+                _previewMode ? "Realtime: offline visual preview" : $"Realtime: {_connection.State}"
+            );
             GUILayout.Label(_status);
 
-            LobbySnapshot lobby = _connection.CurrentLobby;
-            if (lobby == null || string.IsNullOrWhiteSpace(lobby.id) || lobby.closed)
+            if (_previewMode)
             {
-                DrawCreateAndJoin();
+                DrawPreview();
             }
             else
             {
-                DrawLobby(lobby);
+                LobbySnapshot lobby = _connection.CurrentLobby;
+                if (lobby == null || string.IsNullOrWhiteSpace(lobby.id) || lobby.closed)
+                {
+                    DrawCreateAndJoin();
+                }
+                else
+                {
+                    DrawLobby(lobby);
+                }
             }
 
             GUILayout.EndVertical();
             GUILayout.EndArea();
+        }
+
+        private static void DrawPreview()
+        {
+            GUILayout.Space(8);
+            GUILayout.Label("Lobby: M4 Visual Review");
+            GUILayout.Label("ID: preview-lobby-31");
+            GUILayout.Label("Host: player-farhat");
+            GUILayout.Label("Version: 7");
+            GUILayout.Label("Members: 4/10");
+            GUILayout.Label("Mode: casual · Hunters: 1");
+            GUILayout.Label("Hide/Hunt: 60s/180s · Shells: 6");
+            GUILayout.Label("Map version: map-preview-v1");
+            GUILayout.Label("Hunter nominations: 2");
+            GUILayout.Label("  • player-farhat");
+            GUILayout.Label("  • player-mohammad");
+
+            bool enabled = GUI.enabled;
+            GUI.enabled = false;
+            GUILayout.Button("Copy Lobby ID");
+            GUILayout.Button("Withdraw Hunter nomination");
+            GUILayout.Label("Published map version ID");
+            GUILayout.TextField("map-preview-v1");
+            GUILayout.Button("Configure: use map + add one shell");
+            GUILayout.Button("Start authoritative round");
+
+            GUILayout.Space(8);
+            GUILayout.Label("Round #1: preparing (preview-round-31)");
+            GUILayout.Label("Own role: hunter (volunteered)");
+            GUILayout.Button("Leave");
+            GUI.enabled = enabled;
+
+            GUILayout.Space(8);
+            GUILayout.Label(
+                "This representative state is for visual review only. "
+                    + "Run the local realtime stack to exercise lobby and round actions."
+            );
         }
 
         private void DrawCreateAndJoin()
