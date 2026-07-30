@@ -8,6 +8,7 @@ export type HiveGatewayErrorCode =
   | 'non_canonical_payload'
   | 'payload_too_large'
   | 'policy_denied'
+  | 'signer_unavailable'
   | 'signer_mismatch'
   | 'transaction_mismatch';
 

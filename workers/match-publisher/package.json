@@ -1,0 +1,39 @@
+{
+  "name": "@hive-chameleon/match-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Durable canonical match-result batching and isolated Hive publication worker",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "scripts": {
+    "build": "npm run build --workspace @hive-chameleon/database && npm run build --workspace @hive-chameleon/hive-gateway && tsc -p tsconfig.build.json",
+    "dev": "node --watch --env-file-if-exists=.env --import=tsx src/main.ts",
+    "start": "node --env-file-if-exists=.env --enable-source-maps dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "npm run build --workspace @hive-chameleon/database && npm run build --workspace @hive-chameleon/hive-gateway && tsc --noEmit"
+  },
+  "dependencies": {
+    "@hive-chameleon/database": "0.1.0",
+    "@hive-chameleon/hive-gateway": "0.1.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/pg": "8.20.0",
+    "tsx": "4.23.1",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

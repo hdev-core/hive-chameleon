@@ -153,7 +153,7 @@ Friends, invitations, blocking, presence, and lobby activity remain off-chain. N
 | --- | --- | --- |
 | `game.lobby` | One persistent rolling lobby lifecycle | Current host pointer, region, visibility, capacity, hashed password, system lifecycle close timestamp |
 | `game.lobby_access_token` | Hashed, expiring invitation link/code credential | Belongs to a lobby and creator; raw code is never persisted |
-| `game.lobby_membership` | Player join/leave history | Many memberships per lobby; at most one open membership per player globally |
+| `game.lobby_membership` | Player join/leave history and durable pre-round Hunter nomination | Many memberships per lobby; at most one open membership per player globally; nomination is consumed at round start |
 | `game.lobby_host_assignment` | Append-only host ownership history | Exactly one open assignment per lobby; records creation, transfer, leave, disconnect, or AFK reason |
 | `game.lobby_configuration` | Current host-configurable rules between rounds | One-to-one with lobby; the chosen settings are snapshotted into each round |
 | `game.game_round` | Durable round header and immutable initial rule/result snapshot | Unique sequence within lobby; exact map version, server build, match protocol, `result_schema_version`, `scoring_rule_version`, and canonical complete-result SHA-256 |

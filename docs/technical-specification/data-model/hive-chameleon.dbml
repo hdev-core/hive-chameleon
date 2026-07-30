@@ -574,6 +574,31 @@ Table identity.player {
   Note: 'Playable identity. Direct-Hive login may create it after signature verification; Google provisioning creates it only when the real Hive account, expected authorities, and initial RC are verified ready. No guest/pending player is stored.'
 }
 
+Table identity.hive_login_challenge {
+  id uuid [pk, not null, note: 'Application-generated UUIDv7; unguessable single-use handle']
+  hive_username varchar(16) [not null]
+  platform identity.client_platform [not null]
+  device_session_id uuid [not null]
+  challenge_text text [not null]
+  challenge_sha256 char(64) [not null, unique]
+  issued_at timestamptz [not null]
+  expires_at timestamptz [not null]
+  consumed_at timestamptz
+
+  indexes {
+    (expires_at, consumed_at) [name: 'idx_hive_login_challenge_expiry']
+  }
+
+  checks {
+    `hive_username = lower(hive_username)` [name: 'chk_hive_login_challenge_username_lower']
+    `expires_at > issued_at` [name: 'chk_hive_login_challenge_expiry']
+    `consumed_at IS NULL OR consumed_at >= issued_at` [name: 'chk_hive_login_challenge_consumed']
+    `encode(digest(convert_to(challenge_text, 'UTF8'), 'sha256'), 'hex') = challenge_sha256` [name: 'chk_hive_login_challenge_hash']
+  }
+
+  Note: 'Canonical login text is public; the random nonce and UUID make a challenge unguessable. Consumption is atomic and occurs before signature verification so one handle cannot be replayed.'
+}
+
 Table identity.external_identity {
   id uuid [pk, not null, note: 'Application-generated UUIDv7']
   provider identity.external_identity_provider [not null]
@@ -1125,6 +1150,7 @@ Table game.lobby_membership {
   player_id uuid [not null]
   join_source game.lobby_join_source [not null]
   initially_spectator boolean [not null, default: false]
+  hunter_nominated boolean [not null, default: false, note: 'Durable until consumed transactionally at round start']
   joined_at timestamptz [not null, default: `now()`]
   left_at timestamptz
 
@@ -1137,7 +1163,7 @@ Table game.lobby_membership {
     `left_at IS NULL OR left_at >= joined_at` [name: 'chk_lobby_membership_left_time']
   }
 
-  Note: 'Migration adds a partial unique index on player_id WHERE left_at IS NULL. Runtime presence and reconnect reservation remain in Nakama/Redis.'
+  Note: 'Migration adds a partial unique index on player_id WHERE left_at IS NULL. Pre-round Hunter nomination survives match-handler restarts; runtime presence and reconnect reservation remain in Nakama/Redis.'
 }
 
 Table game.lobby_host_assignment {

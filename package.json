@@ -22,6 +22,8 @@
     "lint": "eslint apps packages workers --no-error-on-unmatched-pattern",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "unity:webgl:build": "bash scripts/build-unity-webgl.sh",
+    "unity:webgl:deploy": "bash scripts/deploy-unity-webgl-vercel.sh",
     "go:check": "cd runtime/nakama && test -z \"$(gofmt -l .)\" && go vet ./... && go test ./... && go test -race ./...",
     "openapi:check": "redocly lint docs/technical-specification/architecture/openapi.yaml --extends=minimal",
     "realtime:smoke": "bash scripts/check-nakama-bridge.sh",

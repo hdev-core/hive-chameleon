@@ -77,6 +77,18 @@ namespace HiveChameleon.Editor
             AssetDatabase.Refresh();
 
             Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+            GameObject cameraObject = new GameObject("Main Camera");
+            cameraObject.tag = "MainCamera";
+            cameraObject.transform.position = new Vector3(0f, 0f, -10f);
+            Camera camera = cameraObject.AddComponent<Camera>();
+            camera.clearFlags = CameraClearFlags.SolidColor;
+            camera.backgroundColor = Color.black;
+
+            GameObject lightObject = new GameObject("Directional Light");
+            lightObject.transform.rotation = Quaternion.Euler(50f, -30f, 0f);
+            Light light = lightObject.AddComponent<Light>();
+            light.type = LightType.Directional;
+
             GameObject root = new GameObject("HiveChameleon");
             root.AddComponent<Bootstrap>();
 

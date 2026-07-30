@@ -45,6 +45,87 @@ API's comma-separated `HTTP_CORS_ALLOWED_ORIGINS` setting (for example,
 same-origin reverse proxy needs no CORS setting.
 Production CORS entries must use HTTPS.
 
+## Persistent lobby and round development panel
+
+Card #30 adds a development-only `OnGUI` panel after the scoped Nakama connection succeeds. It
+supports creating or joining a lobby, copying its ID, updating the configuration, requesting a
+start, leaving, and observing the authoritative host/member/version snapshot.
+
+Card #31 extends the same panel with Hunter nomination, published map-version selection, the
+public preparing-round snapshot, and the current client's private server-assigned role. A client
+can volunteer or withdraw itself, but it cannot name another player or submit a role.
+
+Card #32 adds the first authoritative Casual loop to that panel. The host can apply the minimum
+10-second hiding/30-second hunting development configuration. Hiders see only their own private
+server-assigned hiding slot. Hunters choose among the public aim slots, but the client sends only a
+command ID and aim-slot intent; Nakama validates phase, role, shells, reload timing, and the
+server-owned slot contents before broadcasting a discovery or terminal outcome.
+
+Run the migrated application database, Nakama, and API as described in
+`runtime/nakama/README.md`. Launch the editor or a desktop development player with:
+
+```bash
+HIVE_CHAMELEON_API_URL=http://127.0.0.1:3000 \
+NAKAMA_SERVER_KEY=replace-with-the-local-public-server-key \
+REALTIME_DEV_BEARER_TOKEN=replace-with-a-current-local-access-token \
+  /path/to/Unity -projectPath "$PWD/clients/unity"
+```
+
+The token must be a current access token issued by the local API for a seeded or authenticated
+player who acknowledged the public-match disclosure. It is not a permanent development bypass.
+
+For a host-migration check, use separate valid player tokens in two clients:
+
+1. Create a lobby in the first client and copy its lobby ID.
+2. Join that ID in the second client.
+3. Configure from the first client. Starting a round requires the UUID of a published
+   `content.map_version`; the disposable smoke test creates a non-visual record automatically.
+4. Stop or close the host client.
+5. Confirm the second client's Host field changes to its player UUID and the lobby Version
+   advances. Its configuration button must now succeed.
+
+For the card #31 round-scaffolding check:
+
+1. Connect two clients and join the same lobby.
+2. In either client, select **Nominate me as Hunter**.
+3. In the host, paste a published map-version UUID and select
+   **Configure Casual demo: 10s hide / 30s hunt**.
+4. Select **Start authoritative round**.
+5. Both clients must show the same public round UUID, sequence `1`, and `preparing` state.
+6. Each client must show only its own private role. With one configured Hunter and one nominee,
+   the nominee must be the Hunter and the other player the Hider.
+
+For the card #32 Casual-round check:
+
+1. Apply the Casual demo configuration and start the round.
+2. Both clients must progress from `preparing` to `hiding` and `hunting` from server deadlines.
+3. Only the Hider client may display its private hiding slot.
+4. On the Hunter client, fire at aim slots. Misses consume shells and enforce the server reload.
+5. Finding the final Hider must broadcast one discovery and a terminal Hunter win. If the timer
+   expires first, the terminal state must report a Hider win.
+
+The runtime rejects configuration changes, new nominations, and new joins while the round is
+active. Later cards add durable terminal commit, Infection, Answer Check/scoring, polished
+map/round presentation, and the 60-second reconnect outcome.
+
+No 3D models or gameplay assets are required for this panel. Without the three realtime
+environment values, Play Mode remains intentionally offline and logs that local credentials were
+not supplied.
+
 Unity builds are currently a local release gate. CI runs the checks that do not require a Unity
 license; add an appropriately isolated licensed runner before making Unity builds a required
 hosted check.
+
+## Public showcase build
+
+From the repository root, build an offline WebGL showcase without serializing any development
+credentials:
+
+```bash
+npm run unity:webgl:build
+```
+
+The command explicitly removes the three development realtime variables from the Unity process,
+then validates the generated `index.html`, loader, data, framework, and WebAssembly files. Deploy
+the result to the already linked Vercel project with `npm run unity:webgl:deploy`. Do not publish a
+WebGL build created manually with development credentials.

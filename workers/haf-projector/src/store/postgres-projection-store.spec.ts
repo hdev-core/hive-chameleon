@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { serializeHiveChameleonEvent } from '@hive-chameleon/hive-gateway';
+import { MATCH_EVENT_FIXTURE } from '@hive-chameleon/hive-gateway/testing';
+
 import type { HafBlock, OperationDecision } from '../model.js';
 import {
   PostgresProjectionStore,
@@ -114,6 +117,71 @@ describe('PostgreSQL projection store', () => {
     expect(operationInsert?.values?.[3]).toBe('c'.repeat(40));
     expect(operationInsert?.values?.[5]).toBe(true);
   });
+
+  it('stores an accepted match event as reversible typed evidence in the same block transaction', async () => {
+    if (MATCH_EVENT_FIXTURE.type !== 'match_results_batch') {
+      throw new Error('fixture is not a match batch');
+    }
+    const client = new RecordingSqlClient();
+    const operationId = '0190f6d2-7c00-7000-8000-000000000002';
+    const ids = ['0190f6d2-7c00-7000-8000-000000000001', operationId];
+    const store = new PostgresProjectionStore(new SingleClientPool(client), {
+      endpointIdentity: 'https://hafah.example/api',
+      nextUuidV7: () => ids.shift() ?? 'unexpected',
+    });
+    const acceptedDecision: OperationDecision = {
+      evidence: {
+        ...decision.evidence,
+        payload: {
+          required_auths: [],
+          required_posting_auths: ['match-pub'],
+          id: 'hive.chameleon',
+          json: serializeHiveChameleonEvent(MATCH_EVENT_FIXTURE),
+        },
+      },
+      validationState: 'accepted',
+      event: MATCH_EVENT_FIXTURE,
+    };
+
+    await store.applyBlock('hive-mainnet', block, [acceptedDecision], '2026-07-11T12:07:00.000Z');
+
+    const eventInsert = client.statements.find(({ text }) =>
+      text.includes('INSERT INTO hive_projection.match_event'),
+    );
+    expect(eventInsert?.values?.slice(0, 4)).toEqual([
+      MATCH_EVENT_FIXTURE.event_id,
+      MATCH_EVENT_FIXTURE.data.batch_id,
+      operationId,
+      'match_results_batch',
+    ]);
+  });
+
+  it('promotes typed match evidence and materializes results only at irreversibility', async () => {
+    if (MATCH_EVENT_FIXTURE.type !== 'match_results_batch') {
+      throw new Error('fixture is not a match batch');
+    }
+    const client = new FinalizationSqlClient({
+      required_auths: [],
+      required_posting_auths: ['match-pub'],
+      id: 'hive.chameleon',
+      json: serializeHiveChameleonEvent(MATCH_EVENT_FIXTURE),
+    });
+    const store = new PostgresProjectionStore(new SingleClientPool(client), {
+      endpointIdentity: 'https://hafah.example/api',
+      nextUuidV7: () => '0190f6d2-7c00-7000-8000-000000000099',
+    });
+
+    await store.finalizeThrough('hive-mainnet', 1, '2026-07-11T12:08:00.000Z');
+
+    expect(
+      client.statements.some(({ text }) => text.includes("SET operation_state = 'irreversible'")),
+    ).toBe(true);
+    expect(
+      client.statements.some(({ text }) =>
+        text.includes('INSERT INTO hive_projection.match_result'),
+      ),
+    ).toBe(true);
+  });
 });
 
 interface RecordedStatement {
@@ -153,6 +221,45 @@ class RecordingSqlClient implements SqlClientPort {
     this.releaseCount += 1;
     this.destroyed = destroy;
   }
+}
+
+class FinalizationSqlClient implements SqlClientPort {
+  public readonly statements: RecordedStatement[] = [];
+
+  public constructor(private readonly payload: unknown) {}
+
+  public async query<Row extends Record<string, unknown>>(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<SqlQueryResult<Row>> {
+    this.statements.push({ text, ...(values === undefined ? {} : { values }) });
+    let rows: readonly Record<string, unknown>[] = [];
+    if (text.includes('FOR UPDATE OF c')) {
+      rows = [
+        {
+          source: 'hive-mainnet',
+          last_processed_block: 1,
+          last_irreversible_block: 0,
+          block_id: 'a'.repeat(40),
+        },
+      ];
+    } else if (text.includes('SELECT operation.id')) {
+      rows = [
+        {
+          id: '0190f6d2-7c00-7000-8000-000000000002',
+          transaction_id: 'b'.repeat(40),
+          block_number: 1,
+          block_timestamp: block.timestamp,
+          primary_account: 'match-pub',
+          payload: this.payload,
+          match_event_uuid: MATCH_EVENT_FIXTURE.event_id,
+        },
+      ];
+    }
+    return { rows: rows as readonly Row[], rowCount: rows.length };
+  }
+
+  public release(): void {}
 }
 
 class SingleClientPool implements SqlPoolPort {

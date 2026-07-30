@@ -30,6 +30,10 @@ The API then exposes:
 - `GET http://localhost:3000/api/v1/health/live`
 - `GET http://localhost:3000/api/v1/health/ready`
 
+Authentication and Google-to-Hive provisioning configuration is documented in
+[`apps/api/README.md`](apps/api/README.md). The API intentionally fails closed for durable identity
+operations when PostgreSQL or an approved external provider is not configured.
+
 Build the Nakama module with the runtime-compatible toolchain:
 
 ```bash
@@ -39,16 +43,27 @@ docker build -t hive-chameleon-nakama:dev runtime/nakama
 Open [`clients/unity`](clients/unity/) in the pinned Unity editor. Its README documents desktop
 and WebGL development builds.
 
+Build a credential-free WebGL showcase and deploy it to the linked Vercel project with:
+
+```bash
+npm run unity:webgl:build
+npm run unity:webgl:deploy
+```
+
+The showcase build deliberately runs without development credentials. Vercel hosts only its
+static files; the API, Nakama, workers, PostgreSQL, and signer remain always-on Hetzner services.
+The current showcase is available at <https://hive-chameleon.vercel.app>.
+
 ## Repository layout
 
-| Path | Responsibility |
-| --- | --- |
-| `apps/api` | NestJS product API and scoped Nakama session issuance |
-| `clients/unity` | Unity desktop and WebGL client |
-| `runtime/nakama` | Authoritative Nakama Go runtime module |
-| `packages/hive-gateway` | Hive protocol boundary and isolated signing adapters |
-| `workers/haf-projector` | Fork-aware HAF event projection |
-| `docs` | Product, architecture, security, data, and delivery decisions |
+| Path                    | Responsibility                                                |
+| ----------------------- | ------------------------------------------------------------- |
+| `apps/api`              | NestJS product API and scoped Nakama session issuance         |
+| `clients/unity`         | Unity desktop and WebGL client                                |
+| `runtime/nakama`        | Authoritative Nakama Go runtime module                        |
+| `packages/hive-gateway` | Hive protocol boundary and isolated signing adapters          |
+| `workers/haf-projector` | Fork-aware HAF event projection                               |
+| `docs`                  | Product, architecture, security, data, and delivery decisions |
 
 Do not commit credentials or private keys. Copy future `.env.example` files locally and inject
 production secrets through the deployment environment.

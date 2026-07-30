@@ -24,7 +24,13 @@ func InitModule(
 		return fmt.Errorf("configure Nakama session bridge: %w", err)
 	}
 
-	if err := registerRealtime(initializer, verifier); err != nil {
+	lobbyStore, err := newPostgresLobbyStoreFromContext(ctx)
+	if err != nil {
+		return fmt.Errorf("configure persistent lobby store: %w", err)
+	}
+	lobbies := &lobbyService{store: lobbyStore}
+
+	if err := registerRealtime(initializer, verifier, lobbies); err != nil {
 		return fmt.Errorf("register Nakama realtime foundation: %w", err)
 	}
 

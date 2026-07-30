@@ -55,8 +55,14 @@ namespace HiveChameleon.Realtime
                 || string.IsNullOrWhiteSpace(resolvedBearerToken)
             )
             {
+                DevelopmentLobbyPanel previewPanel = GetComponent<DevelopmentLobbyPanel>();
+                if (previewPanel == null)
+                {
+                    previewPanel = gameObject.AddComponent<DevelopmentLobbyPanel>();
+                }
+                previewPanel.InitializePreview();
                 Debug.Log(
-                    "Realtime development connection is disabled; local credentials were not supplied."
+                    "Realtime development connection is disabled; showing the credential-free visual preview."
                 );
                 return;
             }
@@ -65,11 +71,19 @@ namespace HiveChameleon.Realtime
             {
                 IRealtimeCredentialProvider credentialProvider =
                     new HttpRealtimeCredentialProvider(resolvedApiBaseUrl, resolvedBearerToken);
-                _connection = new NakamaRealtimeConnection(resolvedServerKey);
+                var nakamaConnection = new NakamaRealtimeConnection(resolvedServerKey);
+                _connection = nakamaConnection;
                 RealtimeSessionCredential credential = await credentialProvider.GetCredentialAsync(
                     _shutdown.Token
                 );
                 await _connection.ConnectAsync(credential, _shutdown.Token);
+
+                DevelopmentLobbyPanel panel = GetComponent<DevelopmentLobbyPanel>();
+                if (panel == null)
+                {
+                    panel = gameObject.AddComponent<DevelopmentLobbyPanel>();
+                }
+                panel.Initialize(nakamaConnection, _shutdown.Token);
             }
             catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
             {

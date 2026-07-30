@@ -4,18 +4,26 @@
   "private": true,
   "type": "module",
   "description": "Typed Hive protocol, WAX transaction, and isolated signer-policy boundary",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./protocol": {
       "types": "./dist/protocol/index.d.ts",
-      "import": "./dist/protocol/index.js"
+      "import": "./dist/protocol/index.js",
+      "require": "./dist/protocol/index.js",
+      "default": "./dist/protocol/index.js"
     },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
-      "import": "./dist/testing/index.js"
+      "import": "./dist/testing/index.js",
+      "require": "./dist/testing/index.js",
+      "default": "./dist/testing/index.js"
     }
   },
   "scripts": {

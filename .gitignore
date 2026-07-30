@@ -128,6 +128,7 @@ runtime/nakama/data/
 # Local containers and tooling
 .docker/
 .cache/
+.vercel/
 
 # The Unity project lives below the repository root, so the root-anchored rules above do not
 # cover its generated directories.

@@ -43,6 +43,8 @@ services:
       - ${NAKAMA_RUNTIME_HTTP_KEY:?set NAKAMA_RUNTIME_HTTP_KEY}
       - --runtime.env
       - NAKAMA_BRIDGE_HMAC_KEY=${NAKAMA_BRIDGE_HMAC_KEY:?set NAKAMA_BRIDGE_HMAC_KEY}
+      - --runtime.env
+      - HC_NAKAMA_DATABASE_URL=${HC_NAKAMA_DATABASE_URL:?set HC_NAKAMA_DATABASE_URL}
       - --session.encryption_key
       - ${NAKAMA_SESSION_ENCRYPTION_KEY:?set NAKAMA_SESSION_ENCRYPTION_KEY}
       - --session.refresh_encryption_key
@@ -65,6 +67,8 @@ services:
       - '127.0.0.1:${NAKAMA_API_PORT:-7350}:7350'
       - '127.0.0.1:${NAKAMA_CONSOLE_PORT:-7351}:7351'
       - '127.0.0.1:${NAKAMA_METRICS_PORT:-7354}:7354'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     volumes:
       - ./local.yml:/nakama/data/local.yml:ro
 

@@ -1,14 +1,6 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
-
 export const REALTIME_CONFIG = Symbol('REALTIME_CONFIG');
 
 const uuidV7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
-export interface DevelopmentRealtimePrincipalConfig {
-  authSessionId: string;
-  bearerToken: string;
-  playerId: string;
-}
 
 export interface NakamaBridgeConfig {
   assertionTtlSeconds: number;
@@ -20,7 +12,6 @@ export interface NakamaBridgeConfig {
 }
 
 export interface RealtimeConfig {
-  developmentPrincipal: DevelopmentRealtimePrincipalConfig | null;
   nakama: NakamaBridgeConfig | null;
   nodeEnvironment: string;
 }
@@ -28,22 +19,11 @@ export interface RealtimeConfig {
 export function loadRealtimeConfig(environment: NodeJS.ProcessEnv = process.env): RealtimeConfig {
   const nodeEnvironment = environment.NODE_ENV?.trim() || 'development';
   const nakama = loadNakamaBridgeConfig(environment, nodeEnvironment);
-  const developmentPrincipal = loadDevelopmentPrincipal(environment, nodeEnvironment, nakama);
-
-  return { developmentPrincipal, nakama, nodeEnvironment };
+  return { nakama, nodeEnvironment };
 }
 
 export function isCanonicalUuidV7(value: string): boolean {
   return uuidV7Pattern.test(value);
-}
-
-export function matchesDevelopmentBearer(header: string | undefined, expected: string): boolean {
-  const prefix = 'Bearer ';
-  const candidate = header?.startsWith(prefix) ? header.slice(prefix.length) : '';
-  const candidateHash = createHash('sha256').update(candidate, 'utf8').digest();
-  const expectedHash = createHash('sha256').update(expected, 'utf8').digest();
-
-  return candidate.length > 0 && timingSafeEqual(candidateHash, expectedHash);
 }
 
 function loadNakamaBridgeConfig(
@@ -99,43 +79,6 @@ function loadNakamaBridgeConfig(
     serverKey: raw.serverKey!,
     socketUrl: socketUrl.toString(),
   };
-}
-
-function loadDevelopmentPrincipal(
-  environment: NodeJS.ProcessEnv,
-  nodeEnvironment: string,
-  nakama: NakamaBridgeConfig | null,
-): DevelopmentRealtimePrincipalConfig | null {
-  const enabledValue = environment.REALTIME_DEV_PRINCIPAL_ENABLED?.trim().toLowerCase();
-  if (!enabledValue || enabledValue === 'false') {
-    return null;
-  }
-  if (enabledValue !== 'true') {
-    throw new Error('REALTIME_DEV_PRINCIPAL_ENABLED must be true or false.');
-  }
-  if (nodeEnvironment === 'production') {
-    throw new Error('The development realtime principal cannot be enabled in production.');
-  }
-  if (!nakama) {
-    throw new Error('The development realtime principal requires Nakama bridge configuration.');
-  }
-  if (environment.REALTIME_DEV_DISCLOSURE_ACKNOWLEDGED?.trim().toLowerCase() !== 'true') {
-    throw new Error(
-      'REALTIME_DEV_DISCLOSURE_ACKNOWLEDGED=true is required for the development realtime principal.',
-    );
-  }
-
-  const playerId = environment.REALTIME_DEV_PLAYER_ID?.trim() ?? '';
-  const authSessionId = environment.REALTIME_DEV_AUTH_SESSION_ID?.trim() ?? '';
-  const bearerToken = environment.REALTIME_DEV_BEARER_TOKEN ?? '';
-  if (!isCanonicalUuidV7(playerId) || !isCanonicalUuidV7(authSessionId)) {
-    throw new Error('Development player and auth-session IDs must be canonical UUIDv7 values.');
-  }
-  if (bearerToken.length < 32) {
-    throw new Error('REALTIME_DEV_BEARER_TOKEN must contain at least 32 characters.');
-  }
-
-  return { authSessionId, bearerToken, playerId };
 }
 
 function decodeBridgeKey(encoded: string): Buffer {
