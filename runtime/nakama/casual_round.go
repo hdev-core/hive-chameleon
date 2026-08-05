@@ -2,12 +2,9 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"math/big"
 	"regexp"
 	"sort"
 	"time"
@@ -16,16 +13,18 @@ import (
 const (
 	casualPreparingDuration   = 2 * time.Second
 	maximumRoundCommandBytes  = 1024
-	minimumCasualTargetSlots  = 3
 	maximumRoundCommandIDSize = 64
+	maximumPlayerIDSize       = 128
 	maximumProcessedCommands  = 256
 )
 
 var roundCommandIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 type hunterFireCommand struct {
-	CommandID string `json:"command_id"`
-	AimSlot   int    `json:"aim_slot"`
+	CommandID      string   `json:"command_id"`
+	TargetPlayerID string   `json:"target_player_id,omitempty"`
+	AimYaw         *float64 `json:"aim_yaw,omitempty"`
+	AimPitch       *float64 `json:"aim_pitch,omitempty"`
 }
 
 type hunterFireResult struct {
@@ -33,7 +32,7 @@ type hunterFireResult struct {
 	CommandID       string     `json:"command_id"`
 	Accepted        bool       `json:"accepted"`
 	Reason          string     `json:"reason"`
-	AimSlot         int        `json:"aim_slot"`
+	TargetPlayerID  string     `json:"target_player_id,omitempty"`
 	Hit             bool       `json:"hit"`
 	HiderPlayerID   string     `json:"hider_player_id,omitempty"`
 	ShellsRemaining int        `json:"shells_remaining"`
@@ -42,20 +41,21 @@ type hunterFireResult struct {
 }
 
 type roundDiscoverySnapshot struct {
-	RoundID        string    `json:"round_id"`
-	HunterPlayerID string    `json:"hunter_player_id"`
-	HiderPlayerID  string    `json:"hider_player_id"`
-	Sequence       int       `json:"sequence"`
-	AimSlot        int       `json:"aim_slot"`
-	OccurredAt     time.Time `json:"occurred_at"`
+	RoundID                   string    `json:"round_id"`
+	HunterPlayerID            string    `json:"hunter_player_id"`
+	HiderPlayerID             string    `json:"hider_player_id"`
+	Sequence                  int       `json:"sequence"`
+	OccurredAt                time.Time `json:"occurred_at"`
+	CausedInfectionConversion bool      `json:"caused_infection_conversion"`
 }
 
 type roundPlayerState struct {
 	RoundID         string     `json:"round_id"`
 	PlayerID        string     `json:"player_id"`
+	DisplayName     string     `json:"display_name,omitempty"`
+	InitialRole     string     `json:"initial_role"`
 	Role            string     `json:"role"`
 	Status          string     `json:"status"`
-	HidingSlot      int        `json:"hiding_slot,omitempty"`
 	ShellsRemaining int        `json:"shells_remaining"`
 	ReloadUntil     *time.Time `json:"reload_until,omitempty"`
 }
@@ -66,86 +66,72 @@ type casualHunterState struct {
 	Commands        map[string]hunterFireResult
 }
 
-type casualRoundState struct {
-	RoundID          string
-	Phase            string
-	PhaseDeadline    time.Time
-	HidingDuration   time.Duration
-	HuntingDuration  time.Duration
-	ReloadDuration   time.Duration
-	TargetSlotCount  int
-	Assignments      map[string]roundRoleAssignment
-	HiderBySlot      map[int]string
-	FoundHiders      map[string]roundDiscoverySnapshot
-	Hunters          map[string]*casualHunterState
-	Discoveries      []roundDiscoverySnapshot
-	WinningSide      string
-	CompletionReason string
+type authoritativeRoundState struct {
+	RoundID            string
+	Mode               string
+	Phase              string
+	PhaseDeadline      time.Time
+	TerminalAt         time.Time
+	HidingDuration     time.Duration
+	HuntingDuration    time.Duration
+	ReloadDuration     time.Duration
+	ShellLimit         int
+	Assignments        map[string]roundRoleAssignment
+	CurrentRoles       map[string]string
+	Hiders             map[string]struct{}
+	FoundHiders        map[string]roundDiscoverySnapshot
+	Hunters            map[string]*casualHunterState
+	Discoveries        []roundDiscoverySnapshot
+	WinningSide        string
+	CompletionReason   string
+	Likes              map[string]roundLikeSnapshot
+	LikeCommands       map[string]map[string]answerCheckLikeResult
+	ReconnectedPlayers map[string]bool
 }
 
-func assignCasualHidingSlots(
-	assignments []roundRoleAssignment,
-	random io.Reader,
-) (int, error) {
-	hiderIndexes := make([]int, 0, len(assignments))
-	for index := range assignments {
-		if assignments[index].Role == "hider" {
-			hiderIndexes = append(hiderIndexes, index)
-		}
-	}
-	if len(hiderIndexes) == 0 {
-		return 0, errors.New("casual round requires at least one hider")
-	}
-	targetSlotCount := len(hiderIndexes) + 2
-	if targetSlotCount < minimumCasualTargetSlots {
-		targetSlotCount = minimumCasualTargetSlots
-	}
-	slots := make([]int, targetSlotCount)
-	for index := range slots {
-		slots[index] = index + 1
-	}
-	if err := shuffleInts(slots, random); err != nil {
-		return 0, err
-	}
-	for index, assignmentIndex := range hiderIndexes {
-		assignments[assignmentIndex].HidingSlot = slots[index]
-	}
-	return targetSlotCount, nil
-}
-
-func newCasualRoundState(round *roundSnapshot) (*casualRoundState, error) {
-	if round == nil || round.ID == "" || round.Mode != "casual" {
-		return nil, errors.New("valid Casual round is required")
+func newAuthoritativeRoundState(
+	round *roundSnapshot,
+) (*authoritativeRoundState, error) {
+	if round == nil ||
+		round.ID == "" ||
+		(round.Mode != "casual" && round.Mode != "infection") {
+		return nil, errors.New("valid authoritative round is required")
 	}
 	if round.HidingDurationSeconds <= 0 ||
 		round.HuntingDurationSeconds <= 0 ||
 		round.ShellLimit <= 0 ||
 		round.ReloadDurationMS <= 0 {
-		return nil, errors.New("Casual round rules are invalid")
+		return nil, errors.New("authoritative round rules are invalid")
 	}
 
-	state := &casualRoundState{
-		RoundID:         round.ID,
-		Phase:           "preparing",
-		PhaseDeadline:   round.StartedAt.Add(casualPreparingDuration),
-		HidingDuration:  time.Duration(round.HidingDurationSeconds) * time.Second,
-		HuntingDuration: time.Duration(round.HuntingDurationSeconds) * time.Second,
-		ReloadDuration:  time.Duration(round.ReloadDurationMS) * time.Millisecond,
-		TargetSlotCount: round.TargetSlotCount,
-		Assignments:     make(map[string]roundRoleAssignment, len(round.RoleAssignments)),
-		HiderBySlot:     make(map[int]string),
-		FoundHiders:     make(map[string]roundDiscoverySnapshot),
-		Hunters:         make(map[string]*casualHunterState),
-		Discoveries:     make([]roundDiscoverySnapshot, 0),
+	state := &authoritativeRoundState{
+		RoundID:            round.ID,
+		Mode:               round.Mode,
+		Phase:              "preparing",
+		PhaseDeadline:      round.StartedAt.Add(casualPreparingDuration),
+		HidingDuration:     time.Duration(round.HidingDurationSeconds) * time.Second,
+		HuntingDuration:    time.Duration(round.HuntingDurationSeconds) * time.Second,
+		ReloadDuration:     time.Duration(round.ReloadDurationMS) * time.Millisecond,
+		ShellLimit:         round.ShellLimit,
+		Assignments:        make(map[string]roundRoleAssignment, len(round.RoleAssignments)),
+		CurrentRoles:       make(map[string]string, len(round.RoleAssignments)),
+		Hiders:             make(map[string]struct{}),
+		FoundHiders:        make(map[string]roundDiscoverySnapshot),
+		Hunters:            make(map[string]*casualHunterState),
+		Discoveries:        make([]roundDiscoverySnapshot, 0),
+		Likes:              make(map[string]roundLikeSnapshot),
+		LikeCommands:       make(map[string]map[string]answerCheckLikeResult),
+		ReconnectedPlayers: make(map[string]bool),
 	}
 	for _, assignment := range round.RoleAssignments {
 		if assignment.PlayerID == "" {
-			return nil, errors.New("Casual round assignment player is required")
+			return nil, errors.New("authoritative round assignment player is required")
 		}
 		if _, exists := state.Assignments[assignment.PlayerID]; exists {
-			return nil, errors.New("Casual round assignments must be unique")
+			return nil, errors.New("authoritative round assignments must be unique")
 		}
 		state.Assignments[assignment.PlayerID] = assignment
+		state.CurrentRoles[assignment.PlayerID] = assignment.Role
 		switch assignment.Role {
 		case "hunter":
 			state.Hunters[assignment.PlayerID] = &casualHunterState{
@@ -153,27 +139,23 @@ func newCasualRoundState(round *roundSnapshot) (*casualRoundState, error) {
 				Commands:        make(map[string]hunterFireResult),
 			}
 		case "hider":
-			if assignment.HidingSlot < 1 || assignment.HidingSlot > round.TargetSlotCount {
-				return nil, errors.New("Casual Hider slot is invalid")
-			}
-			if _, occupied := state.HiderBySlot[assignment.HidingSlot]; occupied {
-				return nil, errors.New("Casual Hider slots must be unique")
-			}
-			state.HiderBySlot[assignment.HidingSlot] = assignment.PlayerID
+			state.Hiders[assignment.PlayerID] = struct{}{}
 		default:
-			return nil, errors.New("Casual round assignment role is invalid")
+			return nil, errors.New("authoritative round assignment role is invalid")
 		}
 	}
-	if len(state.Hunters) == 0 || len(state.HiderBySlot) == 0 {
-		return nil, errors.New("Casual round requires Hunters and Hiders")
+	if len(state.Hunters) == 0 || len(state.Hiders) == 0 {
+		return nil, errors.New("authoritative round requires Hunters and Hiders")
 	}
 	state.Apply(round)
 	return state, nil
 }
 
-func (s *casualRoundState) Advance(now time.Time) []string {
+func (s *authoritativeRoundState) Advance(now time.Time) []string {
 	phases := make([]string, 0, 2)
-	for s.Phase != "terminal" && !now.Before(s.PhaseDeadline) {
+	for s.Phase != "answer_check" &&
+		s.Phase != "completed" &&
+		!now.Before(s.PhaseDeadline) {
 		switch s.Phase {
 		case "preparing":
 			s.Phase = "hiding"
@@ -184,17 +166,17 @@ func (s *casualRoundState) Advance(now time.Time) []string {
 			s.PhaseDeadline = s.PhaseDeadline.Add(s.HuntingDuration)
 			phases = append(phases, s.Phase)
 		case "hunting":
-			s.complete("hiders", "hunt_timeout")
+			s.BeginAnswerCheck("hiders", "hunt_timeout", s.PhaseDeadline)
 			phases = append(phases, s.Phase)
 		default:
-			s.complete("none", "invalid_phase")
+			s.BeginAnswerCheck("none", "invalid_phase", now)
 			phases = append(phases, s.Phase)
 		}
 	}
 	return phases
 }
 
-func (s *casualRoundState) HandleFire(
+func (s *authoritativeRoundState) HandleFire(
 	playerID string,
 	command hunterFireCommand,
 	now time.Time,
@@ -209,9 +191,9 @@ func (s *casualRoundState) HandleFire(
 		RoundID:         s.RoundID,
 		CommandID:       command.CommandID,
 		Reason:          "invalid_command",
-		AimSlot:         command.AimSlot,
+		TargetPlayerID:  command.TargetPlayerID,
 		ShellsRemaining: 0,
-		RoundIsTerminal: s.Phase == "terminal",
+		RoundIsTerminal: s.Phase == "answer_check" || s.Phase == "completed",
 	}
 	if hunter == nil {
 		result.Reason = "not_hunter"
@@ -227,16 +209,11 @@ func (s *casualRoundState) HandleFire(
 		return result, nil
 	}
 	if s.Phase != "hunting" {
-		if s.Phase == "terminal" {
+		if s.Phase == "answer_check" || s.Phase == "completed" {
 			result.Reason = "round_terminal"
 		} else {
 			result.Reason = "not_hunting"
 		}
-		hunter.Commands[command.CommandID] = result
-		return result, nil
-	}
-	if command.AimSlot < 1 || command.AimSlot > s.TargetSlotCount {
-		result.Reason = "invalid_aim_slot"
 		hunter.Commands[command.CommandID] = result
 		return result, nil
 	}
@@ -259,24 +236,31 @@ func (s *casualRoundState) HandleFire(
 	reloadUntil := hunter.ReloadUntil
 	result.ReloadUntil = &reloadUntil
 
-	hiderPlayerID := s.HiderBySlot[command.AimSlot]
-	if hiderPlayerID != "" {
+	hiderPlayerID := command.TargetPlayerID
+	if _, isHider := s.Hiders[hiderPlayerID]; isHider {
 		if _, alreadyFound := s.FoundHiders[hiderPlayerID]; !alreadyFound {
 			discovery := roundDiscoverySnapshot{
-				RoundID:        s.RoundID,
-				HunterPlayerID: playerID,
-				HiderPlayerID:  hiderPlayerID,
-				Sequence:       len(s.Discoveries) + 1,
-				AimSlot:        command.AimSlot,
-				OccurredAt:     now,
+				RoundID:                   s.RoundID,
+				HunterPlayerID:            playerID,
+				HiderPlayerID:             hiderPlayerID,
+				Sequence:                  len(s.Discoveries) + 1,
+				OccurredAt:                now,
+				CausedInfectionConversion: s.Mode == "infection",
 			}
 			s.FoundHiders[hiderPlayerID] = discovery
 			s.Discoveries = append(s.Discoveries, discovery)
+			if s.Mode == "infection" {
+				s.CurrentRoles[hiderPlayerID] = "hunter"
+				s.Hunters[hiderPlayerID] = &casualHunterState{
+					ShellsRemaining: s.ShellLimit,
+					Commands:        make(map[string]hunterFireResult),
+				}
+			}
 			result.Reason = "hit"
 			result.Hit = true
 			result.HiderPlayerID = hiderPlayerID
-			if len(s.FoundHiders) == len(s.HiderBySlot) {
-				s.complete("hunters", "all_hiders_found")
+			if len(s.FoundHiders) == len(s.Hiders) {
+				s.BeginAnswerCheck("hunters", "all_hiders_found", now)
 				result.RoundIsTerminal = true
 			}
 			hunter.Commands[command.CommandID] = result
@@ -288,7 +272,7 @@ func (s *casualRoundState) HandleFire(
 	return result, nil
 }
 
-func (s *casualRoundState) PlayerState(
+func (s *authoritativeRoundState) PlayerState(
 	playerID string,
 ) (roundPlayerState, bool) {
 	assignment, exists := s.Assignments[playerID]
@@ -297,14 +281,19 @@ func (s *casualRoundState) PlayerState(
 	}
 	status := "active"
 	if _, found := s.FoundHiders[playerID]; found {
-		status = "found"
+		if s.Mode == "infection" {
+			status = "converted"
+		} else {
+			status = "found"
+		}
 	}
 	state := roundPlayerState{
-		RoundID:    s.RoundID,
-		PlayerID:   playerID,
-		Role:       assignment.Role,
-		Status:     status,
-		HidingSlot: assignment.HidingSlot,
+		RoundID:     s.RoundID,
+		PlayerID:    playerID,
+		DisplayName: assignment.DisplayName,
+		InitialRole: assignment.Role,
+		Role:        s.CurrentRoles[playerID],
+		Status:      status,
 	}
 	if hunter := s.Hunters[playerID]; hunter != nil {
 		state.ShellsRemaining = hunter.ShellsRemaining
@@ -316,14 +305,13 @@ func (s *casualRoundState) PlayerState(
 	return state, true
 }
 
-func (s *casualRoundState) Apply(round *roundSnapshot) {
+func (s *authoritativeRoundState) Apply(round *roundSnapshot) {
 	if round == nil {
 		return
 	}
 	round.Status = s.Phase
-	round.TargetSlotCount = s.TargetSlotCount
-	round.HidersTotal = len(s.HiderBySlot)
-	round.HidersRemaining = len(s.HiderBySlot) - len(s.FoundHiders)
+	round.HidersTotal = len(s.Hiders)
+	round.HidersRemaining = len(s.Hiders) - len(s.FoundHiders)
 	round.WinningSide = s.WinningSide
 	round.CompletionReason = s.CompletionReason
 	round.DiscoveredHiderPlayerIDs = make([]string, 0, len(s.Discoveries))
@@ -333,17 +321,23 @@ func (s *casualRoundState) Apply(round *roundSnapshot) {
 			discovery.HiderPlayerID,
 		)
 	}
-	if s.Phase == "terminal" {
+	if s.Phase == "completed" {
 		round.PhaseDeadline = nil
+		round.EndedAt = s.PhaseDeadline
 		return
 	}
 	deadline := s.PhaseDeadline
 	round.PhaseDeadline = &deadline
 }
 
-func (s *casualRoundState) complete(winningSide string, reason string) {
-	s.Phase = "terminal"
+func (s *authoritativeRoundState) complete(
+	winningSide string,
+	reason string,
+	terminalAt time.Time,
+) {
+	s.Phase = "answer_check"
 	s.PhaseDeadline = time.Time{}
+	s.TerminalAt = terminalAt.UTC()
 	s.WinningSide = winningSide
 	s.CompletionReason = reason
 }
@@ -364,22 +358,23 @@ func decodeHunterFireCommand(payload []byte) (hunterFireCommand, error) {
 	if command.CommandID == "" ||
 		len(command.CommandID) > maximumRoundCommandIDSize ||
 		!roundCommandIDPattern.MatchString(command.CommandID) ||
-		command.AimSlot < 1 {
+		len(command.TargetPlayerID) > maximumPlayerIDSize ||
+		(command.TargetPlayerID != "" &&
+			!roundCommandIDPattern.MatchString(command.TargetPlayerID)) {
 		return command, errors.New("invalid Hunter fire command")
 	}
-	return command, nil
-}
-
-func shuffleInts(values []int, random io.Reader) error {
-	for index := len(values) - 1; index > 0; index-- {
-		selected, err := rand.Int(random, big.NewInt(int64(index+1)))
-		if err != nil {
-			return fmt.Errorf("read hiding-slot randomness: %w", err)
-		}
-		swap := int(selected.Int64())
-		values[index], values[swap] = values[swap], values[index]
+	if (command.AimYaw == nil) != (command.AimPitch == nil) {
+		return command, errors.New("invalid Hunter fire command")
 	}
-	return nil
+	if command.AimYaw != nil {
+		if !finiteNumber(*command.AimYaw) ||
+			!validAvatarPitch(*command.AimPitch) {
+			return command, errors.New("invalid Hunter fire command")
+		}
+		normalizedYaw := normalizeAvatarYaw(*command.AimYaw)
+		command.AimYaw = &normalizedYaw
+	}
+	return command, nil
 }
 
 func sortedPlayerIDs(values map[string]roundRoleAssignment) []string {

@@ -1,4 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { Client, Session } from '@heroiclabs/nakama-js';
 
@@ -11,6 +13,7 @@ const requiredEnvironment = [
   'SMOKE_PLAYER_ID',
   'SMOKE_PLAYER_TWO_ID',
   'SMOKE_MAP_VERSION_ID',
+  'SMOKE_NAKAMA_CONTAINER_ID',
 ];
 
 for (const name of requiredEnvironment) {
@@ -32,6 +35,7 @@ const client = new Client(
   5_000,
   false,
 );
+const execFileAsync = promisify(execFile);
 
 let deviceAuthenticationRejected = false;
 try {
@@ -107,11 +111,13 @@ const secondSession = await client.authenticateCustom(
   true,
 );
 const hostSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
-const guestSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
+let guestSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
 const returningHostSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
+let reconnectedHiderSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
 const hostStates = trackMatchStates(hostSocket);
-const guestStates = trackMatchStates(guestSocket);
+let guestStates = trackMatchStates(guestSocket);
 const returningHostStates = trackMatchStates(returningHostSocket);
+let reconnectedHiderStates = trackMatchStates(reconnectedHiderSocket);
 
 try {
   await hostSocket.connect(session, true, 1_000);
@@ -144,6 +150,15 @@ try {
   });
   if (joined.match_id !== created.match_id) {
     throw new Error('lobby.join resolved a different authoritative match');
+  }
+  const joinedNames = new Map(
+    joined.lobby.members.map((member) => [member.player_id, member.display_name]),
+  );
+  if (
+    joinedNames.get(process.env.SMOKE_PLAYER_ID) !== 'smoke-user' ||
+    joinedNames.get(process.env.SMOKE_PLAYER_TWO_ID) !== 'smoke-user-two'
+  ) {
+    throw new Error('lobby roster did not carry authoritative Hive display names');
   }
   await guestSocket.joinMatch(joined.match_id);
   await guestStates.waitForLobby(
@@ -222,7 +237,7 @@ try {
   const configured = await lobbyRpc(guestSocket, 'lobby.update_configuration', {
     expected_lobby_version: nominated.lobby.row_version,
     hiding_duration_seconds: 10,
-    hunting_duration_seconds: 30,
+    hunting_duration_seconds: 60,
     lobby_id: created.lobby.id,
     map_version_id: process.env.SMOKE_MAP_VERSION_ID,
     reload_duration_ms: 100,
@@ -235,7 +250,7 @@ try {
   });
   if (
     configured.lobby.configuration.hiding_duration_seconds !== 10 ||
-    configured.lobby.configuration.hunting_duration_seconds !== 30 ||
+    configured.lobby.configuration.hunting_duration_seconds !== 60 ||
     configured.lobby.configuration.reload_duration_ms !== 100 ||
     configured.lobby.configuration.shell_limit !== 6
   ) {
@@ -261,7 +276,14 @@ try {
     started.start_accepted !== true ||
     typeof started.round?.id !== 'string' ||
     started.round.status !== 'preparing' ||
-    started.round.sequence_number !== 1
+    started.round.sequence_number !== 1 ||
+    started.round.map_version_id !== process.env.SMOKE_MAP_VERSION_ID ||
+    started.round.map_content_version !== 'm4-4' ||
+    started.round.game_server_build_version !== 'hive-chameleon-m4-dev' ||
+    started.round.protocol_version !== 'm4-v2' ||
+    started.round.authority_geometry_version !== 'chroma-district-authority-proxy-1' ||
+    started.round.authority_geometry_digest !==
+      'sha256:a39e5e7ae0e3f8f3d7fffc718f5e93047799f8d1338afa8b25b5d3ee0021c9a8'
   ) {
     throw new Error('lobby.start did not create a preparing round');
   }
@@ -281,9 +303,12 @@ try {
     guestRole.round_id !== started.round.id ||
     guestRole.role !== 'hunter' ||
     guestRole.hunter_volunteer !== true ||
+    guestRole.display_name !== 'smoke-user-two' ||
     returningHostRole.round_id !== started.round.id ||
     returningHostRole.role !== 'hider' ||
-    returningHostRole.hunter_volunteer !== false
+    returningHostRole.hunter_volunteer !== false ||
+    returningHostRole.display_name !== 'smoke-user' ||
+    'hiding_slot' in returningHostRole
   ) {
     throw new Error('server role assignment did not prioritize the authenticated volunteer');
   }
@@ -296,15 +321,43 @@ try {
     'private Hunter simulation state',
   );
   const hiderPlayerState = await returningHostStates.waitForPlayerState(
-    (state) =>
-      state.round_id === started.round.id && state.role === 'hider' && state.hiding_slot > 0,
+    (state) => state.round_id === started.round.id && state.role === 'hider',
     'private Hider simulation state',
   );
   if (
     guestPlayerState.shells_remaining !== 6 ||
-    hiderPlayerState.player_id !== process.env.SMOKE_PLAYER_ID
+    guestPlayerState.display_name !== 'smoke-user-two' ||
+    hiderPlayerState.player_id !== process.env.SMOKE_PLAYER_ID ||
+    hiderPlayerState.display_name !== 'smoke-user'
   ) {
     throw new Error('private Casual simulation state was not recipient-correct');
+  }
+  const initialHunterAvatar = await guestStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_TWO_ID &&
+      state.sequence === 1,
+    'initial authoritative Hunter spawn',
+  );
+  const initialHiderAvatar = await returningHostStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_ID &&
+      state.sequence === 1,
+    'initial authoritative Hider spawn',
+  );
+  const initialScoreBatch = await guestStates.waitForScores(
+    (state) =>
+      state.round_id === started.round.id && state.final === false && state.batch_sequence === 1,
+    'initial cached provisional score batch',
+  );
+  if (
+    initialScoreBatch.entries.length !== 1 ||
+    initialScoreBatch.entries[0].player_id !== process.env.SMOKE_PLAYER_ID ||
+    initialScoreBatch.entries[0].display_name !== 'smoke-user' ||
+    initialScoreBatch.entries.some((entry) => entry.player_id === process.env.SMOKE_PLAYER_TWO_ID)
+  ) {
+    throw new Error('scoreboard was not restricted to authoritative Hider entries');
   }
 
   let staleVersionRejected = false;
@@ -343,18 +396,226 @@ try {
   if (
     hunting.hiders_remaining !== 1 ||
     hunting.hiders_total !== 1 ||
-    hunting.target_slot_count < 3
+    'target_slot_count' in hunting
   ) {
     throw new Error('public Casual hunting state is invalid');
   }
 
+  const smokeHiderAnchor = selectSmokeHiderAnchor(initialHiderAvatar);
+  await returningHostSocket.sendMatchState(
+    created.match_id,
+    14,
+    JSON.stringify({
+      accent_b: 0.8,
+      accent_g: 0.7,
+      accent_r: 0.6,
+      body_b: 0.4,
+      body_g: 0.3,
+      body_r: 0.2,
+      pitch: 0,
+      pose: 'crouching',
+      position_x: smokeHiderAnchor.x,
+      position_y: smokeHiderAnchor.y,
+      position_z: smokeHiderAnchor.z,
+      yaw: initialHiderAvatar.yaw,
+    }),
+  );
+  const hiderAvatar = await guestStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_ID &&
+      state.role === 'hider' &&
+      state.sequence === 2,
+    'server-attributed Hider avatar state',
+  );
+  if (
+    hiderAvatar.status !== 'active' ||
+    hiderAvatar.sequence !== 2 ||
+    hiderAvatar.display_name !== 'smoke-user' ||
+    hiderAvatar.position_x !== smokeHiderAnchor.x ||
+    hiderAvatar.position_y !== smokeHiderAnchor.y ||
+    hiderAvatar.position_z !== smokeHiderAnchor.z ||
+    hiderAvatar.pitch !== 0 ||
+    hiderAvatar.pose !== 'crouching'
+  ) {
+    throw new Error('humanoid avatar relay altered or omitted authoritative state');
+  }
+
+  returningHostSocket.disconnect(false);
+  await reconnectedHiderSocket.connect(session, true, 1_000);
+  const reconnect = await waitForReconnectReservation(reconnectedHiderSocket, created.lobby.id);
+  if (
+    reconnect.match_id !== created.match_id ||
+    reconnect.round?.id !== started.round.id ||
+    reconnect.reconnect?.round_id !== started.round.id ||
+    reconnect.reconnect?.role !== 'hider' ||
+    reconnect.reconnect?.outcome_preserved !== true
+  ) {
+    throw new Error('match.reconnect did not reserve the authoritative Hider state');
+  }
+  const restoredAvatarPromise = reconnectedHiderStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id && state.player_id === process.env.SMOKE_PLAYER_ID,
+    'restored humanoid avatar state',
+  );
+  await reconnectedHiderSocket.joinMatch(reconnect.match_id);
+  const restoredReconnect = await reconnectedHiderStates.waitForReconnect(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_ID &&
+      state.status === 'restored',
+    'private restored reconnect state',
+  );
+  const restoredHiderState = await reconnectedHiderStates.waitForPlayerState(
+    (state) =>
+      state.round_id === started.round.id && state.player_id === process.env.SMOKE_PLAYER_ID,
+    'restored authoritative Hider simulation state',
+  );
+  if (
+    !restoredReconnect.outcome_preserved ||
+    restoredReconnect.role !== 'hider' ||
+    restoredHiderState.role !== 'hider' ||
+    restoredHiderState.status !== hiderPlayerState.status
+  ) {
+    throw new Error('reconnect changed the server-authorized Hider state');
+  }
+  const restoredAvatar = await restoredAvatarPromise;
+  if (
+    restoredAvatar.sequence !== hiderAvatar.sequence ||
+    restoredAvatar.position_x !== hiderAvatar.position_x ||
+    restoredAvatar.pose !== hiderAvatar.pose
+  ) {
+    throw new Error('reconnect did not restore the latest humanoid avatar snapshot');
+  }
+  const restoredScoreBatch = await reconnectedHiderStates.waitForScores(
+    (state) => state.round_id === started.round.id && state.final === false,
+    'restored cached provisional score batch',
+  );
+  if (
+    restoredScoreBatch.batch_sequence !== initialScoreBatch.batch_sequence ||
+    restoredScoreBatch.computed_at !== initialScoreBatch.computed_at
+  ) {
+    throw new Error('reconnect forced an early provisional score refresh');
+  }
+
+  const originalMatchId = created.match_id;
+  await restartNakama();
+  guestSocket.disconnect(false);
+  reconnectedHiderSocket.disconnect(false);
+
+  guestSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
+  reconnectedHiderSocket = client.createSocket(nakamaUrl.protocol === 'https:', false);
+  guestStates = trackMatchStates(guestSocket);
+  reconnectedHiderStates = trackMatchStates(reconnectedHiderSocket);
+  await guestSocket.connect(secondSession, true, 1_000);
+  await reconnectedHiderSocket.connect(session, true, 1_000);
+
+  const recoveredHunter = await waitForReconnectReservation(guestSocket, created.lobby.id);
+  const recoveredHider = await waitForReconnectReservation(
+    reconnectedHiderSocket,
+    created.lobby.id,
+  );
+  if (
+    recoveredHunter.match_id === originalMatchId ||
+    recoveredHunter.match_id !== recoveredHider.match_id ||
+    recoveredHunter.round?.id !== started.round.id ||
+    recoveredHider.round?.id !== started.round.id ||
+    recoveredHunter.round?.game_server_build_version !== 'hive-chameleon-m4-dev' ||
+    recoveredHider.round?.game_server_build_version !== 'hive-chameleon-m4-dev' ||
+    recoveredHunter.round?.protocol_version !== 'm4-v2' ||
+    recoveredHider.round?.protocol_version !== 'm4-v2' ||
+    recoveredHunter.round?.authority_geometry_digest !== started.round.authority_geometry_digest ||
+    recoveredHider.round?.authority_geometry_digest !== started.round.authority_geometry_digest ||
+    recoveredHunter.reconnect?.role !== 'hunter' ||
+    recoveredHider.reconnect?.role !== 'hider' ||
+    !recoveredHunter.reconnect?.outcome_preserved ||
+    !recoveredHider.reconnect?.outcome_preserved
+  ) {
+    throw new Error('Nakama restart did not fence and recover both authoritative roles');
+  }
+  created.match_id = recoveredHunter.match_id;
+  const recoveredAvatarPromise = guestStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id && state.player_id === process.env.SMOKE_PLAYER_ID,
+    'post-restart Hider avatar checkpoint',
+  );
+  await guestSocket.joinMatch(created.match_id);
+  await reconnectedHiderSocket.joinMatch(created.match_id);
+
+  const recoveredHunterReconnect = await guestStates.waitForReconnect(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_TWO_ID &&
+      state.status === 'restored',
+    'post-restart Hunter reconnect outcome',
+  );
+  const recoveredHiderReconnect = await reconnectedHiderStates.waitForReconnect(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_ID &&
+      state.status === 'restored',
+    'post-restart Hider reconnect outcome',
+  );
+  const recoveredHunterRole = await guestStates.waitForRole(
+    (assignment) =>
+      assignment.round_id === started.round.id &&
+      assignment.player_id === process.env.SMOKE_PLAYER_TWO_ID,
+    'post-restart Hunter role assignment',
+  );
+  const recoveredHiderRole = await reconnectedHiderStates.waitForRole(
+    (assignment) =>
+      assignment.round_id === started.round.id &&
+      assignment.player_id === process.env.SMOKE_PLAYER_ID,
+    'post-restart Hider role assignment',
+  );
+  if (
+    !recoveredHunterReconnect.outcome_preserved ||
+    !recoveredHiderReconnect.outcome_preserved ||
+    recoveredHunterRole.role !== guestRole.role ||
+    recoveredHiderRole.role !== returningHostRole.role
+  ) {
+    throw new Error('Nakama restart changed authoritative role or reconnect evidence');
+  }
+
+  const recoveredAvatar = await recoveredAvatarPromise;
+  if (
+    recoveredAvatar.sequence !== hiderAvatar.sequence ||
+    recoveredAvatar.position_x !== hiderAvatar.position_x ||
+    recoveredAvatar.position_z !== hiderAvatar.position_z ||
+    recoveredAvatar.pose !== hiderAvatar.pose
+  ) {
+    throw new Error('Nakama restart did not rehydrate the accepted avatar snapshot');
+  }
+  const recoveredScoreBatch = await guestStates.waitForScores(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.final === false &&
+      state.batch_sequence === initialScoreBatch.batch_sequence,
+    'post-restart cached score batch',
+  );
+  if (recoveredScoreBatch.computed_at !== initialScoreBatch.computed_at) {
+    throw new Error('Nakama restart reset the cached score batch');
+  }
+  const nextScoreBatch = await guestStates.waitForScores(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.final === false &&
+      state.batch_sequence === initialScoreBatch.batch_sequence + 1,
+    'post-restart scheduled score cadence',
+    35_000,
+  );
+  if (Date.parse(nextScoreBatch.computed_at) - Date.parse(initialScoreBatch.computed_at) < 29_500) {
+    throw new Error('Nakama restart advanced the 30-second score cadence early');
+  }
+
+  const hunterAim = aimAvatarAt(initialHunterAvatar, hiderAvatar);
   await guestSocket.sendMatchState(
     created.match_id,
     10,
     JSON.stringify({
-      aim_slot: hiderPlayerState.hiding_slot,
       command_id: 'forged-hit',
       hit: true,
+      target_player_id: process.env.SMOKE_PLAYER_ID,
     }),
   );
   const forgedHit = await guestStates.waitForFireResult(
@@ -365,15 +626,66 @@ try {
     throw new Error('authoritative match accepted a client-declared hit');
   }
 
-  await returningHostSocket.sendMatchState(
+  await guestSocket.sendMatchState(
+    created.match_id,
+    14,
+    JSON.stringify({
+      accent_b: 0.9,
+      accent_g: 0.2,
+      accent_r: 0.1,
+      body_b: 0.25,
+      body_g: 0.25,
+      body_r: 0.25,
+      pitch: hunterAim.pitch,
+      pose: 'aiming',
+      position_x: initialHunterAvatar.position_x,
+      position_y: initialHunterAvatar.position_y,
+      position_z: initialHunterAvatar.position_z,
+      yaw: hunterAim.yaw,
+    }),
+  );
+  await reconnectedHiderStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_TWO_ID &&
+      state.sequence === 2,
+    'recent Hunter avatar state',
+  );
+  await reconnectedHiderSocket.sendMatchState(
+    created.match_id,
+    14,
+    JSON.stringify({
+      accent_b: 0.8,
+      accent_g: 0.7,
+      accent_r: 0.6,
+      body_b: 0.4,
+      body_g: 0.3,
+      body_r: 0.2,
+      pitch: 0,
+      pose: 'crouching',
+      position_x: smokeHiderAnchor.x,
+      position_y: smokeHiderAnchor.y,
+      position_z: smokeHiderAnchor.z,
+      yaw: initialHiderAvatar.yaw,
+    }),
+  );
+  await guestStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_ID &&
+      state.sequence === 3,
+    'recent Hider avatar state',
+  );
+
+  await reconnectedHiderSocket.sendMatchState(
     created.match_id,
     10,
     JSON.stringify({
-      aim_slot: hiderPlayerState.hiding_slot,
       command_id: 'hider-forged-shot',
+      target_player_id: process.env.SMOKE_PLAYER_ID,
     }),
   );
-  const hiderFire = await returningHostStates.waitForFireResult(
+  const hiderFire = await reconnectedHiderStates.waitForFireResult(
     (result) => result.command_id === 'hider-forged-shot',
     'Hider fire rejection',
   );
@@ -385,8 +697,10 @@ try {
     created.match_id,
     10,
     JSON.stringify({
-      aim_slot: hiderPlayerState.hiding_slot,
       command_id: 'authoritative-hit',
+      target_player_id: process.env.SMOKE_PLAYER_ID,
+      aim_yaw: hunterAim.yaw,
+      aim_pitch: hunterAim.pitch,
     }),
   );
   const authoritativeHit = await guestStates.waitForFireResult(
@@ -397,23 +711,138 @@ try {
     (state) => state.round_id === started.round.id && state.sequence === 1,
     'authoritative discovery event',
   );
-  const terminalRound = await guestStates.waitForRound(
-    (round) => round.id === started.round.id && round.status === 'terminal',
-    'terminal Casual round',
+  const answerCheck = await guestStates.waitForRound(
+    (round) => round.id === started.round.id && round.status === 'answer_check',
+    'Casual Answer Check',
   );
   if (
     !authoritativeHit.accepted ||
     !authoritativeHit.hit ||
     authoritativeHit.hider_player_id !== process.env.SMOKE_PLAYER_ID ||
     discovery.hider_player_id !== process.env.SMOKE_PLAYER_ID ||
-    terminalRound.winning_side !== 'hunters' ||
-    terminalRound.completion_reason !== 'all_hiders_found' ||
-    terminalRound.hiders_remaining !== 0
+    'aim_slot' in authoritativeHit ||
+    'aim_slot' in discovery ||
+    answerCheck.winning_side !== 'hunters' ||
+    answerCheck.completion_reason !== 'all_hiders_found' ||
+    answerCheck.hiders_remaining !== 0
   ) {
     throw new Error('Casual round did not resolve an authoritative Hunter win');
   }
+  const answerCheckHunter = await guestStates.waitForSpectator(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.phase === 'answer_check' &&
+      state.eligible === false,
+    'original Hunter Answer Check control state',
+  );
+  if (
+    answerCheckHunter.reason !== 'answer_check_hunter' ||
+    answerCheckHunter.players.length !== 0
+  ) {
+    throw new Error('original Hunter was forced into spectator mode during Answer Check');
+  }
+  const answerCheckHider = await reconnectedHiderStates.waitForSpectator(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.phase === 'answer_check' &&
+      state.eligible === true,
+    'original Hider Answer Check spectator state',
+  );
+  if (
+    answerCheckHider.reason !== 'answer_check_hider' ||
+    answerCheckHider.players.length !== 2 ||
+    answerCheckHider.visible_player_name_ids.length !== 2 ||
+    !answerCheckHider.players.some(
+      (player) =>
+        player.player_id === process.env.SMOKE_PLAYER_ID && player.display_name === 'smoke-user',
+    )
+  ) {
+    throw new Error('original Hider did not receive full Answer Check spectator state');
+  }
+  await guestSocket.sendMatchState(
+    created.match_id,
+    14,
+    JSON.stringify({
+      accent_b: 0.9,
+      accent_g: 0.2,
+      accent_r: 0.1,
+      body_b: 0.25,
+      body_g: 0.25,
+      body_r: 0.25,
+      pitch: hunterAim.pitch,
+      pose: 'running',
+      position_x: initialHunterAvatar.position_x,
+      position_y: initialHunterAvatar.position_y,
+      position_z: initialHunterAvatar.position_z,
+      yaw: hunterAim.yaw,
+    }),
+  );
+  const movingAnswerCheckHunter = await reconnectedHiderStates.waitForAvatar(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.player_id === process.env.SMOKE_PLAYER_TWO_ID &&
+      state.sequence === 3,
+    'moving original Hunter during Answer Check',
+  );
+  if (
+    movingAnswerCheckHunter.role !== 'hunter' ||
+    movingAnswerCheckHunter.status !== 'active' ||
+    movingAnswerCheckHunter.position_x !== initialHunterAvatar.position_x ||
+    movingAnswerCheckHunter.pitch !== hunterAim.pitch
+  ) {
+    throw new Error('Answer Check did not relay the controllable original Hunter');
+  }
+  const reveal = await guestStates.waitForAnswerCheck(
+    (state) => state.round_id === started.round.id && state.reveals.length === 1,
+    'Answer Check reveal',
+  );
+  if (
+    reveal.reveals[0].player_id !== process.env.SMOKE_PLAYER_ID ||
+    reveal.reveals[0].display_name !== 'smoke-user' ||
+    reveal.reveals[0].role !== 'hider' ||
+    reveal.reveals[0].status !== 'found' ||
+    reveal.reveals[0].avatar_state_available !== true ||
+    reveal.reveals[0].position_x !== hiderAvatar.position_x ||
+    reveal.reveals[0].pose !== hiderAvatar.pose ||
+    'slot' in reveal.reveals[0]
+  ) {
+    throw new Error('Answer Check did not reveal the authoritative Hider');
+  }
+  await guestSocket.sendMatchState(
+    created.match_id,
+    11,
+    JSON.stringify({
+      command_id: 'favorite-disguise',
+      target_hider_player_id: process.env.SMOKE_PLAYER_ID,
+    }),
+  );
+  const like = await guestStates.waitForLikeResult(
+    (state) => state.command_id === 'favorite-disguise',
+    'accepted Answer Check like',
+  );
+  if (!like.accepted || like.reason !== 'accepted') {
+    throw new Error('eligible Answer Check like was rejected');
+  }
+  await guestStates.waitForScores(
+    (state) =>
+      state.round_id === started.round.id &&
+      state.final === true &&
+      state.entries.some(
+        (entry) =>
+          entry.player_id === process.env.SMOKE_PLAYER_ID && entry.breakdown.disguise_likes === 100,
+      ),
+    'like-adjusted authoritative score',
+  );
+  const completedRound = await guestStates.waitForRound(
+    (round) => round.id === started.round.id && round.status === 'completed',
+    'durably completed Casual round',
+    30_000,
+  );
+  if (!completedRound.result_revision_id) {
+    throw new Error('completed round omitted its durable result revision ID');
+  }
 
-  returningHostSocket.disconnect(false);
+  reconnectedHiderSocket.disconnect(false);
   await guestStates.waitForLobby(
     (state) => state.id === created.lobby.id && state.members.length === 1,
     'round participant disconnect',
@@ -434,7 +863,11 @@ try {
       lobbyLifecycle: 'create_join_migrate_rejoin_nominate_configure_start_leave',
       hostMigration: 'disconnect',
       roundScaffolding: 'preparing',
-      casualRound: 'terminal_hunter_win',
+      casualRound: 'completed_hunter_win',
+      answerCheck: 'revealed_liked_scored',
+      reconnect: 'restored_authoritative_hider_within_60_seconds',
+      nakamaRestartRecovery: 'roles_avatar_reconnect_score_cadence_rehydrated',
+      avatarState: 'server_attributed_and_restored',
       clientDeclaredHitRejected: true,
       serverAssignedRoles: true,
       forgedRoleRejected,
@@ -446,6 +879,39 @@ try {
   hostSocket.disconnect(false);
   guestSocket.disconnect(false);
   returningHostSocket.disconnect(false);
+  reconnectedHiderSocket.disconnect(false);
+}
+
+function selectSmokeHiderAnchor(initialAvatar) {
+  const spawns = [
+    [-12.4, -7.4, -20, -9],
+    [5.7, -7.8, -20, 2],
+    [12.7, 11.6, -20, -9],
+    [-12.8, 9.8, -20, -10],
+    [19.2, 5.2, -20, -9],
+    [-19.1, 5.4, -20, -10],
+    [8.2, -18.7, -2, 20],
+    [-8.1, -18.4, -16, 9],
+  ];
+  const match = spawns.find(
+    ([spawnX, spawnZ]) =>
+      Math.abs(initialAvatar.position_x - spawnX) < 0.001 &&
+      Math.abs(initialAvatar.position_z - spawnZ) < 0.001,
+  );
+  if (!match) {
+    throw new Error('authoritative Hider spawn has no geometry-safe smoke anchor');
+  }
+  return { x: match[2], y: 0.05, z: match[3] };
+}
+
+function aimAvatarAt(hunter, target) {
+  const horizontalX = target.position_x - hunter.position_x;
+  const horizontalZ = target.position_z - hunter.position_z;
+  const horizontalDistance = Math.hypot(horizontalX, horizontalZ);
+  const verticalDistance = target.position_y + 0.95 - (hunter.position_y + 1.62);
+  const yaw = ((Math.atan2(horizontalX, horizontalZ) * 180) / Math.PI + 360) % 360;
+  const pitch = (-Math.atan2(verticalDistance, horizontalDistance) * 180) / Math.PI;
+  return { pitch, yaw };
 }
 
 function createBridgeAssertion({ authSessionId, bridgeKey, playerId }) {
@@ -501,6 +967,42 @@ async function lobbyRpc(socket, id, payload) {
   return JSON.parse(result.payload);
 }
 
+async function waitForReconnectReservation(socket, lobbyId) {
+  const deadline = Date.now() + 5_000;
+  let latestError;
+  while (Date.now() < deadline) {
+    try {
+      return await lobbyRpc(socket, 'match.reconnect', { lobby_id: lobbyId });
+    } catch (error) {
+      latestError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  throw latestError ?? new Error('Timed out waiting for reconnect reservation');
+}
+
+async function restartNakama() {
+  const containerId = process.env.SMOKE_NAKAMA_CONTAINER_ID;
+  if (!/^[0-9a-f]{12,64}$/.test(containerId)) {
+    throw new Error('Nakama restart requires a validated container ID');
+  }
+  await execFileAsync('docker', ['restart', '--time', '10', containerId], {
+    timeout: 30_000,
+  });
+  const deadline = Date.now() + 30_000;
+  let latestError;
+  while (Date.now() < deadline) {
+    try {
+      await client.getAccount(session);
+      return;
+    } catch (error) {
+      latestError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  throw latestError ?? new Error('Nakama did not recover after process restart');
+}
+
 function assertLobby(response, expected) {
   if (
     response?.lobby?.current_host_player_id !== expected.host ||
@@ -518,7 +1020,7 @@ function assertLobby(response, expected) {
 }
 
 function trackMatchStates(socket) {
-  const latest = new Map();
+  const historyByOpcode = new Map();
   const waiters = new Map([
     [1, new Set()],
     [2, new Set()],
@@ -526,6 +1028,12 @@ function trackMatchStates(socket) {
     [4, new Set()],
     [5, new Set()],
     [6, new Set()],
+    [7, new Set()],
+    [8, new Set()],
+    [9, new Set()],
+    [12, new Set()],
+    [13, new Set()],
+    [15, new Set()],
   ]);
   socket.onmatchdata = (message) => {
     const opcode = Number(message.op_code);
@@ -534,7 +1042,12 @@ function trackMatchStates(socket) {
       return;
     }
     const state = JSON.parse(new TextDecoder().decode(message.data));
-    latest.set(opcode, state);
+    const history = historyByOpcode.get(opcode) ?? [];
+    history.push(state);
+    if (history.length > 32) {
+      history.shift();
+    }
+    historyByOpcode.set(opcode, history);
     for (const waiter of opcodeWaiters) {
       if (waiter.predicate(state)) {
         clearTimeout(waiter.timeout);
@@ -544,9 +1057,12 @@ function trackMatchStates(socket) {
     }
   };
   function waitFor(opcode, predicate, description, timeoutMs = 10_000) {
-    const current = latest.get(opcode);
-    if (current && predicate(current)) {
-      return Promise.resolve(current);
+    const history = historyByOpcode.get(opcode) ?? [];
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const current = history[index];
+      if (predicate(current)) {
+        return Promise.resolve(current);
+      }
     }
     return new Promise((resolve, reject) => {
       const opcodeWaiters = waiters.get(opcode);
@@ -569,5 +1085,12 @@ function trackMatchStates(socket) {
     waitForDiscovery: (predicate, description) => waitFor(4, predicate, description),
     waitForPlayerState: (predicate, description) => waitFor(5, predicate, description),
     waitForFireResult: (predicate, description) => waitFor(6, predicate, description),
+    waitForSpectator: (predicate, description) => waitFor(7, predicate, description),
+    waitForScores: (predicate, description, timeoutMs) =>
+      waitFor(8, predicate, description, timeoutMs),
+    waitForAnswerCheck: (predicate, description) => waitFor(9, predicate, description),
+    waitForLikeResult: (predicate, description) => waitFor(12, predicate, description),
+    waitForReconnect: (predicate, description) => waitFor(13, predicate, description),
+    waitForAvatar: (predicate, description) => waitFor(15, predicate, description),
   };
 }

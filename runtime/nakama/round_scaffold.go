@@ -14,7 +14,7 @@ import (
 
 const (
 	gameServerBuildVersion = "hive-chameleon-m4-dev"
-	matchProtocolVersion   = "m4-v1"
+	matchProtocolVersion   = "m4-v2"
 	resultSchemaVersion    = "match-result-1"
 	scoringRuleVersion     = "scoring-1"
 )
@@ -22,24 +22,31 @@ const (
 type roundRoleAssignment struct {
 	RoundID         string `json:"round_id"`
 	PlayerID        string `json:"player_id"`
+	DisplayName     string `json:"display_name,omitempty"`
 	Role            string `json:"role"`
 	HunterVolunteer bool   `json:"hunter_volunteer"`
-	HidingSlot      int    `json:"hiding_slot,omitempty"`
 }
 
 type roundSnapshot struct {
 	ID                       string                `json:"id"`
 	SequenceNumber           int                   `json:"sequence_number"`
 	Mode                     string                `json:"mode"`
+	MapVersionID             string                `json:"map_version_id"`
+	MapContentVersion        string                `json:"map_content_version"`
+	GameServerBuildVersion   string                `json:"game_server_build_version"`
+	ProtocolVersion          string                `json:"protocol_version"`
+	AuthorityGeometryVersion string                `json:"authority_geometry_version"`
+	AuthorityGeometryDigest  string                `json:"authority_geometry_digest"`
 	Status                   string                `json:"status"`
 	StartedAt                time.Time             `json:"started_at"`
+	EndedAt                  time.Time             `json:"-"`
 	PhaseDeadline            *time.Time            `json:"phase_deadline,omitempty"`
-	TargetSlotCount          int                   `json:"target_slot_count"`
 	HidersTotal              int                   `json:"hiders_total"`
 	HidersRemaining          int                   `json:"hiders_remaining"`
 	DiscoveredHiderPlayerIDs []string              `json:"discovered_hider_player_ids"`
 	WinningSide              string                `json:"winning_side,omitempty"`
 	CompletionReason         string                `json:"completion_reason,omitempty"`
+	ResultRevisionID         string                `json:"result_revision_id,omitempty"`
 	HidingDurationSeconds    int                   `json:"-"`
 	HuntingDurationSeconds   int                   `json:"-"`
 	ShellLimit               int                   `json:"-"`
@@ -51,15 +58,21 @@ type roundPublicSnapshot struct {
 	ID                       string     `json:"id"`
 	SequenceNumber           int        `json:"sequence_number"`
 	Mode                     string     `json:"mode"`
+	MapVersionID             string     `json:"map_version_id"`
+	MapContentVersion        string     `json:"map_content_version"`
+	GameServerBuildVersion   string     `json:"game_server_build_version"`
+	ProtocolVersion          string     `json:"protocol_version"`
+	AuthorityGeometryVersion string     `json:"authority_geometry_version"`
+	AuthorityGeometryDigest  string     `json:"authority_geometry_digest"`
 	Status                   string     `json:"status"`
 	StartedAt                time.Time  `json:"started_at"`
 	PhaseDeadline            *time.Time `json:"phase_deadline,omitempty"`
-	TargetSlotCount          int        `json:"target_slot_count"`
 	HidersTotal              int        `json:"hiders_total"`
 	HidersRemaining          int        `json:"hiders_remaining"`
 	DiscoveredHiderPlayerIDs []string   `json:"discovered_hider_player_ids"`
 	WinningSide              string     `json:"winning_side,omitempty"`
 	CompletionReason         string     `json:"completion_reason,omitempty"`
+	ResultRevisionID         string     `json:"result_revision_id,omitempty"`
 }
 
 func (r roundSnapshot) Public() roundPublicSnapshot {
@@ -67,15 +80,21 @@ func (r roundSnapshot) Public() roundPublicSnapshot {
 		ID:                       r.ID,
 		SequenceNumber:           r.SequenceNumber,
 		Mode:                     r.Mode,
+		MapVersionID:             r.MapVersionID,
+		MapContentVersion:        r.MapContentVersion,
+		GameServerBuildVersion:   r.GameServerBuildVersion,
+		ProtocolVersion:          r.ProtocolVersion,
+		AuthorityGeometryVersion: r.AuthorityGeometryVersion,
+		AuthorityGeometryDigest:  r.AuthorityGeometryDigest,
 		Status:                   r.Status,
 		StartedAt:                r.StartedAt,
 		PhaseDeadline:            r.PhaseDeadline,
-		TargetSlotCount:          r.TargetSlotCount,
 		HidersTotal:              r.HidersTotal,
 		HidersRemaining:          r.HidersRemaining,
 		DiscoveredHiderPlayerIDs: append([]string(nil), r.DiscoveredHiderPlayerIDs...),
 		WinningSide:              r.WinningSide,
 		CompletionReason:         r.CompletionReason,
+		ResultRevisionID:         r.ResultRevisionID,
 	}
 }
 
@@ -194,27 +213,13 @@ func (s *postgresLobbyStore) StartRound(
 			"select a published map version before starting",
 		)
 	}
-	var mapStatus string
-	if err := tx.QueryRowContext(
+	mapContract, err := loadOfficialRoundMapContract(
 		ctx,
-		`SELECT status::text
-		   FROM content.map_version
-		  WHERE id = $1`,
+		tx,
 		*configuration.MapVersionID,
-	).Scan(&mapStatus); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return lobbySnapshot{}, roundSnapshot{}, newLobbyProblem(
-				grpcFailedPrecondition,
-				"selected map version is unavailable",
-			)
-		}
-		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("load selected map version: %w", err)
-	}
-	if mapStatus != "published" {
-		return lobbySnapshot{}, roundSnapshot{}, newLobbyProblem(
-			grpcFailedPrecondition,
-			"selected map version is not published",
-		)
+	)
+	if err != nil {
+		return lobbySnapshot{}, roundSnapshot{}, err
 	}
 	if active, err := activeRoundExists(ctx, tx, request.LobbyID); err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, err
@@ -227,12 +232,16 @@ func (s *postgresLobbyStore) StartRound(
 
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT player_id::text, hunter_nominated
-		   FROM game.lobby_membership
-		  WHERE lobby_id = $1
-		    AND left_at IS NULL
-		  ORDER BY joined_at, id
-		  FOR UPDATE`,
+		`SELECT membership.player_id::text,
+		        membership.hunter_nominated,
+		        player.hive_username
+		   FROM game.lobby_membership AS membership
+		   JOIN identity.player AS player
+		     ON player.id = membership.player_id
+		  WHERE membership.lobby_id = $1
+		    AND membership.left_at IS NULL
+		  ORDER BY membership.joined_at, membership.id
+		  FOR UPDATE OF membership`,
 		request.LobbyID,
 	)
 	if err != nil {
@@ -240,14 +249,17 @@ func (s *postgresLobbyStore) StartRound(
 	}
 	members := make([]string, 0, lobbyMaximumPlayers)
 	nominations := make(map[string]bool, lobbyMaximumPlayers)
+	displayNames := make(map[string]string, lobbyMaximumPlayers)
 	for rows.Next() {
 		var memberID string
 		var hunterNominated bool
-		if err := rows.Scan(&memberID, &hunterNominated); err != nil {
+		var displayName string
+		if err := rows.Scan(&memberID, &hunterNominated, &displayName); err != nil {
 			_ = rows.Close()
 			return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("scan round participant: %w", err)
 		}
 		members = append(members, memberID)
+		displayNames[memberID] = displayName
 		if hunterNominated {
 			nominations[memberID] = true
 		}
@@ -273,17 +285,6 @@ func (s *postgresLobbyStore) StartRound(
 	if err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("assign authoritative round roles: %w", err)
 	}
-	targetSlotCount := 0
-	if configuration.Mode == "casual" {
-		targetSlotCount, err = assignCasualHidingSlots(assignments, rand.Reader)
-		if err != nil {
-			return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf(
-				"assign authoritative hiding slots: %w",
-				err,
-			)
-		}
-	}
-
 	var sequenceNumber int
 	if err := tx.QueryRowContext(
 		ctx,
@@ -301,6 +302,7 @@ func (s *postgresLobbyStore) StartRound(
 	}
 	for index := range assignments {
 		assignments[index].RoundID = roundID
+		assignments[index].DisplayName = displayNames[assignments[index].PlayerID]
 	}
 	if _, err := tx.ExecContext(
 		ctx,
@@ -326,8 +328,8 @@ func (s *postgresLobbyStore) StartRound(
 		configuration.ReloadDurationMS,
 		configuration.AutoStartEnabled,
 		configuration.AutoStartThreshold,
-		gameServerBuildVersion,
-		matchProtocolVersion,
+		mapContract.GameServerBuildVersion,
+		mapContract.ProtocolVersion,
 		resultSchemaVersion,
 		scoringRuleVersion,
 		startedAt,
@@ -365,9 +367,14 @@ func (s *postgresLobbyStore) StartRound(
 		ID:                       roundID,
 		SequenceNumber:           sequenceNumber,
 		Mode:                     configuration.Mode,
+		MapVersionID:             *configuration.MapVersionID,
+		MapContentVersion:        mapContract.ContentVersion,
+		GameServerBuildVersion:   mapContract.GameServerBuildVersion,
+		ProtocolVersion:          mapContract.ProtocolVersion,
+		AuthorityGeometryVersion: officialAuthorityGeometryVersion,
+		AuthorityGeometryDigest:  officialAuthorityGeometryDigest,
 		Status:                   "preparing",
 		StartedAt:                startedAt,
-		TargetSlotCount:          targetSlotCount,
 		HidersTotal:              len(assignments) - int(configuration.HunterCount),
 		HidersRemaining:          len(assignments) - int(configuration.HunterCount),
 		DiscoveredHiderPlayerIDs: make([]string, 0),
@@ -376,6 +383,39 @@ func (s *postgresLobbyStore) StartRound(
 		ShellLimit:               configuration.ShellLimit,
 		ReloadDurationMS:         configuration.ReloadDurationMS,
 		RoleAssignments:          assignments,
+	}
+	authoritativeRound, err := newAuthoritativeRoundState(&round)
+	if err != nil {
+		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf(
+			"initialize durable authoritative round: %w",
+			err,
+		)
+	}
+	initialState := &persistentLobbyState{
+		Round:                 &round,
+		AuthoritativeRound:    authoritativeRound,
+		AvatarStates:          initializeRoundAvatarStates(&round, authoritativeRound),
+		ReconnectReservations: make(map[string]roundReconnectReservation),
+	}
+	if _, err := initialState.initializeScoreCache(round.StartedAt); err != nil {
+		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf(
+			"initialize durable score checkpoint: %w",
+			err,
+		)
+	}
+	checkpoint, err := encodeLiveRoundCheckpoint(initialState)
+	if err != nil {
+		return lobbySnapshot{}, roundSnapshot{}, err
+	}
+	if err := persistLiveRoundCheckpoint(
+		ctx,
+		tx,
+		round.ID,
+		checkpoint,
+		time.Time{},
+		round.StartedAt,
+	); err != nil {
+		return lobbySnapshot{}, roundSnapshot{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, fmt.Errorf("commit round start: %w", err)
@@ -390,19 +430,33 @@ func (s *postgresLobbyStore) ActiveRound(
 	var round roundSnapshot
 	if err := s.database.QueryRowContext(
 		ctx,
-		`SELECT id::text, sequence_number, mode::text, status::text, started_at,
+		`SELECT round.id::text,
+		        round.sequence_number,
+		        round.mode::text,
+		        round.map_version_id::text,
+		        version.version_number,
+		        round.game_server_build_version,
+		        round.protocol_version,
+		        round.status::text,
+		        round.started_at,
 		        hiding_duration_seconds, hunting_duration_seconds, shell_limit,
 		        reload_duration_ms
-		   FROM game.game_round
-		  WHERE lobby_id = $1
-		    AND status NOT IN ('completed', 'aborted')
-		  ORDER BY sequence_number DESC
+		   FROM game.game_round AS round
+		   JOIN content.map_version AS version
+		     ON version.id = round.map_version_id
+		  WHERE round.lobby_id = $1
+		    AND round.status NOT IN ('completed', 'aborted')
+		  ORDER BY round.sequence_number DESC
 		  LIMIT 1`,
 		lobbyID,
 	).Scan(
 		&round.ID,
 		&round.SequenceNumber,
 		&round.Mode,
+		&round.MapVersionID,
+		&round.MapContentVersion,
+		&round.GameServerBuildVersion,
+		&round.ProtocolVersion,
 		&round.Status,
 		&round.StartedAt,
 		&round.HidingDurationSeconds,
@@ -417,6 +471,21 @@ func (s *postgresLobbyStore) ActiveRound(
 	}
 	round.RoleAssignments = make([]roundRoleAssignment, 0)
 	round.DiscoveredHiderPlayerIDs = make([]string, 0)
+	round.AuthorityGeometryVersion = officialAuthorityGeometryVersion
+	round.AuthorityGeometryDigest = officialAuthorityGeometryDigest
+	mapContract, err := loadOfficialRoundMapContract(
+		ctx,
+		s.database,
+		round.MapVersionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("validate active round map contract: %w", err)
+	}
+	if mapContract.ContentVersion != round.MapContentVersion ||
+		mapContract.GameServerBuildVersion != round.GameServerBuildVersion ||
+		mapContract.ProtocolVersion != round.ProtocolVersion {
+		return nil, errors.New("active round map compatibility contract changed")
+	}
 	return &round, nil
 }
 
@@ -425,7 +494,7 @@ func (s *postgresLobbyStore) UpdateRoundPhase(
 	roundID string,
 	status string,
 ) error {
-	if status != "hiding" && status != "hunting" {
+	if status != "hiding" && status != "hunting" && status != "answer_check" {
 		return fmt.Errorf("unsupported nonterminal round phase %q", status)
 	}
 	result, err := s.database.ExecContext(
@@ -445,6 +514,18 @@ func (s *postgresLobbyStore) UpdateRoundPhase(
 		return fmt.Errorf("read updated round phase count: %w", err)
 	}
 	if updated != 1 {
+		if status == "answer_check" {
+			var current string
+			if queryErr := s.database.QueryRowContext(
+				ctx,
+				`SELECT status::text
+				   FROM game.game_round
+				  WHERE id = $1`,
+				roundID,
+			).Scan(&current); queryErr == nil && current == "completed" {
+				return nil
+			}
+		}
 		return errors.New("active round is unavailable for phase update")
 	}
 	return nil

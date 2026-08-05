@@ -14,13 +14,21 @@ import (
 )
 
 const (
-	lobbyDatabaseURLEnv = "HC_NAKAMA_DATABASE_URL"
-	lobbyPasswordCost   = 12
+	lobbyDatabaseURLEnv              = "HC_NAKAMA_DATABASE_URL"
+	lobbyPasswordCost                = 12
+	defaultOfficialMapSlug           = "prism-foundry"
+	defaultOfficialMapContentVersion = "m4-4"
 )
 
 type lobbyQueryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type officialRoundMapContract struct {
+	ContentVersion         string
+	GameServerBuildVersion string
+	ProtocolVersion        string
 }
 
 type postgresLobbyStore struct {
@@ -120,6 +128,10 @@ func (s *postgresLobbyStore) Create(
 	if err != nil {
 		return lobbySnapshot{}, err
 	}
+	defaultMapVersionID, err := loadDefaultOfficialMapVersionID(ctx, tx)
+	if err != nil {
+		return lobbySnapshot{}, err
+	}
 
 	var storedPassword any
 	if request.Visibility == "private" {
@@ -176,11 +188,12 @@ func (s *postgresLobbyStore) Create(
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO game.lobby_configuration
-		  (lobby_id, mode, hunter_count, hiding_duration_seconds, hunting_duration_seconds,
-		   taunt_enabled, taunt_interval_seconds, shell_limit, reload_duration_ms,
-		   auto_start_enabled, auto_start_threshold, updated_at)
-		 VALUES ($1, 'casual', 1, 60, 180, true, 30, 6, 2000, true, $2, $3)`,
+		  (lobby_id, mode, map_version_id, hunter_count, hiding_duration_seconds,
+		   hunting_duration_seconds, taunt_enabled, taunt_interval_seconds, shell_limit,
+		   reload_duration_ms, auto_start_enabled, auto_start_threshold, updated_at)
+		 VALUES ($1, 'casual', $2, 1, 60, 180, true, 30, 6, 2000, true, $3, $4)`,
 		lobbyID,
+		nullableString(defaultMapVersionID),
 		autoStartThreshold,
 		now,
 	); err != nil {
@@ -195,6 +208,110 @@ func (s *postgresLobbyStore) Create(
 		return lobbySnapshot{}, fmt.Errorf("commit lobby creation: %w", err)
 	}
 	return snapshot, nil
+}
+
+func loadDefaultOfficialMapVersionID(
+	ctx context.Context,
+	queryer lobbyQueryer,
+) (*string, error) {
+	var mapVersionID string
+	if err := queryer.QueryRowContext(
+		ctx,
+		`SELECT version.id::text
+		   FROM content.map AS map_definition
+		   JOIN content.map_version AS version
+		     ON version.map_id = map_definition.id
+		  WHERE map_definition.slug = $1
+		    AND map_definition.origin = 'official'
+		    AND map_definition.lifecycle = 'published'
+		    AND map_definition.creator_player_id IS NULL
+		    AND version.version_number = $2
+		    AND version.status = 'published'
+		    AND (
+		          SELECT count(*)
+		            FROM content.map_distribution AS distribution
+		           WHERE distribution.map_version_id = version.id
+		             AND distribution.platform IN ('desktop', 'web')
+		             AND distribution.state = 'available'
+		             AND distribution.required_game_build_version = $3
+		             AND distribution.required_protocol_version = $4
+		             AND distribution.published_at IS NOT NULL
+		        ) = 2
+		  LIMIT 1`,
+		defaultOfficialMapSlug,
+		defaultOfficialMapContentVersion,
+		gameServerBuildVersion,
+		matchProtocolVersion,
+	).Scan(&mapVersionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load default official map version: %w", err)
+	}
+	return &mapVersionID, nil
+}
+
+func loadOfficialRoundMapContract(
+	ctx context.Context,
+	queryer lobbyQueryer,
+	mapVersionID string,
+) (officialRoundMapContract, error) {
+	var contract officialRoundMapContract
+	if err := queryer.QueryRowContext(
+		ctx,
+		`SELECT version.version_number,
+		        min(distribution.required_game_build_version),
+		        min(distribution.required_protocol_version)
+		   FROM content.map AS map_definition
+		   JOIN content.map_version AS version
+		     ON version.map_id = map_definition.id
+		   JOIN content.map_distribution AS distribution
+		     ON distribution.map_version_id = version.id
+		  WHERE version.id = $1
+		    AND map_definition.slug = $2
+		    AND map_definition.origin = 'official'
+		    AND map_definition.lifecycle = 'published'
+		    AND map_definition.creator_player_id IS NULL
+		    AND version.version_number = $3
+		    AND version.status = 'published'
+		    AND distribution.platform IN ('desktop', 'web')
+		    AND distribution.state = 'available'
+		    AND distribution.required_protocol_version IS NOT NULL
+		    AND distribution.published_at IS NOT NULL
+		  GROUP BY version.version_number
+		 HAVING count(*) = 2
+		    AND count(DISTINCT distribution.platform) = 2
+		    AND min(distribution.required_game_build_version)
+		        = max(distribution.required_game_build_version)
+		    AND min(distribution.required_protocol_version)
+		        = max(distribution.required_protocol_version)`,
+		mapVersionID,
+		defaultOfficialMapSlug,
+		defaultOfficialMapContentVersion,
+	).Scan(
+		&contract.ContentVersion,
+		&contract.GameServerBuildVersion,
+		&contract.ProtocolVersion,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return officialRoundMapContract{}, newLobbyProblem(
+				grpcFailedPrecondition,
+				"the selected map is not one compatible official Chroma District release",
+			)
+		}
+		return officialRoundMapContract{}, fmt.Errorf(
+			"validate official round map version: %w",
+			err,
+		)
+	}
+	if contract.GameServerBuildVersion != gameServerBuildVersion ||
+		contract.ProtocolVersion != matchProtocolVersion {
+		return officialRoundMapContract{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"the official map distribution is incompatible with this game server",
+		)
+	}
+	return contract, nil
 }
 
 func (s *postgresLobbyStore) Join(
@@ -278,15 +395,6 @@ func (s *postgresLobbyStore) Join(
 	if activeMembers >= int(maxPlayers) {
 		return lobbySnapshot{}, newLobbyProblem(grpcFailedPrecondition, "lobby is full")
 	}
-	if active, err := activeRoundExists(ctx, tx, request.LobbyID); err != nil {
-		return lobbySnapshot{}, err
-	} else if active {
-		return lobbySnapshot{}, newLobbyProblem(
-			grpcFailedPrecondition,
-			"cannot join while a round is active",
-		)
-	}
-
 	membershipID, err := newUUIDV7(s.now().UTC())
 	if err != nil {
 		return lobbySnapshot{}, err
@@ -387,6 +495,19 @@ func (s *postgresLobbyStore) UpdateConfiguration(
 	}
 	next, err := applyConfigurationPatch(current, request, maxPlayers)
 	if err != nil {
+		return lobbySnapshot{}, err
+	}
+	if next.MapVersionID == nil {
+		return lobbySnapshot{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"the official Chroma District map is required",
+		)
+	}
+	if _, err := loadOfficialRoundMapContract(
+		ctx,
+		tx,
+		*next.MapVersionID,
+	); err != nil {
 		return lobbySnapshot{}, err
 	}
 	now := s.now().UTC()
@@ -618,6 +739,22 @@ func (s *postgresLobbyStore) Leave(
 		); err != nil {
 			return lobbySnapshot{}, false, fmt.Errorf("abort active round with empty lobby: %w", err)
 		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`DELETE FROM game.round_live_checkpoint
+			  WHERE round_id IN (
+			        SELECT id
+			          FROM game.game_round
+			         WHERE lobby_id = $1
+			           AND status = 'aborted'
+			      )`,
+			lobbyID,
+		); err != nil {
+			return lobbySnapshot{}, false, fmt.Errorf(
+				"delete aborted round live checkpoint: %w",
+				err,
+			)
+		}
 	}
 
 	snapshot, err := loadLobbySnapshot(ctx, tx, lobbyID)
@@ -813,11 +950,16 @@ func loadLobbySnapshot(
 	snapshot.Members = make([]lobbyMemberSnapshot, 0, snapshot.MaxPlayers)
 	rows, err := queryer.QueryContext(
 		ctx,
-		`SELECT player_id::text, joined_at, hunter_nominated
-		   FROM game.lobby_membership
-		  WHERE lobby_id = $1
-		    AND left_at IS NULL
-		  ORDER BY joined_at, id`,
+		`SELECT membership.player_id::text,
+		        player.hive_username,
+		        membership.joined_at,
+		        membership.hunter_nominated
+		   FROM game.lobby_membership AS membership
+		   JOIN identity.player AS player
+		     ON player.id = membership.player_id
+		  WHERE membership.lobby_id = $1
+		    AND membership.left_at IS NULL
+		  ORDER BY membership.joined_at, membership.id`,
 		lobbyID,
 	)
 	if err != nil {
@@ -829,6 +971,7 @@ func loadLobbySnapshot(
 		var hunterNominated bool
 		if err := rows.Scan(
 			&member.PlayerID,
+			&member.DisplayName,
 			&member.JoinedAt,
 			&hunterNominated,
 		); err != nil {

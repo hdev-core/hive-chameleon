@@ -74,6 +74,10 @@ type leaveLobbyRequest struct {
 	LobbyID string `json:"lobby_id"`
 }
 
+type matchReconnectRequest struct {
+	LobbyID string `json:"lobby_id"`
+}
+
 type updateLobbyConfigurationRequest struct {
 	LobbyID                string  `json:"lobby_id"`
 	ExpectedLobbyVersion   int64   `json:"expected_lobby_version"`
@@ -102,8 +106,9 @@ type nominateHunterRequest struct {
 }
 
 type lobbyMemberSnapshot struct {
-	PlayerID string    `json:"player_id"`
-	JoinedAt time.Time `json:"joined_at"`
+	PlayerID    string    `json:"player_id"`
+	DisplayName string    `json:"display_name"`
+	JoinedAt    time.Time `json:"joined_at"`
 }
 
 type lobbyConfigurationSnapshot struct {
@@ -136,10 +141,11 @@ type lobbySnapshot struct {
 }
 
 type lobbyRPCResponse struct {
-	MatchID       string               `json:"match_id,omitempty"`
-	Lobby         lobbySnapshot        `json:"lobby"`
-	StartAccepted bool                 `json:"start_accepted,omitempty"`
-	Round         *roundPublicSnapshot `json:"round,omitempty"`
+	MatchID       string                  `json:"match_id,omitempty"`
+	Lobby         lobbySnapshot           `json:"lobby"`
+	StartAccepted bool                    `json:"start_accepted,omitempty"`
+	Round         *roundPublicSnapshot    `json:"round,omitempty"`
+	Reconnect     *roundReconnectSnapshot `json:"reconnect,omitempty"`
 }
 
 type lobbyStore interface {
@@ -163,7 +169,20 @@ type lobbyStore interface {
 		startLobbyRequest,
 	) (lobbySnapshot, roundSnapshot, error)
 	ActiveRound(context.Context, string) (*roundSnapshot, error)
+	LoadLiveRoundCheckpoint(context.Context, string) ([]byte, time.Time, error)
+	SaveLiveRoundCheckpoint(
+		context.Context,
+		string,
+		[]byte,
+		time.Time,
+		time.Time,
+	) error
+	DeleteLiveRoundCheckpoint(context.Context, string) error
 	UpdateRoundPhase(context.Context, string, string) error
+	CommitTerminalResult(
+		context.Context,
+		terminalResultCommit,
+	) (terminalResultCommitOutcome, error)
 	Leave(
 		context.Context,
 		string,
