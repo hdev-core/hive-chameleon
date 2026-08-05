@@ -1,6 +1,4 @@
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
 using System;
-using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -10,449 +8,859 @@ namespace HiveChameleon.Realtime
     [DisallowMultipleComponent]
     public sealed class DevelopmentLobbyPanel : MonoBehaviour
     {
+        private enum MenuPage
+        {
+            Entry,
+            Home,
+            Lobby,
+        }
+
+        private static readonly string[] VisibilityOptions = { "OPEN", "PRIVATE" };
+        private static readonly string[] ModeOptions = { "CASUAL", "INFECTION" };
+
+        private readonly Color _background = new Color(0.018f, 0.027f, 0.043f);
+        private readonly Color _surface = new Color(0.035f, 0.051f, 0.074f, 0.98f);
+        private readonly Color _surfaceRaised = new Color(0.055f, 0.075f, 0.102f, 0.98f);
+        private readonly Color _line = new Color(0.14f, 0.19f, 0.25f, 0.9f);
+        private readonly Color _primary = new Color(0.22f, 0.91f, 0.76f);
+        private readonly Color _primaryDark = new Color(0.06f, 0.42f, 0.37f);
+        private readonly Color _accent = new Color(0.94f, 0.48f, 0.19f);
+        private readonly Color _text = new Color(0.94f, 0.97f, 1f);
+        private readonly Color _muted = new Color(0.57f, 0.65f, 0.73f);
+        private readonly Color _error = new Color(1f, 0.35f, 0.4f);
+
         private NakamaRealtimeConnection _connection;
         private CancellationTokenSource _lifetime;
-        private string _lobbyName = "Development Lobby";
-        private string _joinLobbyId = string.Empty;
-        private string _password = string.Empty;
-        private string _regionCode = "local";
-        private string _maxPlayers = "10";
-        private string _mapVersionId = string.Empty;
-        private string _status = "Connected. Create or join a lobby.";
-        private bool _nominated;
+        private Func<CancellationToken, Task> _requestConnection;
+        private MenuPage _page = MenuPage.Entry;
+        private string _playerId = string.Empty;
+        private string _status = string.Empty;
+        private bool _statusIsError;
+        private bool _entryConfigured;
+        private bool _entryInitialized;
         private bool _busy;
-        private bool _previewMode;
+        private bool _gameplayActive;
         private Vector2 _scrollPosition;
 
-        public void Initialize(
-            NakamaRealtimeConnection connection,
+        private string _createName = "Hive Match";
+        private string _createRegion = "local";
+        private string _createPassword = string.Empty;
+        private int _createCapacity = 8;
+        private int _visibilityIndex;
+        private string _joinLobbyId = string.Empty;
+        private string _joinPassword = string.Empty;
+
+        private long _loadedConfigurationVersion = -1;
+        private int _modeIndex;
+        private string _mapVersionId = string.Empty;
+        private int _hunterCount = 1;
+        private int _hidingSeconds = 60;
+        private int _huntingSeconds = 180;
+        private int _shellLimit = 6;
+        private int _reloadMilliseconds = 2000;
+
+        private bool _stylesReady;
+        private Texture2D _surfaceTexture;
+        private Texture2D _raisedTexture;
+        private Texture2D _primaryTexture;
+        private Texture2D _primaryHoverTexture;
+        private Texture2D _secondaryTexture;
+        private Texture2D _inputTexture;
+        private GUIStyle _panelStyle;
+        private GUIStyle _cardStyle;
+        private GUIStyle _brandStyle;
+        private GUIStyle _heroStyle;
+        private GUIStyle _pageTitleStyle;
+        private GUIStyle _sectionStyle;
+        private GUIStyle _bodyStyle;
+        private GUIStyle _mutedStyle;
+        private GUIStyle _captionStyle;
+        private GUIStyle _fieldLabelStyle;
+        private GUIStyle _inputStyle;
+        private GUIStyle _primaryButtonStyle;
+        private GUIStyle _secondaryButtonStyle;
+        private GUIStyle _dangerButtonStyle;
+        private GUIStyle _choiceStyle;
+        private GUIStyle _statusStyle;
+        private GUIStyle _rosterStyle;
+
+        public void InitializeEntry(
+            bool configured,
+            string status,
+            Func<CancellationToken, Task> requestConnection,
             CancellationToken shutdownToken
+        )
+        {
+            UnbindConnection();
+            _lifetime?.Cancel();
+            _lifetime?.Dispose();
+            _lifetime = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
+            _requestConnection = requestConnection;
+            _entryConfigured = configured;
+            _entryInitialized = true;
+            _gameplayActive = false;
+            _page = MenuPage.Entry;
+            SetStatus(status, !configured);
+            UnlockCursor();
+        }
+
+        public void BindConnection(
+            NakamaRealtimeConnection connection,
+            string playerId
         )
         {
             if (connection == null)
             {
                 throw new ArgumentNullException(nameof(connection));
             }
-            if (_connection != null)
-            {
-                _connection.LobbyStateChanged -= HandleLobbyStateChanged;
-                _connection.RoundStateChanged -= HandleRoundStateChanged;
-                _connection.RoundRoleAssigned -= HandleRoundRoleAssigned;
-                _connection.RoundPlayerStateChanged -= HandleRoundPlayerStateChanged;
-                _connection.RoundDiscoveryReceived -= HandleRoundDiscovery;
-                _connection.HunterFireResolved -= HandleHunterFireResolved;
-                _lifetime?.Dispose();
-            }
+
+            UnbindConnection();
             _connection = connection;
+            _playerId = playerId ?? string.Empty;
             _connection.LobbyStateChanged += HandleLobbyStateChanged;
             _connection.RoundStateChanged += HandleRoundStateChanged;
             _connection.RoundRoleAssigned += HandleRoundRoleAssigned;
-            _connection.RoundPlayerStateChanged += HandleRoundPlayerStateChanged;
-            _connection.RoundDiscoveryReceived += HandleRoundDiscovery;
-            _connection.HunterFireResolved += HandleHunterFireResolved;
-            _lifetime = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
-            _previewMode = false;
+
+            LobbySnapshot lobby = _connection.CurrentLobby;
+            if (lobby != null && !string.IsNullOrWhiteSpace(lobby.id) && !lobby.closed)
+            {
+                LoadConfiguration(lobby, true);
+                _page = MenuPage.Lobby;
+            }
+            else
+            {
+                _page = MenuPage.Home;
+            }
+            SetStatus("You're online.", false);
         }
 
-        public void InitializePreview()
+        public void SetGameplayActive(bool active)
         {
-            _previewMode = true;
-            _status = "Credential-free visual preview · realtime actions are disabled.";
+            _gameplayActive = active;
+            if (active)
+            {
+                return;
+            }
+
+            LobbySnapshot lobby = _connection?.CurrentLobby;
+            _page =
+                lobby != null && !string.IsNullOrWhiteSpace(lobby.id) && !lobby.closed
+                    ? MenuPage.Lobby
+                    : _connection?.State == RealtimeConnectionState.Connected
+                        ? MenuPage.Home
+                        : MenuPage.Entry;
+            UnlockCursor();
+        }
+
+        public void PrefillLobbyCode(string lobbyId)
+        {
+            if (LobbyMenuRules.IsUuidV7(lobbyId))
+            {
+                _joinLobbyId = lobbyId.Trim();
+            }
+        }
+
+        public void ClearConnection(string interruptedLobbyId)
+        {
+            UnbindConnection();
+            PrefillLobbyCode(interruptedLobbyId);
+            _gameplayActive = false;
+            _page = MenuPage.Entry;
+            UnlockCursor();
+        }
+
+        public void NotifyConnectionLost()
+        {
+            _gameplayActive = false;
+            _page = MenuPage.Entry;
+            SetStatus("The connection was interrupted. Reconnect to continue.", true);
+            UnlockCursor();
+        }
+
+        private void Update()
+        {
+            if (!_entryInitialized || _gameplayActive)
+            {
+                return;
+            }
+            if (
+                _connection != null
+                && _connection.State != RealtimeConnectionState.Connected
+                && _page != MenuPage.Entry
+                && !_busy
+            )
+            {
+                NotifyConnectionLost();
+            }
+            UnlockCursor();
         }
 
         private void OnGUI()
         {
-            if (_connection == null && !_previewMode)
+            if (!_entryInitialized || _gameplayActive)
             {
                 return;
             }
 
+            EnsureStyles();
             Matrix4x4 previousMatrix = GUI.matrix;
-            float uiScale = Mathf.Clamp(Screen.width / 960f, 1f, 2f);
-            GUI.matrix = Matrix4x4.Scale(new Vector3(uiScale, uiScale, 1f));
-            float logicalWidth = Screen.width / uiScale;
-            float logicalHeight = Screen.height / uiScale;
-            float panelWidth = Mathf.Clamp(logicalWidth - 24f, 280f, 520f);
-
-            GUILayout.BeginArea(
-                new Rect(12, 12, panelWidth, Mathf.Max(260, logicalHeight - 24))
+            float scale = Mathf.Clamp(
+                Mathf.Min(Screen.width / 1280f, Screen.height / 720f),
+                0.72f,
+                1.5f
             );
-            _scrollPosition = GUILayout.BeginScrollView(_scrollPosition);
-            GUILayout.BeginVertical(GUI.skin.box);
-            GUILayout.Label("Hive Chameleon · Lobby & Round Development");
-            GUILayout.Label(
-                _previewMode ? "Realtime: offline visual preview" : $"Realtime: {_connection.State}"
-            );
-            GUILayout.Label(_status);
+            GUI.matrix = Matrix4x4.Scale(new Vector3(scale, scale, 1f));
+            float width = Screen.width / scale;
+            float height = Screen.height / scale;
 
-            if (_previewMode)
+            DrawBackground(width, height);
+            DrawHeader(width);
+
+            switch (_page)
             {
-                DrawPreview();
-            }
-            else
-            {
-                LobbySnapshot lobby = _connection.CurrentLobby;
-                if (lobby == null || string.IsNullOrWhiteSpace(lobby.id) || lobby.closed)
-                {
-                    DrawCreateAndJoin();
-                }
-                else
-                {
-                    DrawLobby(lobby);
-                }
+                case MenuPage.Home:
+                    DrawHome(width, height);
+                    break;
+                case MenuPage.Lobby:
+                    DrawLobby(width, height);
+                    break;
+                default:
+                    DrawEntry(width, height);
+                    break;
             }
 
-            GUILayout.EndVertical();
-            GUILayout.EndScrollView();
-            GUILayout.EndArea();
             GUI.matrix = previousMatrix;
         }
 
-        private static void DrawPreview()
+        private void DrawBackground(float width, float height)
         {
-            GUILayout.Space(8);
-            GUILayout.Label("Lobby: M4 Visual Review");
-            GUILayout.Label("ID: preview-lobby-32");
-            GUILayout.Label("Host: player-farhat");
-            GUILayout.Label("Version: 8");
-            GUILayout.Label("Members: 4/10");
-            GUILayout.Label("Mode: casual · Hunters: 1");
-            GUILayout.Label("Hide/Hunt: 10s/30s · Shells: 6");
-            GUILayout.Label("Map version: map-preview-v1");
-            GUILayout.Label("Hunter nominations: 2");
-            GUILayout.Label("  • player-farhat");
-            GUILayout.Label("  • player-mohammad");
+            DrawRect(new Rect(0f, 0f, width, height), _background);
+            DrawRect(
+                new Rect(0f, 0f, width * 0.36f, height),
+                new Color(0.02f, 0.18f, 0.17f, 0.17f)
+            );
+            DrawRect(
+                new Rect(width * 0.72f, 0f, width * 0.28f, height),
+                new Color(0.28f, 0.08f, 0.03f, 0.12f)
+            );
+            DrawRect(new Rect(0f, 72f, width, 1f), _line);
+        }
 
-            bool enabled = GUI.enabled;
-            GUI.enabled = false;
-            GUILayout.Button("Copy Lobby ID");
+        private void DrawHeader(float width)
+        {
+            GUI.Label(new Rect(42f, 18f, 430f, 44f), "HIVE // CHAMELEON", _brandStyle);
 
-            GUILayout.Space(8);
-            GUILayout.Label("Round #1: hunting (preview-round-32)");
-            GUILayout.Label("Phase deadline: 00:24");
-            GUILayout.Label("Hiders remaining: 2/3");
-            GUILayout.Label("Own role: hunter (volunteered)");
-            GUILayout.Label("Shells: 4 · reload ready");
-            GUILayout.Label("Aim slots are intents; Nakama resolves every hit.");
-            DrawPreviewAimSlots(5);
-            GUILayout.Label("Last fire: HIT slot 2 · 4 shells remain");
-            GUILayout.Label("Discovery #1: player-mohammad found by player-farhat");
-            GUILayout.Button("Leave");
-            GUI.enabled = enabled;
-
-            GUILayout.Space(8);
-            GUILayout.Label(
-                "This representative state is for visual review only. "
-                    + "Run the local realtime stack to exercise lobby and round actions."
+            bool connected =
+                _connection != null
+                && _connection.State == RealtimeConnectionState.Connected;
+            Color dot = connected ? _primary : _muted;
+            DrawRect(new Rect(width - 206f, 32f, 8f, 8f), dot);
+            GUI.Label(
+                new Rect(width - 188f, 21f, 148f, 30f),
+                connected ? "ONLINE" : "OFFLINE",
+                _captionStyle
             );
         }
 
-        private static void DrawPreviewAimSlots(int targetSlotCount)
+        private void DrawEntry(float width, float height)
         {
-            for (int firstSlot = 1; firstSlot <= targetSlotCount; firstSlot += 3)
-            {
-                GUILayout.BeginHorizontal();
-                for (
-                    int slot = firstSlot;
-                    slot < firstSlot + 3 && slot <= targetSlotCount;
-                    slot++
+            const float panelWidth = 620f;
+            const float panelHeight = 500f;
+            Rect panel = new Rect(
+                (width - panelWidth) * 0.5f,
+                Mathf.Max(92f, (height - panelHeight) * 0.5f + 18f),
+                panelWidth,
+                panelHeight
+            );
+
+            GUILayout.BeginArea(panel, _panelStyle);
+            GUILayout.Space(22f);
+            GUILayout.Label("ONLINE MULTIPLAYER", _sectionStyle);
+            GUILayout.Space(14f);
+            GUILayout.Label("BLEND IN.\nSTAND OUT.", _heroStyle);
+            GUILayout.Space(16f);
+            GUILayout.Label(
+                "Enter an online match of camouflage, observation, and pursuit.",
+                _bodyStyle
+            );
+            GUILayout.Space(26f);
+            DrawStatus();
+            GUILayout.FlexibleSpace();
+
+            bool previousEnabled = GUI.enabled;
+            GUI.enabled =
+                previousEnabled
+                && _entryConfigured
+                && _requestConnection != null
+                && !_busy;
+            bool reconnecting =
+                _connection != null
+                && LobbyMenuRules.CanAttemptReconnect(
+                    _connection.State,
+                    _connection.CurrentLobby
+                );
+            if (
+                GUILayout.Button(
+                    _busy
+                        ? reconnecting
+                            ? "RECONNECTING…"
+                            : "CONNECTING…"
+                        : reconnecting
+                            ? "RECONNECT"
+                            : "CONNECT",
+                    _primaryButtonStyle,
+                    GUILayout.Height(54f)
                 )
-                {
-                    GUILayout.Button($"Fire slot {slot}");
-                }
-                GUILayout.EndHorizontal();
+            )
+            {
+                Connect();
             }
+            GUI.enabled = previousEnabled;
+            GUILayout.Space(12f);
+            GUILayout.Label(
+                "Secure online play  •  Private role assignment",
+                _captionStyle
+            );
+            GUILayout.Space(12f);
+            GUILayout.EndArea();
         }
 
-        private void DrawCreateAndJoin()
+        private void DrawHome(float width, float height)
         {
-            GUILayout.Space(8);
-            GUILayout.Label("Create public lobby");
-            _lobbyName = GUILayout.TextField(_lobbyName);
-            _regionCode = GUILayout.TextField(_regionCode);
-            _maxPlayers = GUILayout.TextField(_maxPlayers);
-            GUI.enabled = !_busy && _connection.State == RealtimeConnectionState.Connected;
-            if (GUILayout.Button("Create"))
-            {
-                if (
-                    !int.TryParse(_maxPlayers, out int maxPlayers)
-                    || maxPlayers < 2
-                    || maxPlayers > 10
-                )
-                {
-                    _status = "Max players must be between 2 and 10.";
-                }
-                else
-                {
-                    Execute(
-                        () =>
-                            _connection.CreateLobbyAsync(
-                                _lobbyName,
-                                "public",
-                                string.Empty,
-                                maxPlayers,
-                                _regionCode,
-                                _lifetime.Token
-                            ),
-                        "Lobby created and authoritative match joined."
-                    );
-                }
-            }
+            Rect content = new Rect(
+                Mathf.Max(34f, (width - 1110f) * 0.5f),
+                98f,
+                Mathf.Min(1110f, width - 68f),
+                height - 124f
+            );
 
-            GUILayout.Space(8);
-            GUILayout.Label("Join lobby ID");
-            _joinLobbyId = GUILayout.TextField(_joinLobbyId);
-            GUILayout.Label("Password (private lobbies only)");
-            _password = GUILayout.PasswordField(_password, '*');
-            if (GUILayout.Button("Join"))
+            GUILayout.BeginArea(content);
+            _scrollPosition = GUILayout.BeginScrollView(_scrollPosition);
+            GUILayout.Label("FIND YOUR MATCH", _pageTitleStyle);
+            GUILayout.Label(
+                "Create a room for your group or join with a lobby code.",
+                _bodyStyle
+            );
+            GUILayout.Space(16f);
+            DrawStatus();
+            GUILayout.Space(18f);
+
+            GUILayout.BeginHorizontal();
+            DrawCreateCard();
+            GUILayout.Space(20f);
+            DrawJoinCard();
+            GUILayout.EndHorizontal();
+
+            GUILayout.EndScrollView();
+            GUILayout.EndArea();
+        }
+
+        private void DrawCreateCard()
+        {
+            GUILayout.BeginVertical(
+                _cardStyle,
+                GUILayout.MinHeight(476f),
+                GUILayout.ExpandWidth(true)
+            );
+            GUILayout.Label("CREATE MATCH", _sectionStyle);
+            GUILayout.Space(6f);
+            GUILayout.Label(
+                "Open a new lobby and invite up to ten players.",
+                _mutedStyle
+            );
+            GUILayout.Space(18f);
+
+            DrawFieldLabel("LOBBY NAME");
+            _createName = GUILayout.TextField(
+                _createName,
+                128,
+                _inputStyle,
+                GUILayout.Height(42f)
+            );
+            GUILayout.Space(12f);
+
+            DrawFieldLabel("ACCESS");
+            _visibilityIndex = GUILayout.SelectionGrid(
+                _visibilityIndex,
+                VisibilityOptions,
+                2,
+                _choiceStyle,
+                GUILayout.Height(40f)
+            );
+            if (_visibilityIndex == 1)
             {
-                Execute(
-                    () =>
-                        _connection.JoinLobbyAsync(
-                            _joinLobbyId,
-                            _password,
-                            _lifetime.Token
-                        ),
-                    "Persistent lobby and authoritative match joined."
+                GUILayout.Space(10f);
+                DrawFieldLabel("PASSWORD");
+                _createPassword = GUILayout.PasswordField(
+                    _createPassword,
+                    '•',
+                    72,
+                    _inputStyle,
+                    GUILayout.Height(42f)
                 );
             }
-            GUI.enabled = true;
+
+            GUILayout.Space(12f);
+            DrawValueLabel("PLAYERS", _createCapacity.ToString());
+            _createCapacity = Mathf.RoundToInt(
+                GUILayout.HorizontalSlider(_createCapacity, 2f, 10f)
+            );
+            GUILayout.Space(12f);
+
+            DrawFieldLabel("REGION");
+            _createRegion = GUILayout.TextField(
+                _createRegion,
+                32,
+                _inputStyle,
+                GUILayout.Height(42f)
+            );
+
+            GUILayout.FlexibleSpace();
+            bool previousEnabled = GUI.enabled;
+            GUI.enabled =
+                previousEnabled
+                && !_busy
+                && _connection?.State == RealtimeConnectionState.Connected;
+            if (
+                GUILayout.Button(
+                    "CREATE LOBBY",
+                    _primaryButtonStyle,
+                    GUILayout.Height(48f)
+                )
+            )
+            {
+                CreateLobby();
+            }
+            GUI.enabled = previousEnabled;
+            GUILayout.EndVertical();
         }
 
-        private void DrawLobby(LobbySnapshot lobby)
+        private void DrawJoinCard()
         {
-            GUILayout.Space(8);
-            GUILayout.Label($"Lobby: {lobby.name}");
-            GUILayout.Label($"ID: {lobby.id}");
-            GUILayout.Label($"Host: {lobby.current_host_player_id}");
-            GUILayout.Label($"Version: {lobby.row_version}");
-            GUILayout.Label($"Members: {lobby.members.Length}/{lobby.max_players}");
-            GUILayout.Label(
-                $"Mode: {lobby.configuration.mode} · Hunters: {lobby.configuration.hunter_count}"
+            GUILayout.BeginVertical(
+                _cardStyle,
+                GUILayout.MinHeight(476f),
+                GUILayout.ExpandWidth(true)
             );
+            GUILayout.Label("JOIN MATCH", _sectionStyle);
+            GUILayout.Space(6f);
             GUILayout.Label(
-                $"Hide/Hunt: {lobby.configuration.hiding_duration_seconds}s/"
-                    + $"{lobby.configuration.hunting_duration_seconds}s · "
-                    + $"Shells: {lobby.configuration.shell_limit}"
+                "Use the lobby code shared by the host.",
+                _mutedStyle
             );
-            GUILayout.Label($"Map version: {lobby.configuration.map_version_id}");
-            GUILayout.Label($"Hunter nominations: {lobby.hunter_nominee_player_ids.Length}");
-            foreach (string nomineePlayerId in lobby.hunter_nominee_player_ids)
+            GUILayout.Space(18f);
+
+            DrawFieldLabel("LOBBY CODE");
+            _joinLobbyId = GUILayout.TextField(
+                _joinLobbyId,
+                36,
+                _inputStyle,
+                GUILayout.Height(42f)
+            );
+            GUILayout.Space(12f);
+
+            DrawFieldLabel("PASSWORD  (OPTIONAL)");
+            _joinPassword = GUILayout.PasswordField(
+                _joinPassword,
+                '•',
+                72,
+                _inputStyle,
+                GUILayout.Height(42f)
+            );
+
+            GUILayout.Space(22f);
+            GUILayout.Label(
+                "The host controls mode, map, timers, and match start. "
+                    + "The game assigns your role privately when the round begins.",
+                _bodyStyle
+            );
+
+            GUILayout.FlexibleSpace();
+            bool previousEnabled = GUI.enabled;
+            GUI.enabled =
+                previousEnabled
+                && !_busy
+                && _connection?.State == RealtimeConnectionState.Connected;
+            if (
+                GUILayout.Button(
+                    "JOIN LOBBY",
+                    _secondaryButtonStyle,
+                    GUILayout.Height(48f)
+                )
+            )
             {
-                GUILayout.Label($"  • {nomineePlayerId}");
+                JoinLobby();
+            }
+            GUI.enabled = previousEnabled;
+            GUILayout.EndVertical();
+        }
+
+        private void DrawLobby(float width, float height)
+        {
+            LobbySnapshot lobby = _connection?.CurrentLobby;
+            if (
+                lobby == null
+                || string.IsNullOrWhiteSpace(lobby.id)
+                || lobby.closed
+            )
+            {
+                _page = MenuPage.Home;
+                return;
             }
 
-            if (GUILayout.Button("Copy Lobby ID"))
+            LoadConfiguration(lobby, false);
+            bool isHost = LobbyMenuRules.IsHost(lobby, _playerId);
+            Rect content = new Rect(
+                Mathf.Max(30f, (width - 1160f) * 0.5f),
+                94f,
+                Mathf.Min(1160f, width - 60f),
+                height - 116f
+            );
+
+            GUILayout.BeginArea(content);
+            _scrollPosition = GUILayout.BeginScrollView(_scrollPosition);
+            GUILayout.BeginHorizontal();
+            GUILayout.BeginVertical();
+            GUILayout.Label(lobby.name.ToUpperInvariant(), _pageTitleStyle);
+            GUILayout.Label(
+                $"{lobby.members.Length}/{lobby.max_players} PLAYERS  •  "
+                    + $"{lobby.region_code.ToUpperInvariant()}  •  "
+                    + (isHost ? "YOU ARE HOST" : "WAITING FOR HOST"),
+                _captionStyle
+            );
+            GUILayout.EndVertical();
+            GUILayout.FlexibleSpace();
+            if (
+                GUILayout.Button(
+                    "COPY LOBBY CODE",
+                    _secondaryButtonStyle,
+                    GUILayout.Width(184f),
+                    GUILayout.Height(40f)
+                )
+            )
             {
                 GUIUtility.systemCopyBuffer = lobby.id;
-                _status = "Lobby ID copied. Paste it into a second client.";
+                SetStatus("Lobby code copied.", false);
             }
-
-            GUI.enabled = !_busy && _connection.State == RealtimeConnectionState.Connected;
-            RoundSnapshot round = _connection.CurrentRound;
-            if (round == null)
+            GUILayout.Space(10f);
+            if (
+                GUILayout.Button(
+                    "LEAVE",
+                    _dangerButtonStyle,
+                    GUILayout.Width(94f),
+                    GUILayout.Height(40f)
+                )
+            )
             {
-                if (GUILayout.Button(_nominated ? "Withdraw Hunter nomination" : "Nominate me as Hunter"))
-                {
-                    bool nextNomination = !_nominated;
-                    Execute(
-                        () =>
-                            _connection.NominateHunterAsync(
-                                nextNomination,
-                                _lifetime.Token
-                            ),
-                        nextNomination
-                            ? "Hunter nomination accepted."
-                            : "Hunter nomination withdrawn.",
-                        () => _nominated = nextNomination
-                    );
-                }
+                LeaveLobby();
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Space(12f);
+            DrawStatus();
+            GUILayout.Space(14f);
 
-                GUILayout.Label("Published map version ID");
-                _mapVersionId = GUILayout.TextField(_mapVersionId);
-                if (GUILayout.Button("Configure Casual demo: 10s hide / 30s hunt"))
-                {
-                    LobbyConfigurationDraft configuration =
-                        LobbyConfigurationDraft.FromSnapshot(lobby.configuration);
-                    configuration.Mode = "casual";
-                    configuration.MapVersionId = _mapVersionId.Trim();
-                    configuration.HidingDurationSeconds = 10;
-                    configuration.HuntingDurationSeconds = 30;
-                    configuration.ShellLimit = Mathf.Max(6, configuration.ShellLimit);
-                    configuration.ReloadDurationMilliseconds = 1000;
-                    Execute(
-                        () =>
-                            _connection.UpdateLobbyConfigurationAsync(
-                                configuration,
-                                _lifetime.Token
-                            ),
-                        "Host configuration accepted."
-                    );
-                }
-                if (GUILayout.Button("Start authoritative round"))
-                {
-                    Execute(
-                        () => _connection.StartLobbyAsync(_lifetime.Token),
-                        "Round created; the server assigned private roles."
-                    );
-                }
-            }
-            else
-            {
-                DrawRound(round);
-            }
-            if (GUILayout.Button("Leave"))
-            {
-                Execute(
-                    () => _connection.LeaveLobbyAsync(_lifetime.Token),
-                    "Lobby left."
-                );
-            }
-            GUI.enabled = true;
+            GUILayout.BeginHorizontal();
+            DrawRosterCard(lobby);
+            GUILayout.Space(18f);
+            DrawConfigurationCard(lobby, isHost);
+            GUILayout.EndHorizontal();
 
-            GUILayout.Space(8);
-            GUILayout.Label(
-                "Migration test: run a second client, join with the copied ID, "
-                    + "then stop/close the host client. The Host and Version fields "
-                    + "must update on the remaining client."
-            );
+            GUILayout.EndScrollView();
+            GUILayout.EndArea();
         }
 
-        private void DrawRound(RoundSnapshot round)
+        private void DrawRosterCard(LobbySnapshot lobby)
         {
-            GUILayout.Space(8);
-            GUILayout.Label(
-                $"Round #{round.sequence_number}: {round.status} ({round.id})"
+            GUILayout.BeginVertical(
+                _cardStyle,
+                GUILayout.Width(330f),
+                GUILayout.MinHeight(550f)
             );
-            GUILayout.Label($"Mode: {round.mode}");
-            GUILayout.Label($"Phase deadline: {FormatPhaseCountdown(round)}");
-            GUILayout.Label(
-                $"Hiders remaining: {round.hiders_remaining}/{round.hiders_total}"
-            );
+            GUILayout.Label("ROSTER", _sectionStyle);
+            GUILayout.Space(10f);
 
-            RoundRoleAssignment assignment = _connection.CurrentRoleAssignment;
-            GUILayout.Label(
-                assignment == null
-                    ? "Own role: waiting for private server assignment"
-                    : $"Own role: {assignment.role}"
-                        + (assignment.hunter_volunteer ? " (volunteered)" : "")
-            );
-
-            RoundPlayerState playerState = _connection.CurrentRoundPlayerState;
-            if (playerState != null)
+            LobbyMemberSnapshot[] members =
+                lobby.members ?? Array.Empty<LobbyMemberSnapshot>();
+            for (int index = 0; index < members.Length; index++)
             {
-                GUILayout.Label($"Own state: {playerState.status}");
-                if (playerState.role == "hider" && playerState.hiding_slot > 0)
-                {
-                    GUILayout.Label(
-                        $"Private hiding slot: {playerState.hiding_slot} "
-                            + "(never included in the public round snapshot)"
-                    );
-                }
-                if (playerState.role == "hunter")
-                {
-                    DrawHunterControls(round, playerState);
-                }
-            }
-
-            HunterFireResult fireResult = _connection.LastFireResult;
-            if (fireResult != null && fireResult.round_id == round.id)
-            {
-                GUILayout.Label(FormatFireResult(fireResult));
-            }
-            RoundDiscoverySnapshot discovery = _connection.LastDiscovery;
-            if (discovery != null && discovery.round_id == round.id)
-            {
+                LobbyMemberSnapshot member = members[index];
+                bool host = member.player_id == lobby.current_host_player_id;
+                bool own = member.player_id == _playerId;
+                string badges =
+                    (host ? "  HOST" : string.Empty)
+                    + (own ? "  YOU" : string.Empty);
                 GUILayout.Label(
-                    $"Discovery #{discovery.sequence}: {discovery.hider_player_id} "
-                        + $"found by {discovery.hunter_player_id} at slot {discovery.aim_slot}"
+                    $"{index + 1:00}   "
+                        + $"{LobbyMenuRules.PlayerDisplayLabel(member.display_name, index + 1)}"
+                        + badges,
+                    _rosterStyle,
+                    GUILayout.Height(34f)
                 );
             }
 
-            if (round.status == "terminal")
+            GUILayout.Space(16f);
+            DrawRect(
+                GUILayoutUtility.GetRect(1f, 1f, GUILayout.ExpandWidth(true)),
+                _line
+            );
+            GUILayout.Space(14f);
+
+            bool nominated = LobbyMenuRules.IsNominated(lobby, _playerId);
+            GUILayout.Label("HUNTER PREFERENCE", _fieldLabelStyle);
+            GUILayout.Label(
+                nominated
+                    ? "You volunteered for Hunter selection."
+                    : "The game assigns every role privately.",
+                _mutedStyle
+            );
+            GUILayout.Space(10f);
+
+            bool previousEnabled = GUI.enabled;
+            GUI.enabled =
+                previousEnabled
+                && !_busy
+                && !HasActiveRound(_connection.CurrentRound);
+            if (
+                GUILayout.Button(
+                    nominated ? "WITHDRAW NOMINATION" : "VOLUNTEER AS HUNTER",
+                    _secondaryButtonStyle,
+                    GUILayout.Height(42f)
+                )
+            )
             {
-                GUILayout.Space(8);
-                GUILayout.Label(
-                    $"Authoritative outcome: {round.winning_side} win "
-                        + $"({round.completion_reason})"
-                );
-                GUILayout.Label(
-                    "The simulation is terminal. Card #33 will add the durable "
-                        + "result transaction and publication handoff."
-                );
+                SetHunterNomination(!nominated);
             }
+            GUI.enabled = previousEnabled;
+
+            GUILayout.FlexibleSpace();
+            GUILayout.Label("LOBBY CODE", _fieldLabelStyle);
+            GUILayout.Label(lobby.id, _captionStyle);
+            GUILayout.EndVertical();
         }
 
-        private void DrawHunterControls(
-            RoundSnapshot round,
-            RoundPlayerState playerState
+        private void DrawConfigurationCard(
+            LobbySnapshot lobby,
+            bool isHost
         )
         {
-            bool reloading = TryGetRemaining(
-                playerState.reload_until,
-                out TimeSpan reloadRemaining
+            GUILayout.BeginVertical(
+                _cardStyle,
+                GUILayout.MinWidth(670f),
+                GUILayout.MinHeight(550f),
+                GUILayout.ExpandWidth(true)
             );
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("MATCH SETTINGS", _sectionStyle);
+            GUILayout.FlexibleSpace();
             GUILayout.Label(
-                reloading
-                    ? $"Shells: {playerState.shells_remaining} · reload {reloadRemaining.TotalSeconds:0.0}s"
-                    : $"Shells: {playerState.shells_remaining} · reload ready"
+                isHost ? "HOST CONTROLS" : "READ ONLY",
+                _captionStyle
             );
-            GUILayout.Label(
-                "Choose an aim slot. The client sends intent only; Nakama owns hit resolution."
-            );
+            GUILayout.EndHorizontal();
+            GUILayout.Space(12f);
 
-            bool enabled = GUI.enabled;
-            GUI.enabled =
-                enabled
-                && !_busy
-                && round.status == "hunting"
-                && playerState.shells_remaining > 0
-                && !reloading;
-            for (int firstSlot = 1; firstSlot <= round.target_slot_count; firstSlot += 3)
-            {
-                GUILayout.BeginHorizontal();
-                for (
-                    int slot = firstSlot;
-                    slot < firstSlot + 3 && slot <= round.target_slot_count;
-                    slot++
+            bool configurationLocked = HasActiveRound(_connection.CurrentRound);
+            bool previousEnabled = GUI.enabled;
+            GUI.enabled = previousEnabled && isHost && !_busy && !configurationLocked;
+
+            DrawFieldLabel("MODE");
+            _modeIndex = GUILayout.SelectionGrid(
+                _modeIndex,
+                ModeOptions,
+                2,
+                _choiceStyle,
+                GUILayout.Height(42f)
+            );
+            GUILayout.Label(
+                _modeIndex == 0
+                    ? "Found Hiders leave the active hunt."
+                    : "Found Hiders convert and join the Hunters.",
+                _mutedStyle
+            );
+            GUILayout.Space(12f);
+
+            DrawFieldLabel("MAP");
+            GUILayout.Label(
+                "CHROMA DISTRICT",
+                _choiceStyle,
+                GUILayout.Height(42f)
+            );
+            GUILayout.Label(
+                "Neon streets, tight alleys, and plenty of places to disappear.",
+                _mutedStyle
+            );
+            GUILayout.Space(12f);
+
+            GUILayout.BeginHorizontal();
+            GUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+            DrawSlider(
+                "HUNTERS",
+                ref _hunterCount,
+                1,
+                Mathf.Min(2, Mathf.Max(1, lobby.max_players - 1)),
+                string.Empty
+            );
+            DrawSlider("HIDING TIME", ref _hidingSeconds, 10, 600, " SEC");
+            DrawSlider("HUNT TIME", ref _huntingSeconds, 30, 1800, " SEC");
+            GUILayout.EndVertical();
+            GUILayout.Space(18f);
+            GUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+            DrawSlider("SHELLS", ref _shellLimit, 1, 100, string.Empty);
+            DrawSlider(
+                "RELOAD",
+                ref _reloadMilliseconds,
+                100,
+                30000,
+                " MS"
+            );
+            GUILayout.EndVertical();
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(14f);
+            if (
+                GUILayout.Button(
+                    "SAVE SETTINGS",
+                    _secondaryButtonStyle,
+                    GUILayout.Height(42f)
                 )
-                {
-                    if (GUILayout.Button($"Fire slot {slot}"))
-                    {
-                        ExecuteFire(slot);
-                    }
-                }
-                GUILayout.EndHorizontal();
+            )
+            {
+                SaveConfiguration(lobby);
             }
-            GUI.enabled = enabled;
+            GUI.enabled = previousEnabled;
+
+            GUILayout.Space(14f);
+            DrawRect(
+                GUILayoutUtility.GetRect(1f, 1f, GUILayout.ExpandWidth(true)),
+                _line
+            );
+            GUILayout.Space(14f);
+
+            bool canStart = LobbyMenuRules.CanStartRound(
+                lobby,
+                _connection.CurrentRound,
+                _playerId,
+                out string startReason
+            );
+            if (canStart && IsConfigurationDirty(lobby))
+            {
+                canStart = false;
+                startReason = "Save the changed match settings before starting.";
+            }
+            GUI.enabled =
+                previousEnabled
+                && canStart
+                && !_busy
+                && _connection.State == RealtimeConnectionState.Connected;
+            if (
+                GUILayout.Button(
+                    _busy ? "PLEASE WAIT…" : "START MATCH",
+                    _primaryButtonStyle,
+                    GUILayout.Height(50f)
+                )
+            )
+            {
+                StartRound();
+            }
+            GUI.enabled = previousEnabled;
+            if (!canStart)
+            {
+                GUILayout.Space(6f);
+                GUILayout.Label(startReason, _mutedStyle);
+            }
+            GUILayout.EndVertical();
         }
 
-        private async void ExecuteFire(int aimSlot)
+        private void DrawSlider(
+            string label,
+            ref int value,
+            int minimum,
+            int maximum,
+            string suffix
+        )
         {
-            if (_busy || _lifetime == null)
+            value = Mathf.Clamp(value, minimum, maximum);
+            DrawValueLabel(label, value + suffix);
+            if (minimum < maximum)
+            {
+                value = Mathf.RoundToInt(
+                    GUILayout.HorizontalSlider(value, minimum, maximum)
+                );
+            }
+            GUILayout.Space(9f);
+        }
+
+        private void DrawStatus()
+        {
+            if (string.IsNullOrWhiteSpace(_status))
             {
                 return;
             }
+
+            Color previous = GUI.color;
+            GUI.color = _statusIsError ? _error : _primary;
+            GUILayout.Label(
+                _status,
+                _statusStyle,
+                GUILayout.MinHeight(38f)
+            );
+            GUI.color = previous;
+        }
+
+        private void DrawFieldLabel(string label)
+        {
+            GUILayout.Label(label, _fieldLabelStyle);
+        }
+
+        private void DrawValueLabel(string label, string value)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, _fieldLabelStyle);
+            GUILayout.FlexibleSpace();
+            GUILayout.Label(value, _captionStyle);
+            GUILayout.EndHorizontal();
+        }
+
+        private async void Connect()
+        {
+            if (_busy || _requestConnection == null || _lifetime == null)
+            {
+                return;
+            }
+
             _busy = true;
-            _status = $"Sending Hunter fire intent for slot {aimSlot}...";
+            bool reconnecting =
+                _connection != null
+                && LobbyMenuRules.CanAttemptReconnect(
+                    _connection.State,
+                    _connection.CurrentLobby
+                );
+            SetStatus(
+                reconnecting
+                    ? "Restoring your place in the match…"
+                    : "Connecting to online services…",
+                false
+            );
             try
             {
-                string commandId = await _connection.FireHunterAsync(
-                    aimSlot,
-                    _lifetime.Token
-                );
-                _status =
-                    $"Fire intent {commandId.Substring(0, 8)} sent; "
-                    + "waiting for the authoritative result.";
+                await _requestConnection(_lifetime.Token);
+                if (
+                    _connection == null
+                    || _connection.State != RealtimeConnectionState.Connected
+                )
+                {
+                    throw new InvalidOperationException(
+                        "Could not connect. Please try again."
+                    );
+                }
             }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
             {
-                _status = "Fire intent cancelled.";
+                SetStatus("Connection cancelled.", true);
             }
             catch (Exception exception)
             {
-                _status = exception.Message;
-                Debug.LogWarning($"Hunter fire intent failed: {exception.Message}");
+                SetStatus(LobbyMenuRules.ProductErrorMessage(exception), true);
             }
             finally
             {
@@ -460,82 +868,175 @@ namespace HiveChameleon.Realtime
             }
         }
 
-        private static string FormatPhaseCountdown(RoundSnapshot round)
+        private void CreateLobby()
         {
-            if (round.status == "terminal")
-            {
-                return "terminal";
-            }
-            if (!TryGetRemaining(round.phase_deadline, out TimeSpan remaining))
-            {
-                return "transition pending";
-            }
-            int seconds = Mathf.Max(0, Mathf.CeilToInt((float)remaining.TotalSeconds));
-            return $"{seconds / 60:00}:{seconds % 60:00}";
-        }
-
-        private static bool TryGetRemaining(
-            string timestamp,
-            out TimeSpan remaining
-        )
-        {
-            remaining = TimeSpan.Zero;
+            bool privateLobby = _visibilityIndex == 1;
             if (
-                string.IsNullOrWhiteSpace(timestamp)
-                || !DateTimeOffset.TryParse(
-                    timestamp,
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                    out DateTimeOffset deadline
+                !LobbyMenuRules.ValidateCreateLobby(
+                    _createName,
+                    privateLobby,
+                    _createPassword,
+                    _createCapacity,
+                    _createRegion,
+                    out string reason
                 )
             )
             {
-                return false;
+                SetStatus(reason, true);
+                return;
             }
-            remaining = deadline - DateTimeOffset.UtcNow;
-            return remaining > TimeSpan.Zero;
+
+            ExecuteLobbyAction(
+                token =>
+                    _connection.CreateLobbyAsync(
+                        _createName.Trim(),
+                        privateLobby ? "private" : "public",
+                        privateLobby ? _createPassword : string.Empty,
+                        _createCapacity,
+                        _createRegion.Trim().ToLowerInvariant(),
+                        token
+                    ),
+                "Creating lobby…",
+                "Lobby created."
+            );
         }
 
-        private static string FormatFireResult(HunterFireResult result)
+        private void JoinLobby()
         {
-            if (result.accepted)
+            if (
+                !LobbyMenuRules.ValidateJoinLobby(
+                    _joinLobbyId,
+                    out string reason
+                )
+            )
             {
-                return result.hit
-                    ? $"Last fire: HIT slot {result.aim_slot} · "
-                        + $"{result.shells_remaining} shells remain"
-                    : $"Last fire: miss at slot {result.aim_slot} · "
-                        + $"{result.shells_remaining} shells remain";
+                SetStatus(reason, true);
+                return;
             }
-            return $"Last fire rejected by server: {result.reason}";
+
+            ExecuteLobbyAction(
+                token =>
+                    _connection.JoinLobbyAsync(
+                        _joinLobbyId.Trim(),
+                        _joinPassword,
+                        token
+                    ),
+                "Joining lobby…",
+                "Lobby joined."
+            );
         }
 
-        private async void Execute(
-            Func<Task<LobbyRpcResponse>> operation,
+        private void LeaveLobby()
+        {
+            ExecuteLobbyAction(
+                token => _connection.LeaveLobbyAsync(token),
+                "Leaving lobby…",
+                "Lobby left.",
+                _ =>
+                {
+                    _loadedConfigurationVersion = -1;
+                    _page = MenuPage.Home;
+                }
+            );
+        }
+
+        private void SetHunterNomination(bool nominated)
+        {
+            ExecuteLobbyAction(
+                token => _connection.NominateHunterAsync(nominated, token),
+                nominated
+                    ? "Submitting Hunter preference…"
+                    : "Withdrawing Hunter preference…",
+                nominated
+                    ? "Hunter preference saved."
+                    : "Hunter preference withdrawn."
+            );
+        }
+
+        private void SaveConfiguration(LobbySnapshot lobby)
+        {
+            LobbyConfigurationDraft draft =
+                LobbyConfigurationDraft.FromSnapshot(lobby.configuration);
+            draft.Mode = _modeIndex == 0 ? "casual" : "infection";
+            draft.MapVersionId = _mapVersionId.Trim();
+            draft.HunterCount = _hunterCount;
+            draft.HidingDurationSeconds = _hidingSeconds;
+            draft.HuntingDurationSeconds = _huntingSeconds;
+            draft.ShellLimit = _shellLimit;
+            draft.ReloadDurationMilliseconds = _reloadMilliseconds;
+
+            ExecuteLobbyAction(
+                token =>
+                    _connection.UpdateLobbyConfigurationAsync(
+                        draft,
+                        token
+                    ),
+                "Saving match settings…",
+                "Match settings saved."
+            );
+        }
+
+        private void StartRound()
+        {
+            LobbySnapshot lobby = _connection.CurrentLobby;
+            if (
+                !LobbyMenuRules.CanStartRound(
+                    lobby,
+                    _connection.CurrentRound,
+                    _playerId,
+                    out string reason
+                )
+            )
+            {
+                SetStatus(reason, true);
+                return;
+            }
+
+            ExecuteLobbyAction(
+                token => _connection.StartLobbyAsync(token),
+                "Starting match…",
+                "Match started."
+            );
+        }
+
+        private async void ExecuteLobbyAction(
+            Func<CancellationToken, Task<LobbyRpcResponse>> operation,
+            string pendingMessage,
             string successMessage,
-            Action onSuccess = null
+            Action<LobbyRpcResponse> onSuccess = null
         )
         {
-            if (_busy || _lifetime == null)
+            if (
+                _busy
+                || _lifetime == null
+                || _connection == null
+                || _connection.State != RealtimeConnectionState.Connected
+            )
             {
                 return;
             }
+
             _busy = true;
-            _status = "Working...";
+            SetStatus(pendingMessage, false);
             try
             {
-                LobbyRpcResponse response = await operation();
-                _joinLobbyId = response.lobby.id;
-                onSuccess?.Invoke();
-                _status = successMessage;
+                LobbyRpcResponse response = await operation(_lifetime.Token);
+                if (response?.lobby == null)
+                {
+                    throw new InvalidOperationException(
+                        "The lobby could not be opened. Please try again."
+                    );
+                }
+                onSuccess?.Invoke(response);
+                SetStatus(successMessage, false);
             }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
             {
-                _status = "Operation cancelled.";
+                SetStatus("Action cancelled.", true);
             }
             catch (Exception exception)
             {
-                _status = exception.Message;
-                Debug.LogWarning($"Lobby development action failed: {exception.Message}");
+                SetStatus(LobbyMenuRules.ProductErrorMessage(exception), true);
             }
             finally
             {
@@ -545,60 +1046,341 @@ namespace HiveChameleon.Realtime
 
         private void HandleLobbyStateChanged(LobbySnapshot lobby)
         {
-            _joinLobbyId = lobby.id;
-            if (!string.IsNullOrWhiteSpace(lobby.configuration.map_version_id))
+            if (
+                lobby == null
+                || string.IsNullOrWhiteSpace(lobby.id)
+                || lobby.closed
+            )
             {
-                _mapVersionId = lobby.configuration.map_version_id;
+                _loadedConfigurationVersion = -1;
+                _page = MenuPage.Home;
+                SetStatus("Lobby closed.", false);
+                return;
             }
-            _status = lobby.closed
-                ? "Lobby closed."
-                : $"Lobby state updated to version {lobby.row_version}.";
+
+            LoadConfiguration(lobby, false);
+            _page = MenuPage.Lobby;
         }
 
         private void HandleRoundStateChanged(RoundSnapshot round)
         {
-            _status = $"Round {round.sequence_number} entered {round.status}.";
+            if (LobbyMenuRules.IsGameplayRound(round))
+            {
+                SetStatus("The match is starting.", false);
+            }
         }
 
         private void HandleRoundRoleAssigned(RoundRoleAssignment assignment)
         {
-            _status = $"Private server role assigned: {assignment.role}.";
+            if (assignment != null && assignment.player_id == _playerId)
+            {
+                SetStatus("Your role is ready.", false);
+            }
         }
 
-        private void HandleRoundPlayerStateChanged(RoundPlayerState playerState)
+        private void LoadConfiguration(
+            LobbySnapshot lobby,
+            bool force
+        )
         {
-            _status =
-                playerState.role == "hunter"
-                    ? $"Private Hunter state updated: {playerState.shells_remaining} shells."
-                    : $"Private Hider state updated: {playerState.status}.";
+            LobbyConfigurationSnapshot configuration = lobby?.configuration;
+            if (
+                configuration == null
+                || (
+                    !force
+                    && configuration.row_version == _loadedConfigurationVersion
+                )
+            )
+            {
+                return;
+            }
+
+            _loadedConfigurationVersion = configuration.row_version;
+            _modeIndex = configuration.mode == "infection" ? 1 : 0;
+            _mapVersionId = configuration.map_version_id ?? string.Empty;
+            _hunterCount = Mathf.Clamp(configuration.hunter_count, 1, 2);
+            _hidingSeconds = Mathf.Clamp(
+                configuration.hiding_duration_seconds,
+                10,
+                600
+            );
+            _huntingSeconds = Mathf.Clamp(
+                configuration.hunting_duration_seconds,
+                30,
+                1800
+            );
+            _shellLimit = Mathf.Clamp(configuration.shell_limit, 1, 100);
+            _reloadMilliseconds = Mathf.Clamp(
+                configuration.reload_duration_ms,
+                100,
+                30000
+            );
         }
 
-        private void HandleRoundDiscovery(RoundDiscoverySnapshot discovery)
+        private void SetStatus(string value, bool error)
         {
-            _status =
-                $"Authoritative discovery #{discovery.sequence}: "
-                + $"{discovery.hider_player_id} was found.";
+            _status = value ?? string.Empty;
+            _statusIsError = error;
         }
 
-        private void HandleHunterFireResolved(HunterFireResult result)
+        private bool IsConfigurationDirty(LobbySnapshot lobby)
         {
-            _status = FormatFireResult(result);
+            LobbyConfigurationSnapshot current = lobby?.configuration;
+            if (current == null)
+            {
+                return false;
+            }
+
+            return current.mode != (_modeIndex == 0 ? "casual" : "infection")
+                || (current.map_version_id ?? string.Empty) != _mapVersionId.Trim()
+                || current.hunter_count != _hunterCount
+                || current.hiding_duration_seconds != _hidingSeconds
+                || current.hunting_duration_seconds != _huntingSeconds
+                || current.shell_limit != _shellLimit
+                || current.reload_duration_ms != _reloadMilliseconds;
+        }
+
+        private static bool HasActiveRound(RoundSnapshot round)
+        {
+            return round != null
+                && round.status != "completed"
+                && round.status != "aborted";
+        }
+
+        private void UnbindConnection()
+        {
+            if (_connection == null)
+            {
+                return;
+            }
+            _connection.LobbyStateChanged -= HandleLobbyStateChanged;
+            _connection.RoundStateChanged -= HandleRoundStateChanged;
+            _connection.RoundRoleAssigned -= HandleRoundRoleAssigned;
+            _connection = null;
+            _playerId = string.Empty;
+        }
+
+        private static void UnlockCursor()
+        {
+            if (Cursor.lockState != CursorLockMode.None)
+            {
+                Cursor.lockState = CursorLockMode.None;
+            }
+            Cursor.visible = true;
+        }
+
+        private void EnsureStyles()
+        {
+            if (_stylesReady)
+            {
+                return;
+            }
+
+            _surfaceTexture = CreateTexture(_surface);
+            _raisedTexture = CreateTexture(_surfaceRaised);
+            _primaryTexture = CreateTexture(_primaryDark);
+            _primaryHoverTexture = CreateTexture(new Color(0.08f, 0.58f, 0.49f));
+            _secondaryTexture = CreateTexture(new Color(0.08f, 0.11f, 0.15f));
+            _inputTexture = CreateTexture(new Color(0.018f, 0.028f, 0.041f));
+
+            _panelStyle = new GUIStyle(GUI.skin.box)
+            {
+                padding = new RectOffset(36, 36, 28, 28),
+            };
+            _panelStyle.normal.background = _surfaceTexture;
+
+            _cardStyle = new GUIStyle(GUI.skin.box)
+            {
+                padding = new RectOffset(24, 24, 22, 22),
+                margin = new RectOffset(0, 0, 0, 0),
+            };
+            _cardStyle.normal.background = _raisedTexture;
+
+            _brandStyle = CreateLabelStyle(
+                22,
+                FontStyle.Bold,
+                _text,
+                TextAnchor.MiddleLeft
+            );
+            _heroStyle = CreateLabelStyle(
+                52,
+                FontStyle.Bold,
+                _text,
+                TextAnchor.MiddleLeft
+            );
+            _heroStyle.wordWrap = true;
+            _pageTitleStyle = CreateLabelStyle(
+                30,
+                FontStyle.Bold,
+                _text,
+                TextAnchor.MiddleLeft
+            );
+            _sectionStyle = CreateLabelStyle(
+                16,
+                FontStyle.Bold,
+                _primary,
+                TextAnchor.MiddleLeft
+            );
+            _bodyStyle = CreateLabelStyle(
+                15,
+                FontStyle.Normal,
+                _text,
+                TextAnchor.MiddleLeft
+            );
+            _bodyStyle.wordWrap = true;
+            _mutedStyle = CreateLabelStyle(
+                13,
+                FontStyle.Normal,
+                _muted,
+                TextAnchor.MiddleLeft
+            );
+            _mutedStyle.wordWrap = true;
+            _captionStyle = CreateLabelStyle(
+                11,
+                FontStyle.Bold,
+                _muted,
+                TextAnchor.MiddleLeft
+            );
+            _fieldLabelStyle = CreateLabelStyle(
+                11,
+                FontStyle.Bold,
+                _muted,
+                TextAnchor.MiddleLeft
+            );
+            _statusStyle = CreateLabelStyle(
+                13,
+                FontStyle.Bold,
+                Color.white,
+                TextAnchor.MiddleLeft
+            );
+            _statusStyle.wordWrap = true;
+            _statusStyle.padding = new RectOffset(14, 14, 9, 9);
+            _statusStyle.normal.background = _secondaryTexture;
+            _rosterStyle = CreateLabelStyle(
+                13,
+                FontStyle.Bold,
+                _text,
+                TextAnchor.MiddleLeft
+            );
+            _rosterStyle.padding = new RectOffset(10, 10, 4, 4);
+            _rosterStyle.normal.background = _secondaryTexture;
+
+            _inputStyle = new GUIStyle(GUI.skin.textField)
+            {
+                fontSize = 14,
+                padding = new RectOffset(13, 13, 10, 10),
+                normal = { textColor = _text, background = _inputTexture },
+                focused = { textColor = _text, background = _inputTexture },
+            };
+            _primaryButtonStyle = CreateButtonStyle(
+                _primaryTexture,
+                _primaryHoverTexture,
+                _text
+            );
+            _secondaryButtonStyle = CreateButtonStyle(
+                _secondaryTexture,
+                _raisedTexture,
+                _text
+            );
+            _dangerButtonStyle = CreateButtonStyle(
+                _secondaryTexture,
+                _raisedTexture,
+                _error
+            );
+            _choiceStyle = CreateButtonStyle(
+                _secondaryTexture,
+                _primaryTexture,
+                _text
+            );
+            _choiceStyle.onNormal.background = _primaryTexture;
+            _choiceStyle.onHover.background = _primaryHoverTexture;
+            _choiceStyle.onActive.background = _primaryHoverTexture;
+            _choiceStyle.onNormal.textColor = _text;
+            _choiceStyle.onHover.textColor = _text;
+            _choiceStyle.onActive.textColor = _text;
+
+            _stylesReady = true;
+        }
+
+        private static GUIStyle CreateLabelStyle(
+            int fontSize,
+            FontStyle fontStyle,
+            Color color,
+            TextAnchor alignment
+        )
+        {
+            var style = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = fontSize,
+                fontStyle = fontStyle,
+                alignment = alignment,
+            };
+            style.normal.textColor = color;
+            return style;
+        }
+
+        private static GUIStyle CreateButtonStyle(
+            Texture2D normal,
+            Texture2D hover,
+            Color textColor
+        )
+        {
+            var style = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 13,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+                padding = new RectOffset(16, 16, 9, 9),
+            };
+            style.normal.background = normal;
+            style.normal.textColor = textColor;
+            style.hover.background = hover;
+            style.hover.textColor = textColor;
+            style.active.background = hover;
+            style.active.textColor = textColor;
+            style.onNormal.background = hover;
+            style.onNormal.textColor = textColor;
+            return style;
+        }
+
+        private static Texture2D CreateTexture(Color color)
+        {
+            var texture = new Texture2D(1, 1)
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            texture.SetPixel(0, 0, color);
+            texture.Apply();
+            return texture;
+        }
+
+        private static void DrawRect(Rect rect, Color color)
+        {
+            Color previous = GUI.color;
+            GUI.color = color;
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = previous;
         }
 
         private void OnDestroy()
         {
-            if (_connection != null)
-            {
-                _connection.LobbyStateChanged -= HandleLobbyStateChanged;
-                _connection.RoundStateChanged -= HandleRoundStateChanged;
-                _connection.RoundRoleAssigned -= HandleRoundRoleAssigned;
-                _connection.RoundPlayerStateChanged -= HandleRoundPlayerStateChanged;
-                _connection.RoundDiscoveryReceived -= HandleRoundDiscovery;
-                _connection.HunterFireResolved -= HandleHunterFireResolved;
-            }
+            UnbindConnection();
             _lifetime?.Cancel();
             _lifetime?.Dispose();
+            DestroyTexture(_surfaceTexture);
+            DestroyTexture(_raisedTexture);
+            DestroyTexture(_primaryTexture);
+            DestroyTexture(_primaryHoverTexture);
+            DestroyTexture(_secondaryTexture);
+            DestroyTexture(_inputTexture);
+        }
+
+        private static void DestroyTexture(Texture2D texture)
+        {
+            if (texture != null)
+            {
+                Destroy(texture);
+            }
         }
     }
 }
-#endif
