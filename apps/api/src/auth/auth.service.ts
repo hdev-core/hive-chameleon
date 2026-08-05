@@ -37,7 +37,7 @@ export type GoogleExchangeResponse =
       readonly expiresAt: string;
       readonly externalIdentityId: string;
       readonly kind: 'onboarding';
-      readonly nextStep: 'acknowledge_disclosure' | 'choose_username';
+      readonly nextStep: 'choose_username';
       readonly onboardingToken: string;
     };
 
@@ -168,9 +168,7 @@ export class AuthService {
       expiresAt: onboarding.expiresAt.toISOString(),
       externalIdentityId: externalIdentity.id,
       kind: 'onboarding',
-      nextStep: externalIdentity.disclosureAcknowledged
-        ? 'choose_username'
-        : 'acknowledge_disclosure',
+      nextStep: 'choose_username',
       onboardingToken: onboarding.token,
     };
   }

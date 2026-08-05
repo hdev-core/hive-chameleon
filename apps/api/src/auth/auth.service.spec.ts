@@ -30,8 +30,6 @@ describe('AuthService', () => {
       createSession: vi.fn(),
       findActiveSession: vi.fn(),
       findOrCreateDirectHivePlayer: vi.fn().mockResolvedValue(player),
-      getCurrentDisclosure: vi.fn(),
-      acknowledgeCurrentDisclosure: vi.fn(),
       revokeSession: vi.fn(),
       rotateSession: vi.fn(),
       upsertGoogleIdentity: vi.fn(),
@@ -112,7 +110,6 @@ describe('AuthService', () => {
       subject: 'stable-subject',
     });
     vi.mocked(repository.upsertGoogleIdentity).mockResolvedValue({
-      disclosureAcknowledged: false,
       id: '01980abc-def3-7abc-8def-0123456789ab',
       player: null,
       status: 'provisioning',
@@ -131,7 +128,7 @@ describe('AuthService', () => {
     expect(result).toMatchObject({
       externalIdentityId: '01980abc-def3-7abc-8def-0123456789ab',
       kind: 'onboarding',
-      nextStep: 'acknowledge_disclosure',
+      nextStep: 'choose_username',
     });
     expect(repository.upsertGoogleIdentity).toHaveBeenCalledWith(
       'https://accounts.google.com',

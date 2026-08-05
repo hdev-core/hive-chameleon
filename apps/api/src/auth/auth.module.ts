@@ -12,16 +12,13 @@ import {
   HIVE_POSTING_AUTHORITY_VERIFIER,
 } from './auth.types';
 import { GoogleAuthLibraryOidcGateway } from './google-oidc.gateway';
-import { DisclosureController } from './disclosure.controller';
-import { DisclosurePrincipalGuard } from './disclosure-principal.guard';
-import { DisclosureService } from './disclosure.service';
 import { RpcHivePostingAuthorityVerifier } from './hive-posting-authority.verifier';
 import { OnboardingSessionGuard } from './onboarding-session.guard';
 import { PostgresAuthRepository } from './postgres-auth.repository';
 import { TokenService } from './token.service';
 
 @Module({
-  controllers: [AuthController, DisclosureController],
+  controllers: [AuthController],
   exports: [
     AccessSessionGuard,
     OnboardingSessionGuard,
@@ -48,8 +45,6 @@ import { TokenService } from './token.service';
     },
     AccessSessionGuard,
     AuthService,
-    DisclosurePrincipalGuard,
-    DisclosureService,
     OnboardingSessionGuard,
     TokenService,
   ],

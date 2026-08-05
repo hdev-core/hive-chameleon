@@ -33,13 +33,12 @@ $$;
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(*) = 9
+    SELECT count(*) = 8
       FROM pg_authid
      WHERE rolname IN (
        'hc_api',
        'hc_nakama',
        'hc_provisioning',
-       'hc_match_publisher',
        'hc_collectible_issuer',
        'hc_treasury',
        'hc_rc_support',
@@ -55,7 +54,7 @@ SELECT pg_temp.assert_true(
        AND rolbypassrls = false
        AND rolpassword IS NULL
   ),
-  'all nine workload roles have fixed least-privilege attributes'
+  'all eight workload roles have fixed least-privilege attributes'
 );
 
 SELECT pg_temp.assert_true(
@@ -67,7 +66,6 @@ SELECT pg_temp.assert_true(
        'hc_api',
        'hc_nakama',
        'hc_provisioning',
-       'hc_match_publisher',
        'hc_collectible_issuer',
        'hc_treasury',
        'hc_rc_support',
@@ -96,7 +94,6 @@ SELECT pg_temp.assert_true(
        'hc_api',
        'hc_nakama',
        'hc_provisioning',
-       'hc_match_publisher',
        'hc_collectible_issuer',
        'hc_treasury',
        'hc_rc_support',
@@ -114,7 +111,6 @@ SELECT pg_temp.assert_true(
         'hc_api',
         'hc_nakama',
         'hc_provisioning',
-        'hc_match_publisher',
         'hc_collectible_issuer',
         'hc_treasury',
         'hc_rc_support',
@@ -135,16 +131,22 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   has_table_privilege('hc_provisioning', 'identity.hive_account_provisioning', 'UPDATE')
-  AND has_column_privilege('hc_match_publisher', 'game.match_publication_outbox', 'state', 'UPDATE')
-  AND has_table_privilege('hc_match_publisher', 'identity.player', 'SELECT')
-  AND has_schema_privilege('hc_match_publisher', 'identity', 'USAGE')
-  AND has_schema_privilege('hc_match_publisher', 'content', 'USAGE')
-  AND has_schema_privilege('hc_match_publisher', 'tournament', 'USAGE')
-  AND has_table_privilege('hc_match_publisher', 'game.round_participant', 'SELECT')
-  AND has_table_privilege('hc_match_publisher', 'content.map_asset', 'SELECT')
-  AND has_table_privilege('hc_match_publisher', 'tournament.match_game_round', 'SELECT')
-  AND has_column_privilege('hc_match_publisher', 'game.match_publication_outbox', 'updated_at', 'UPDATE')
-  AND has_function_privilege('hc_match_publisher', 'public.digest(bytea,text)', 'EXECUTE')
+  AND has_table_privilege('hc_nakama', 'game.round_live_checkpoint', 'SELECT')
+  AND has_table_privilege('hc_nakama', 'game.round_live_checkpoint', 'INSERT')
+  AND has_table_privilege('hc_nakama', 'game.round_live_checkpoint', 'UPDATE')
+  AND has_table_privilege('hc_nakama', 'game.round_live_checkpoint', 'DELETE')
+  AND NOT has_table_privilege('hc_api', 'game.round_live_checkpoint', 'SELECT')
+  AND NOT has_table_privilege('hc_projector', 'game.round_live_checkpoint', 'SELECT')
+  AND has_function_privilege(
+    'hc_api',
+    'game.hc_find_reconnect_reservation(uuid,timestamp with time zone)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'hc_projector',
+    'game.hc_find_reconnect_reservation(uuid,timestamp with time zone)',
+    'EXECUTE'
+  )
   AND has_table_privilege('hc_collectible_issuer', 'hive_projection.transaction_intent', 'INSERT')
   AND has_column_privilege('hc_collectible_issuer', 'hive_projection.transaction_intent', 'updated_at', 'UPDATE')
   AND has_table_privilege('hc_treasury', 'hive_projection.transaction_intent', 'INSERT')
@@ -152,22 +154,19 @@ SELECT pg_temp.assert_true(
   AND has_column_privilege('hc_projector', 'commerce.collectible_instance', 'state', 'UPDATE')
   AND has_column_privilege('hc_projector', 'commerce.collectible_instance', 'issued_event_id', 'INSERT')
   AND has_table_privilege('hc_projector', 'hive_projection.block_checkpoint', 'UPDATE'),
-  'each workload has its required narrow mutation surface'
+  'each workload has its required narrow data and function surface'
 );
 
 SELECT pg_temp.assert_true(
   NOT has_table_privilege('hc_provisioning', 'identity.platform_role_assignment', 'UPDATE')
-  AND NOT has_table_privilege('hc_match_publisher', 'identity.platform_role_assignment', 'UPDATE')
   AND NOT has_table_privilege('hc_collectible_issuer', 'identity.platform_role_assignment', 'UPDATE')
   AND NOT has_table_privilege('hc_treasury', 'identity.platform_role_assignment', 'UPDATE')
   AND NOT has_table_privilege('hc_rc_support', 'identity.platform_role_assignment', 'UPDATE')
   AND NOT has_table_privilege('hc_provisioning', 'commerce.payment_transaction', 'UPDATE')
-  AND NOT has_table_privilege('hc_match_publisher', 'commerce.payment_transaction', 'UPDATE')
   AND NOT has_table_privilege('hc_collectible_issuer', 'commerce.payment_transaction', 'UPDATE')
   AND NOT has_table_privilege('hc_treasury', 'identity.auth_session', 'UPDATE')
   AND NOT has_table_privilege('hc_rc_support', 'commerce.payment_transaction', 'UPDATE')
   AND NOT has_table_privilege('hc_provisioning', 'hive_projection.block_checkpoint', 'UPDATE')
-  AND NOT has_table_privilege('hc_match_publisher', 'hive_projection.block_checkpoint', 'UPDATE')
   AND NOT has_table_privilege('hc_collectible_issuer', 'hive_projection.block_checkpoint', 'UPDATE')
   AND NOT has_table_privilege('hc_treasury', 'hive_projection.block_checkpoint', 'UPDATE')
   AND NOT has_table_privilege('hc_rc_support', 'hive_projection.block_checkpoint', 'UPDATE'),
@@ -175,25 +174,7 @@ SELECT pg_temp.assert_true(
 );
 
 SELECT pg_temp.assert_true(
-  has_column_privilege(
-    'hc_match_publisher',
-    'game.match_publication_outbox',
-    'state',
-    'UPDATE'
-  )
-  AND NOT has_column_privilege(
-    'hc_match_publisher',
-    'game.match_publication_outbox',
-    'canonical_payload',
-    'UPDATE'
-  )
-  AND NOT has_column_privilege(
-    'hc_match_publisher',
-    'game.match_publication_outbox',
-    'publisher_hive_account',
-    'UPDATE'
-  )
-  AND NOT has_column_privilege(
+  NOT has_column_privilege(
     'hc_collectible_issuer',
     'hive_projection.transaction_intent',
     'canonical_operation_hash',
@@ -205,7 +186,6 @@ SELECT pg_temp.assert_true(
     'state',
     'UPDATE'
   )
-  AND NOT has_table_privilege('hc_treasury', 'game.match_publication_outbox', 'INSERT')
   AND NOT has_table_privilege('hc_rc_support', 'commerce.collectible_instance', 'INSERT')
   AND NOT has_table_privilege('hc_collectible_issuer', 'tournament.payout', 'UPDATE')
   AND NOT has_column_privilege('hc_projector', 'commerce.collectible_instance', 'owner_player_id', 'UPDATE')
@@ -223,7 +203,7 @@ SELECT pg_temp.assert_true(
        AND relation.relname = 'transaction_intent'
   )
   AND (
-    SELECT count(*) = 8
+    SELECT count(*) = 7
       FROM pg_policies
      WHERE schemaname = 'hive_projection'
        AND tablename = 'transaction_intent'
@@ -243,26 +223,6 @@ SELECT pg_temp.expect_sqlstate(
 );
 SELECT pg_temp.expect_sqlstate(
   $$UPDATE hive_projection.block_checkpoint SET state = 'included' WHERE false$$,
-  '42501'
-);
-ROLLBACK;
-
-BEGIN;
-SET LOCAL ROLE hc_match_publisher;
-SELECT pg_temp.expect_sqlstate(
-  $$UPDATE identity.platform_role_assignment SET reason = 'forbidden' WHERE false$$,
-  '42501'
-);
-SELECT pg_temp.expect_sqlstate(
-  $$UPDATE commerce.payment_transaction SET provider_metadata = '{}' WHERE false$$,
-  '42501'
-);
-SELECT pg_temp.expect_sqlstate(
-  $$UPDATE hive_projection.block_checkpoint SET state = 'included' WHERE false$$,
-  '42501'
-);
-SELECT pg_temp.expect_sqlstate(
-  $$UPDATE game.match_publication_outbox SET canonical_payload = '{}' WHERE false$$,
   '42501'
 );
 ROLLBACK;
@@ -314,28 +274,6 @@ SELECT pg_temp.expect_sqlstate(
   '42501'
 );
 ROLLBACK;
-
-BEGIN;
-SET LOCAL ROLE hc_match_publisher;
-INSERT INTO hive_projection.transaction_intent (
-  id, idempotency_key, operation_kind, required_authority,
-  canonical_operation_hash, authorization_mode, official_service_role,
-  allowlist_policy_version, authorization_validated_at, requested_at, expires_at
-)
-VALUES (
-  '01900000-0000-7000-8000-000000000901',
-  'role-test-match-publisher',
-  'custom_json_match_results',
-  'posting',
-  repeat('1', 64),
-  'official_service',
-  'match_publisher',
-  'role-test-1',
-  '2026-07-16T18:00:00Z',
-  '2026-07-16T18:00:00Z',
-  '2026-07-16T18:05:00Z'
-);
-COMMIT;
 
 BEGIN;
 SET LOCAL ROLE hc_collectible_issuer;
@@ -427,14 +365,14 @@ SELECT pg_temp.expect_sqlstate(
 );
 UPDATE hive_projection.transaction_intent
    SET failure_code = 'cross-role-write'
- WHERE id = '01900000-0000-7000-8000-000000000901';
+ WHERE id = '01900000-0000-7000-8000-000000000903';
 COMMIT;
 
 SELECT pg_temp.assert_true(
   (
     SELECT failure_code IS NULL
-      FROM hive_projection.transaction_intent
-     WHERE id = '01900000-0000-7000-8000-000000000901'
+     FROM hive_projection.transaction_intent
+     WHERE id = '01900000-0000-7000-8000-000000000903'
   ),
   'one official service cannot see or mutate another service intent'
 );

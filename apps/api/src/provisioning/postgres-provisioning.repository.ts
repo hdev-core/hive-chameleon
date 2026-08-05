@@ -210,12 +210,6 @@ export class PostgresProvisioningRepository implements ProvisioningRepository {
           WHERE id = $1 AND status = 'provisioning'`,
         [job.external_identity_id, resultingPlayerId, at],
       );
-      await client.query(
-        `UPDATE identity.public_record_disclosure_acknowledgment
-            SET player_id = $2, player_linked_at = COALESCE(player_linked_at, $3)
-          WHERE external_identity_id = $1 AND player_id IS NULL`,
-        [job.external_identity_id, resultingPlayerId, at],
-      );
     });
   }
 

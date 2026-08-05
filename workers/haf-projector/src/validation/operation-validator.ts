@@ -12,7 +12,6 @@ import { z } from 'zod';
 import type { HafBlock, HafOperation, OperationDecision } from '../model.js';
 
 export interface HiveEventValidationPolicy {
-  readonly matchPublishers: ReadonlySet<string>;
   readonly collectibleIssuers: ReadonlySet<string>;
   readonly maximumFutureClockSkewMs?: number;
 }
@@ -110,10 +109,6 @@ export class HiveOperationValidator {
 
   private isSignerAllowed(event: HiveChameleonEvent, signer: string): boolean {
     switch (event.type) {
-      case 'match_results_batch':
-      case 'match_result_corrected':
-      case 'match_result_invalidated':
-        return this.policy.matchPublishers.has(signer) && event.data.publisher === signer;
       case 'collectible_issued':
         return this.policy.collectibleIssuers.has(signer) && event.data.issuer === signer;
       case 'collectible_revoked':

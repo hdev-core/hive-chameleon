@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -50,18 +51,16 @@ type terminalLike struct {
 }
 
 type terminalResultCommit struct {
-	RoundID                  string
-	RevisionID               string
-	PublicationRequestID     string
-	EndedAt                  time.Time
-	WinningSide              string
-	ResultSchemaVersion      string
-	ScoringRuleVersion       string
-	CanonicalCompleteResult  []byte
-	CanonicalResultObjectKey string
-	Participants             []terminalParticipant
-	Discoveries              []terminalDiscovery
-	Likes                    []terminalLike
+	RoundID                 string
+	RevisionID              string
+	EndedAt                 time.Time
+	WinningSide             string
+	ResultSchemaVersion     string
+	ScoringRuleVersion      string
+	CanonicalCompleteResult []byte
+	Participants            []terminalParticipant
+	Discoveries             []terminalDiscovery
+	Likes                   []terminalLike
 }
 
 type terminalResultCommitOutcome string
@@ -71,11 +70,11 @@ const (
 	terminalResultReplayed  terminalResultCommitOutcome = "replayed"
 )
 
-// commitTerminalResult is the authoritative terminal boundary used by future Nakama match code.
-// It inserts detailed evidence, the initial immutable revision, and the publication request, then
-// moves the round to completed last. PostgreSQL's deferred aggregate trigger validates the bundle
-// at COMMIT. A retry for an already-completed round succeeds only when it names the same canonical
-// result, schema versions, and object-store document.
+// commitTerminalResult is the authoritative terminal boundary used by the persistent lobby match.
+// It inserts detailed evidence and the initial immutable revision, including the exact canonical
+// result bytes, then moves the round to completed last. PostgreSQL's deferred aggregate trigger
+// validates the bundle at COMMIT. A retry for an already-completed round succeeds only when it
+// names the same canonical result and schema versions.
 func commitTerminalResult(
 	ctx context.Context,
 	database *sql.DB,
@@ -115,6 +114,13 @@ func commitTerminalResult(
 		if err := assertTerminalResultReplay(ctx, tx, input, canonicalSHA256, storedSHA256); err != nil {
 			return "", err
 		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`DELETE FROM game.round_live_checkpoint WHERE round_id = $1`,
+			input.RoundID,
+		); err != nil {
+			return "", fmt.Errorf("delete replayed round live checkpoint: %w", err)
+		}
 		if err := tx.Commit(); err != nil {
 			return "", fmt.Errorf("commit terminal result replay: %w", err)
 		}
@@ -122,6 +128,27 @@ func commitTerminalResult(
 	}
 	if status != "answer_check" {
 		return "", fmt.Errorf("round cannot complete from status %q", status)
+	}
+
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.game_round
+		    SET canonical_result_sha256 = $2
+		  WHERE id = $1
+		    AND status = 'answer_check'
+		    AND result_schema_version = $3
+		    AND scoring_rule_version = $4`,
+		input.RoundID,
+		canonicalSHA256,
+		input.ResultSchemaVersion,
+		input.ScoringRuleVersion,
+	)
+	if err != nil {
+		return "", fmt.Errorf("stage terminal result identity: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected != 1 {
+		return "", errors.New("terminal result versions changed concurrently")
 	}
 
 	for _, participant := range input.Participants {
@@ -195,56 +222,56 @@ func commitTerminalResult(
 		ctx,
 		`INSERT INTO game.round_result_revision
 		  (id, round_id, revision_number, revision_type, result_schema_version,
-		   scoring_rule_version, canonical_complete_result_sha256, canonical_result_object_key)
+		   scoring_rule_version, canonical_complete_result_sha256, canonical_complete_result)
 		 VALUES ($1, $2, 1, 'initial', $3, $4, $5, $6)`,
 		input.RevisionID,
 		input.RoundID,
 		input.ResultSchemaVersion,
 		input.ScoringRuleVersion,
 		canonicalSHA256,
-		input.CanonicalResultObjectKey,
+		input.CanonicalCompleteResult,
 	); err != nil {
 		return "", fmt.Errorf("insert initial result revision: %w", err)
 	}
 
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO game.match_publication_request
-		  (id, round_id, result_revision_id, request_type, state)
-		 VALUES ($1, $2, $3, 'initial', 'queued')`,
-		input.PublicationRequestID,
-		input.RoundID,
-		input.RevisionID,
-	); err != nil {
-		return "", fmt.Errorf("insert initial publication request: %w", err)
-	}
-
-	result, err := tx.ExecContext(
+	result, err = tx.ExecContext(
 		ctx,
 		`UPDATE game.game_round
 		    SET status = 'completed',
 		        winning_side = $2,
-		        canonical_result_sha256 = $3,
-		        ended_at = $4
+		        ended_at = $3
 		  WHERE id = $1
 		    AND status = 'answer_check'`,
 		input.RoundID,
 		input.WinningSide,
-		canonicalSHA256,
 		input.EndedAt,
 	)
 	if err != nil {
 		return "", fmt.Errorf("complete terminal result round: %w", err)
 	}
-	rowsAffected, err := result.RowsAffected()
+	rowsAffected, err = result.RowsAffected()
 	if err != nil || rowsAffected != 1 {
 		return "", errors.New("terminal result round changed concurrently")
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM game.round_live_checkpoint WHERE round_id = $1`,
+		input.RoundID,
+	); err != nil {
+		return "", fmt.Errorf("delete completed round live checkpoint: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit terminal result: %w", err)
 	}
 	return terminalResultCommitted, nil
+}
+
+func (s *postgresLobbyStore) CommitTerminalResult(
+	ctx context.Context,
+	input terminalResultCommit,
+) (terminalResultCommitOutcome, error) {
+	return commitTerminalResult(ctx, s.database, input)
 }
 
 func assertTerminalResultReplay(
@@ -258,32 +285,25 @@ func assertTerminalResultReplay(
 		return errors.New("terminal result replay conflicts with completed round hash")
 	}
 
-	var revisionSHA256, objectKey, resultSchema, scoringRules string
-	var requestCount int
+	var revisionSHA256, resultSchema, scoringRules string
+	var canonicalResult []byte
 	if err := tx.QueryRowContext(
 		ctx,
 		`SELECT revision.canonical_complete_result_sha256::text,
-		        revision.canonical_result_object_key,
+		        revision.canonical_complete_result,
 		        revision.result_schema_version,
-		        revision.scoring_rule_version,
-		        count(request.id)::integer
+		        revision.scoring_rule_version
 		   FROM game.round_result_revision AS revision
-		   LEFT JOIN game.match_publication_request AS request
-		     ON request.result_revision_id = revision.id
-		    AND request.request_type = 'initial'
-		    AND request.state <> 'cancelled'
 		  WHERE revision.round_id = $1
-		    AND revision.revision_type = 'initial'
-		  GROUP BY revision.id`,
+		    AND revision.revision_type = 'initial'`,
 		input.RoundID,
-	).Scan(&revisionSHA256, &objectKey, &resultSchema, &scoringRules, &requestCount); err != nil {
+	).Scan(&revisionSHA256, &canonicalResult, &resultSchema, &scoringRules); err != nil {
 		return fmt.Errorf("load completed terminal result bundle: %w", err)
 	}
 	if revisionSHA256 != canonicalSHA256 ||
-		objectKey != input.CanonicalResultObjectKey ||
+		!bytes.Equal(canonicalResult, input.CanonicalCompleteResult) ||
 		resultSchema != input.ResultSchemaVersion ||
-		scoringRules != input.ScoringRuleVersion ||
-		requestCount != 1 {
+		scoringRules != input.ScoringRuleVersion {
 		return errors.New("terminal result replay conflicts with completed result bundle")
 	}
 	return nil
@@ -291,9 +311,8 @@ func assertTerminalResultReplay(
 
 func validateTerminalResult(input terminalResultCommit) (string, error) {
 	for label, value := range map[string]string{
-		"round ID":               input.RoundID,
-		"revision ID":            input.RevisionID,
-		"publication request ID": input.PublicationRequestID,
+		"round ID":    input.RoundID,
+		"revision ID": input.RevisionID,
 	} {
 		if _, err := canonicalUUIDV7ToCompact(value); err != nil {
 			return "", fmt.Errorf("invalid %s", label)
@@ -313,9 +332,6 @@ func validateTerminalResult(input terminalResultCommit) (string, error) {
 	}
 	if !json.Valid(input.CanonicalCompleteResult) {
 		return "", errors.New("canonical complete result is not valid JSON")
-	}
-	if input.CanonicalResultObjectKey == "" || len(input.CanonicalResultObjectKey) > 1024 {
-		return "", errors.New("canonical result object key is invalid")
 	}
 	if len(input.Participants) < 2 || len(input.Participants) > 10 {
 		return "", errors.New("terminal result must contain 2..10 participants")
@@ -442,7 +458,7 @@ func validPlayerRole(value string) bool {
 
 func validParticipantOutcome(value string) bool {
 	switch value {
-	case "hunter_win", "hunter_loss", "hider_survived", "hider_found", "hider_converted":
+	case "hunter_win", "hunter_loss", "hider_survived", "hider_found", "hider_converted", "no_contest":
 		return true
 	default:
 		return false
@@ -454,6 +470,10 @@ func validateParticipantRoleOutcome(participant terminalParticipant, winningSide
 		return errors.New("terminal participant cannot transition from hunter to hider")
 	}
 	switch participant.Outcome {
+	case "no_contest":
+		if winningSide != "none" {
+			return errors.New("terminal no-contest outcome is inconsistent")
+		}
 	case "hunter_win":
 		if participant.InitialRole != "hunter" || participant.FinalRole != "hunter" || winningSide != "hunters" {
 			return errors.New("terminal hunter-win outcome is inconsistent")
@@ -467,14 +487,14 @@ func validateParticipantRoleOutcome(participant terminalParticipant, winningSide
 			return errors.New("terminal hider-survived outcome is inconsistent")
 		}
 	case "hider_found":
-		if participant.InitialRole != "hider" || participant.FinalRole != "hider" || winningSide == "hiders" {
+		if participant.InitialRole != "hider" || participant.FinalRole != "hider" {
 			return errors.New("terminal hider-found outcome is inconsistent")
 		}
 		if participant.FoundOrConvertedAt == nil {
 			return errors.New("terminal hider-found outcome requires its timestamp")
 		}
 	case "hider_converted":
-		if participant.InitialRole != "hider" || participant.FinalRole != "hunter" || winningSide == "hiders" {
+		if participant.InitialRole != "hider" || participant.FinalRole != "hunter" {
 			return errors.New("terminal hider-converted outcome is inconsistent")
 		}
 		if participant.FoundOrConvertedAt == nil {

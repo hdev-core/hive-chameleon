@@ -4,12 +4,10 @@ import { ServiceUnavailableException } from '@nestjs/common';
 import type {
   ActiveSessionRecord,
   AuthRepository,
-  DisclosureAcknowledgment,
   ExternalIdentityRecord,
   HiveLoginChallengeRecord,
   NewSession,
   PlayerIdentity,
-  PublicRecordDisclosure,
 } from './auth.types';
 
 interface PlayerRow {
@@ -27,25 +25,11 @@ interface ChallengeRow {
 }
 
 interface SessionRow extends PlayerRow {
-  disclosure_acknowledged: boolean;
   expires_at: Date;
   session_id: string;
 }
 
-interface DisclosureRow {
-  content_sha256: string;
-  effective_at: Date;
-  disclosure_version: string;
-}
-
-interface DisclosureAcknowledgmentRow {
-  acknowledged_at: Date;
-  disclosure_version: string;
-  id: string;
-}
-
 interface ExternalIdentityRow {
-  disclosure_acknowledged: boolean;
   external_identity_id: string;
   hive_control_state: PlayerIdentity['hiveControlState'] | null;
   hive_username: string | null;
@@ -152,8 +136,7 @@ export class PostgresAuthRepository implements AuthRepository {
   ): Promise<ActiveSessionRecord | null> {
     return withTransaction(this.requirePool(), async (client) => {
       const result = await client.query<SessionRow>(
-        `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username, p.hive_control_state,
-                ${disclosureAcknowledgedSql('p.id', '$2')} AS disclosure_acknowledged
+        `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username, p.hive_control_state
            FROM identity.auth_session s
            JOIN identity.player p ON p.id = s.player_id
           WHERE s.refresh_token_hash = $1
@@ -178,8 +161,7 @@ export class PostgresAuthRepository implements AuthRepository {
 
   public async findActiveSession(sessionId: string, at: Date): Promise<ActiveSessionRecord | null> {
     const result = await this.requirePool().query<SessionRow>(
-      `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username, p.hive_control_state,
-              ${disclosureAcknowledgedSql('p.id', '$2')} AS disclosure_acknowledged
+      `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username, p.hive_control_state
          FROM identity.auth_session s
          JOIN identity.player p ON p.id = s.player_id
         WHERE s.id = $1 AND s.revoked_at IS NULL AND s.expires_at > $2`,
@@ -216,23 +198,13 @@ export class PostgresAuthRepository implements AuthRepository {
          RETURNING id, player_id, status
        )
        SELECT e.id AS external_identity_id, e.player_id, e.status,
-              p.id, p.hive_username, p.hive_control_state,
-              EXISTS (
-                SELECT 1
-                  FROM identity.public_record_disclosure d
-                  JOIN identity.public_record_disclosure_acknowledgment a
-                    ON a.disclosure_version = d.disclosure_version
-                 WHERE a.external_identity_id = e.id
-                   AND d.effective_at <= $4
-                   AND (d.retired_at IS NULL OR d.retired_at > $4)
-              ) AS disclosure_acknowledged
+              p.id, p.hive_username, p.hive_control_state
          FROM upserted e
          LEFT JOIN identity.player p ON p.id = e.player_id`,
       [createUuidV7(), verifiedIssuer, subjectLookupHash, authenticatedAt],
     );
     const row = requireRow(result.rows[0]);
     return {
-      disclosureAcknowledged: row.disclosure_acknowledged,
       id: row.external_identity_id,
       player:
         row.player_id === null
@@ -244,82 +216,6 @@ export class PostgresAuthRepository implements AuthRepository {
             }),
       status: row.status,
     };
-  }
-
-  public async getCurrentDisclosure(at: Date): Promise<PublicRecordDisclosure | null> {
-    const result = await this.requirePool().query<DisclosureRow>(
-      `SELECT disclosure_version, content_sha256, effective_at
-         FROM identity.public_record_disclosure
-        WHERE effective_at <= $1
-          AND (retired_at IS NULL OR retired_at > $1)
-        ORDER BY effective_at DESC
-        LIMIT 1`,
-      [at],
-    );
-    const row = result.rows[0];
-    return row
-      ? {
-          contentSha256: row.content_sha256,
-          effectiveAt: row.effective_at,
-          version: row.disclosure_version,
-        }
-      : null;
-  }
-
-  public async acknowledgeCurrentDisclosure(input: {
-    readonly acknowledgedAt: Date;
-    readonly contentSha256: string;
-    readonly disclosureVersion: string;
-    readonly externalIdentityId: string | null;
-    readonly playerId: string | null;
-  }): Promise<DisclosureAcknowledgment | null> {
-    return withTransaction(this.requirePool(), async (client) => {
-      const disclosure = await client.query(
-        `SELECT 1
-           FROM identity.public_record_disclosure
-          WHERE disclosure_version = $1 AND content_sha256 = $2
-            AND effective_at <= $3
-            AND (retired_at IS NULL OR retired_at > $3)`,
-        [input.disclosureVersion, input.contentSha256, input.acknowledgedAt],
-      );
-      if (disclosure.rowCount !== 1) {
-        return null;
-      }
-      await client.query(
-        `INSERT INTO identity.public_record_disclosure_acknowledgment (
-           id, disclosure_version, external_identity_id, player_id, source, acknowledged_at
-         ) VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT DO NOTHING`,
-        [
-          createUuidV7(),
-          input.disclosureVersion,
-          input.externalIdentityId,
-          input.playerId,
-          input.externalIdentityId === null
-            ? 'direct_hive_pre_participation'
-            : 'google_pre_provisioning',
-          input.acknowledgedAt,
-        ],
-      );
-      const result = await client.query<DisclosureAcknowledgmentRow>(
-        `SELECT id, disclosure_version, acknowledged_at
-           FROM identity.public_record_disclosure_acknowledgment
-          WHERE disclosure_version = $1
-            AND (($2::uuid IS NOT NULL AND external_identity_id = $2) OR
-                 ($3::uuid IS NOT NULL AND player_id = $3))
-          ORDER BY acknowledged_at
-          LIMIT 1`,
-        [input.disclosureVersion, input.externalIdentityId, input.playerId],
-      );
-      const row = result.rows[0];
-      return row
-        ? {
-            acknowledgedAt: row.acknowledged_at,
-            disclosureVersion: row.disclosure_version,
-            id: row.id,
-          }
-        : null;
-    });
   }
 
   private requirePool(): DatabasePool {
@@ -357,26 +253,10 @@ function mapSession(row: SessionRow): ActiveSessionRecord {
   const player = mapPlayer(row);
   return {
     authSessionId: row.session_id,
-    disclosureAcknowledged: row.disclosure_acknowledged,
     expiresAt: row.expires_at,
     player,
     playerId: player.id,
   };
-}
-
-function disclosureAcknowledgedSql(playerIdSql: string, atParameter: string): string {
-  return `EXISTS (
-    SELECT 1
-      FROM identity.public_record_disclosure d
-     WHERE d.effective_at <= ${atParameter}
-       AND (d.retired_at IS NULL OR d.retired_at > ${atParameter})
-       AND EXISTS (
-         SELECT 1
-           FROM identity.public_record_disclosure_acknowledgment a
-          WHERE a.player_id = ${playerIdSql}
-            AND a.disclosure_version = d.disclosure_version
-       )
-  )`;
 }
 
 function requireRow<T>(row: T | undefined): T {
