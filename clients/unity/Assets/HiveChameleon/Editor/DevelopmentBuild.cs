@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using HiveChameleon.Realtime;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -27,7 +26,7 @@ namespace HiveChameleon.Editor
         {
             try
             {
-                EnsureDevelopmentScene(target);
+                EnsureDevelopmentScene();
 
                 if (EditorUserBuildSettings.activeBuildTarget != target)
                 {
@@ -65,13 +64,11 @@ namespace HiveChameleon.Editor
             }
             finally
             {
-                // WebGL cannot read process environment variables at runtime. Credentials are
-                // serialized only for the build, then the source scene is regenerated without them.
-                EnsureDevelopmentScene(null);
+                EnsureDevelopmentScene();
             }
         }
 
-        private static void EnsureDevelopmentScene(BuildTarget? configuredTarget)
+        private static void EnsureDevelopmentScene()
         {
             Directory.CreateDirectory("Assets/Scenes");
             AssetDatabase.Refresh();
@@ -92,67 +89,12 @@ namespace HiveChameleon.Editor
             GameObject root = new GameObject("HiveChameleon");
             root.AddComponent<Bootstrap>();
 
-            if (configuredTarget == BuildTarget.WebGL)
-            {
-                ConfigureWebGlRealtime(root);
-            }
-
             if (!EditorSceneManager.SaveScene(scene, ScenePath))
             {
                 throw new InvalidOperationException($"Could not save generated scene at {ScenePath}.");
             }
 
             EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(ScenePath, true) };
-        }
-
-        private static void ConfigureWebGlRealtime(GameObject root)
-        {
-            string apiBaseUrl = Environment.GetEnvironmentVariable("HIVE_CHAMELEON_API_URL");
-            string serverKey = Environment.GetEnvironmentVariable("NAKAMA_SERVER_KEY");
-            string bearerToken = Environment.GetEnvironmentVariable("REALTIME_DEV_BEARER_TOKEN");
-
-            bool hasApiBaseUrl = !string.IsNullOrWhiteSpace(apiBaseUrl);
-            bool hasServerKey = !string.IsNullOrWhiteSpace(serverKey);
-            bool hasBearerToken = !string.IsNullOrWhiteSpace(bearerToken);
-
-            if (!hasApiBaseUrl && !hasServerKey && !hasBearerToken)
-            {
-                return;
-            }
-
-            if (!hasApiBaseUrl || !hasServerKey || !hasBearerToken)
-            {
-                throw new InvalidOperationException(
-                    "WebGL realtime builds require HIVE_CHAMELEON_API_URL, "
-                        + "NAKAMA_SERVER_KEY, and REALTIME_DEV_BEARER_TOKEN together."
-                );
-            }
-
-            if (
-                !Uri.TryCreate(apiBaseUrl, UriKind.Absolute, out Uri parsedApiBaseUrl)
-                || (parsedApiBaseUrl.Scheme != Uri.UriSchemeHttp
-                    && parsedApiBaseUrl.Scheme != Uri.UriSchemeHttps)
-            )
-            {
-                throw new InvalidOperationException(
-                    "HIVE_CHAMELEON_API_URL must be an absolute HTTP or HTTPS URL."
-                );
-            }
-
-            if (bearerToken.Trim().Length < 32)
-            {
-                throw new InvalidOperationException(
-                    "REALTIME_DEV_BEARER_TOKEN must contain at least 32 characters."
-                );
-            }
-
-            DevelopmentRealtimeBootstrap realtime =
-                root.AddComponent<DevelopmentRealtimeBootstrap>();
-            realtime.ConfigureForDevelopmentBuild(
-                apiBaseUrl.TrimEnd('/'),
-                serverKey.Trim(),
-                bearerToken.Trim()
-            );
         }
 
         private static BuildTarget ResolveBuildTarget(string requested)

@@ -5,8 +5,14 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project_path="${repository_root}/clients/unity"
 build_path="${project_path}/Builds/WebGL"
 scene_path="${project_path}/Assets/Scenes/Development.unity"
-scene_backup="$(mktemp "${TMPDIR:-/tmp}/hive-chameleon-scene.XXXXXX")"
 
+if [[ -e "${project_path}/Temp/UnityLockfile" ]]; then
+  echo "Unity currently owns this project. Exit the Editor, then run this command again." >&2
+  echo "The tooling will not close Unity or bypass its project lock." >&2
+  exit 1
+fi
+
+scene_backup="$(mktemp "${TMPDIR:-/tmp}/hive-chameleon-scene.XXXXXX")"
 cp "${scene_path}" "${scene_backup}"
 
 restore_source_scene() {
@@ -45,11 +51,8 @@ unity_editor="$(find_unity_editor)" || {
   exit 1
 }
 
-echo "Building credential-free Unity WebGL showcase..."
+echo "Building the credential-neutral authoritative Unity WebGL client..."
 env \
-  -u HIVE_CHAMELEON_API_URL \
-  -u NAKAMA_SERVER_KEY \
-  -u REALTIME_DEV_BEARER_TOKEN \
   UNITY_BUILD_TARGET=webgl \
   "${unity_editor}" \
   -batchmode \
@@ -73,4 +76,6 @@ for required_file in "${required_files[@]}"; do
   fi
 done
 
-echo "WebGL showcase ready at ${build_path}"
+echo "Credential-neutral WebGL development build ready at ${build_path}"
+echo "Use npm run authoritative:webgl to supply local per-client sessions."
+echo "This development build has no production login flow and must not be deployed."
