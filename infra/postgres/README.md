@@ -23,7 +23,7 @@ docker compose -f infra/postgres/compose.yaml down --volumes --remove-orphans
 
 The test applies every migration to an empty database, then verifies schema inventory, UUIDv7,
 partial indexes, authorization approval/audit coupling, fork checkpoints, immutable evidence,
-host consistency, terminal-round/revision behavior, accepted linear match corrections, and
+host consistency, exact terminal-result/revision behavior, accepted linear corrections, and
 cross-service database-role isolation.
 
 ## Workload roles
@@ -31,19 +31,22 @@ cross-service database-role isolation.
 Production login identities receive exactly one NOLOGIN group role and use `SET ROLE` after
 connecting. There is intentionally no generic worker role.
 
-| Role | Mutable database surface |
-| --- | --- |
-| `hc_provisioning` | Pending identity, account-provisioning, custody-reference, claim, player, and session lifecycle |
-| `hc_match_publisher` | Match publication requests, immutable-payload outbox lifecycle, and ordered publication membership |
-| `hc_collectible_issuer` | Its own `collectible_issuer` transaction intents only |
-| `hc_treasury` | Its own `treasury` transaction intents only; payout/payment plans are read-only |
-| `hc_rc_support` | Its own `rc_support` transaction intents only; projected delegation evidence is read-only |
-| `hc_projector` | Fork checkpoints, raw operations, and typed Hive projections |
+| Role                                         | Mutable database surface                                                                         |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `hc_provisioning`                            | Pending identity, account-provisioning, custody-reference, claim, player, and session lifecycle  |
+| `hc_collectible_issuer`                      | Its own `collectible_issuer` transaction intents only                                            |
+| `hc_treasury`                                | Its own `treasury` transaction intents only; payout/payment plans are read-only                  |
+| `hc_rc_support`                              | Its own `rc_support` transaction intents only; projected delegation evidence is read-only        |
+| `hc_projector`                               | Fork checkpoints, raw operations, and typed Hive projections                                     |
 | `hc_api`, `hc_nakama`, `hc_security_auditor` | Product API orchestration, authoritative match writes, and read-only audit evidence respectively |
 
 Row-level policies bind shared official `transaction_intent` rows to the current database service
 role. A service cannot create, see, or update another signer's intent. Application allow-lists and
 isolated signer credentials remain mandatory; database grants are defense in depth.
+
+`hc_api` cannot read `game.round_live_checkpoint`. Its only live-round recovery surface is
+`game.hc_find_reconnect_reservation(uuid, timestamptz)`, a security-definer function that returns a
+bounded descriptor for the already-authenticated player and no private checkpoint contents.
 
 For an inspectable development database:
 
@@ -71,9 +74,9 @@ Copy `.env.example` to `.env` only when a different local port is needed.
   belongs in its own explicitly nontransactional migration.
 - The application generates UUIDv7. PostgreSQL validates version/variant bits but does not invent
   domain IDs.
-- Insert completed-round participants, discoveries, likes, the initial revision, and the initial
-  publication request while the round is nonterminal; update the round to `completed` last in the
-  same transaction. The deferred terminal-bundle trigger validates the committed aggregate.
+- Insert completed-round participants, discoveries, likes, and the initial exact canonical result
+  revision while the round is nonterminal; update the round to `completed` last in the same
+  transaction. The deferred terminal-bundle trigger validates the committed aggregate.
 - A fork replacement marks the old reversible checkpoint/operations `reverted`, then inserts the
   replacement branch. Irreversible rows cannot be reverted.
 - Do not mutate a migration that has reached a shared environment. Update DBML and add a new

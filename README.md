@@ -20,15 +20,15 @@ goal-based [roadmap](docs/implementation-roadmap.md).
 
 ```bash
 npm ci
-npm run verify
-npm run dev
+npm run authoritative:start -- --clients 2
 ```
 
-The API then exposes:
+This starts the migrated PostgreSQL database, API, Nakama, and two authenticated local client
+identities. Open [`clients/unity`](clients/unity/) in the pinned Unity editor and press Play. See
+the [local authoritative multiplayer runbook](docs/local-authoritative-development.md) for client
+switching, logs, shutdown, and optional simultaneous WebGL clients.
 
-- `GET http://localhost:3000/api/v1/health`
-- `GET http://localhost:3000/api/v1/health/live`
-- `GET http://localhost:3000/api/v1/health/ready`
+Run the repository checks separately with `npm run verify`.
 
 Authentication and Google-to-Hive provisioning configuration is documented in
 [`apps/api/README.md`](apps/api/README.md). The API intentionally fails closed for durable identity
@@ -40,19 +40,17 @@ Build the Nakama module with the runtime-compatible toolchain:
 docker build -t hive-chameleon-nakama:dev runtime/nakama
 ```
 
-Open [`clients/unity`](clients/unity/) in the pinned Unity editor. Its README documents desktop
-and WebGL development builds.
-
-Build a credential-free WebGL showcase and deploy it to the linked Vercel project with:
+For optional browser-based multi-client testing, build one credential-neutral player and serve
+distinct Client 1…10 sessions with:
 
 ```bash
-npm run unity:webgl:build
-npm run unity:webgl:deploy
+npm run authoritative:webgl -- --clients 2
 ```
 
-The showcase build deliberately runs without development credentials. Vercel hosts only its
-static files; the API, Nakama, workers, PostgreSQL, and signer remain always-on Hetzner services.
-The current showcase is available at <https://hive-chameleon.vercel.app>.
+The generated artifact contains no embedded credential. The localhost launcher supplies a
+different short-lived session at each client URL. It never falls back to a simulated round and
+must not be deployed because production player-login/session delivery is not implemented. The
+API, Nakama, workers, PostgreSQL, and signer are always-on Hetzner workloads.
 
 ## Repository layout
 

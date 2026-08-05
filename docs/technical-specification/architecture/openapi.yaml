@@ -21,13 +21,13 @@ tags:
   - name: Authentication
     description: Direct-Hive and Google game-session establishment.
   - name: Onboarding
-    description: Disclosure, permanent username, and real-Hive-account provisioning.
+    description: Permanent username and real-Hive-account provisioning.
   - name: Sessions
     description: Backend session lifecycle and Nakama credential handoff.
   - name: Players
     description: Player identity, profile, preferences, appearance, and claim state.
   - name: Rounds
-    description: Retained operational round history and public-record projection.
+    description: Retained authoritative round and result-revision history.
   - name: Lobbies
     description: HTTP lobby reads and durable invitation support.
   - name: Social
@@ -178,7 +178,7 @@ paths:
       tags: [Sessions]
       operationId: createRealtimeSession
       summary: Mint a short-lived scoped Nakama session token
-      description: Requires a playable player and acknowledgment of the current permanent-public-record disclosure.
+      description: Requires a current playable player session.
       x-priority: P0
       x-maturity: committed
       responses:
@@ -199,64 +199,8 @@ paths:
           $ref: '#/components/responses/UnauthorizedProblem'
         '409':
           $ref: '#/components/responses/ConflictProblem'
-        '428':
-          description: Current permanent-public-record disclosure acknowledgment is required
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
         '503':
           $ref: '#/components/responses/ServiceUnavailableProblem'
-  /disclosures/public-match/current:
-    get:
-      tags: [Onboarding]
-      operationId: getCurrentPublicMatchDisclosure
-      summary: Get the effective permanent-public-record disclosure
-      x-priority: P0
-      x-maturity: committed
-      security:
-        - bearerAuth: []
-        - onboardingBearer: []
-      responses:
-        '200':
-          description: Current disclosure
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PublicRecordDisclosure'
-        '401':
-          $ref: '#/components/responses/UnauthorizedProblem'
-  /disclosures/public-match/acknowledgments:
-    post:
-      tags: [Onboarding]
-      operationId: acknowledgePublicMatchDisclosure
-      summary: Acknowledge one disclosure version
-      x-priority: P0
-      x-maturity: committed
-      security:
-        - bearerAuth: []
-        - onboardingBearer: []
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/DisclosureAcknowledgmentRequest'
-      responses:
-        '201':
-          description: Acknowledgment recorded
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DisclosureAcknowledgment'
-        '401':
-          $ref: '#/components/responses/UnauthorizedProblem'
-        '409':
-          $ref: '#/components/responses/ConflictProblem'
-        '422':
-          $ref: '#/components/responses/ValidationProblem'
   /onboarding/hive-username/check:
     post:
       tags: [Onboarding]
@@ -654,24 +598,6 @@ paths:
           $ref: '#/components/responses/ForbiddenProblem'
         '404':
           $ref: '#/components/responses/NotFoundProblem'
-  /rounds/{roundId}/public-record:
-    parameters:
-      - $ref: '#/components/parameters/RoundId'
-    get:
-      tags: [Rounds]
-      operationId: getRoundPublicRecord
-      summary: Get Hive publication, correction, invalidation, and reconciliation state
-      x-priority: P0
-      x-maturity: committed
-      responses:
-        '200':
-          description: Public-record state
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PublicRoundRecord'
-        '404':
-          $ref: '#/components/responses/NotFoundProblem'
   /lobbies:
     get:
       tags: [Lobbies]
@@ -722,6 +648,8 @@ paths:
       summary: Discover a currently restorable lobby or match slot
       x-priority: P0
       x-maturity: committed
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Reconnect eligibility; `available` may be false
@@ -731,6 +659,8 @@ paths:
                 $ref: '#/components/schemas/ReconnectDescriptor'
         '401':
           $ref: '#/components/responses/UnauthorizedProblem'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableProblem'
   /lobbies/{lobbyId}/invitations:
     parameters:
       - $ref: '#/components/parameters/LobbyId'
@@ -2154,7 +2084,7 @@ components:
           format: uuid
         nextStep:
           type: string
-          enum: [acknowledge_disclosure, choose_username, provisioning_pending, provisioning_ready]
+          enum: [choose_username, provisioning_pending, provisioning_ready]
         provisioningId:
           type: string
           format: uuid
@@ -2174,64 +2104,6 @@ components:
           type: string
           format: uri
         expiresAt:
-          type: string
-          format: date-time
-    PublicRecordDisclosure:
-      type: object
-      additionalProperties: false
-      required: [version, contentSha256, title, body, effectiveAt, permanentFields]
-      example:
-        version: '2026-07-01'
-        contentSha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-        title: Permanent Hive match-summary record
-        body: Published match summaries permanently expose the listed fields on Hive.
-        effectiveAt: '2026-07-01T00:00:00Z'
-        permanentFields:
-          - hive_username
-          - match_participation
-          - role
-          - score
-          - outcome
-          - aggregated_likes
-      properties:
-        version:
-          type: string
-          maxLength: 32
-        contentSha256:
-          $ref: '#/components/schemas/Sha256'
-        title:
-          type: string
-        body:
-          type: string
-        effectiveAt:
-          type: string
-          format: date-time
-        permanentFields:
-          type: array
-          items:
-            type: string
-            enum: [hive_username, match_participation, role, score, outcome, aggregated_likes]
-    DisclosureAcknowledgmentRequest:
-      type: object
-      additionalProperties: false
-      required: [disclosureVersion, contentSha256]
-      properties:
-        disclosureVersion:
-          type: string
-          maxLength: 32
-        contentSha256:
-          $ref: '#/components/schemas/Sha256'
-    DisclosureAcknowledgment:
-      type: object
-      additionalProperties: false
-      required: [id, disclosureVersion, acknowledgedAt]
-      properties:
-        id:
-          type: string
-          format: uuid
-        disclosureVersion:
-          type: string
-        acknowledgedAt:
           type: string
           format: date-time
     HiveUsernameRequest:
@@ -2366,7 +2238,7 @@ components:
     CurrentPlayer:
       type: object
       additionalProperties: false
-      required: [id, hiveUsername, hiveControlState, disclosureAcknowledged, profile, preferences, appearance]
+      required: [id, hiveUsername, hiveControlState, profile, preferences, appearance]
       properties:
         id:
           type: string
@@ -2382,8 +2254,6 @@ components:
         hiveControlState:
           type: string
           enum: [external_self_custodial, platform_custodial, authority_claimed_recovery_pending, self_custody_complete]
-        disclosureAcknowledged:
-          type: boolean
         profile:
           $ref: '#/components/schemas/PublicPlayerProfile'
         preferences:
@@ -2667,9 +2537,6 @@ components:
         endedAt:
           type: string
           format: date-time
-        publicRecordState:
-          type: string
-          enum: [not_eligible, queued, included, irreversible, corrected, invalidated, divergent]
     RoundDetail:
       oneOf:
         - $ref: '#/components/schemas/CompletedRoundDetail'
@@ -2682,7 +2549,7 @@ components:
     CompletedRoundDetail:
       type: object
       additionalProperties: false
-      required: [id, mode, mapVersionId, status, startedAt, resultSchemaVersion, scoringRuleVersion, participants, discoveries, likes]
+      required: [id, mode, mapVersionId, status, startedAt, resultRevisionId, resultSchemaVersion, scoringRuleVersion, canonicalResultSha256, participants, discoveries, likes]
       properties:
         id:
           type: string
@@ -2705,9 +2572,9 @@ components:
         endedAt:
           type: string
           format: date-time
-        publicRecordState:
+        resultRevisionId:
           type: string
-          enum: [not_eligible, queued, included, irreversible, corrected, invalidated, divergent]
+          format: uuid
         resultSchemaVersion:
           type: string
         scoringRuleVersion:
@@ -2752,9 +2619,6 @@ components:
         abortReason:
           type: string
           maxLength: 512
-        publicRecordState:
-          type: string
-          const: not_eligible
     RoundParticipant:
       type: object
       additionalProperties: false
@@ -2795,42 +2659,6 @@ components:
         received:
           type: integer
           minimum: 0
-    PublicRoundRecord:
-      type: object
-      additionalProperties: false
-      required: [roundId, state, reconciliationState]
-      example:
-        roundId: 01900000-0000-7000-8000-000000000004
-        state: irreversible
-        eventId: 01900000-0000-7000-8000-000000000005
-        batchId: 01900000-0000-7000-8000-000000000006
-        transactionId: 0123456789abcdef0123456789abcdef01234567
-        publicResultSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-        reconciliationState: matched
-        irreversibleAt: '2026-07-12T09:40:00Z'
-      properties:
-        roundId:
-          type: string
-          format: uuid
-        state:
-          type: string
-          enum: [queued, included, irreversible, corrected, invalidated, reverted]
-        eventId:
-          type: string
-          format: uuid
-        batchId:
-          type: string
-          format: uuid
-        transactionId:
-          type: string
-        publicResultSha256:
-          $ref: '#/components/schemas/Sha256'
-        reconciliationState:
-          type: string
-          enum: [pending, matched, divergent, local_result_unavailable]
-        irreversibleAt:
-          type: string
-          format: date-time
     LobbyPage:
       type: object
       additionalProperties: false
@@ -2886,8 +2714,6 @@ components:
         lobbyId:
           type: string
           format: uuid
-        matchId:
-          type: string
         expiresAt:
           type: string
           format: date-time

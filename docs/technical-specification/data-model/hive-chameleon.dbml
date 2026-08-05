@@ -94,11 +94,6 @@ Enum identity.claim_state {
   terminal_failed
 }
 
-Enum identity.disclosure_ack_source {
-  google_pre_provisioning
-  direct_hive_pre_participation
-}
-
 Enum identity.colorblind_mode {
   none
   protanopia
@@ -233,30 +228,6 @@ Enum game.round_result_revision_type {
   initial
   correction
   invalidation
-}
-
-Enum game.match_publication_request_type {
-  initial
-  correction
-  invalidation
-}
-
-Enum game.match_publication_request_state {
-  queued
-  batched
-  published
-  retryable_failed
-  cancelled
-}
-
-Enum game.match_publication_outbox_state {
-  queued
-  broadcast
-  included
-  irreversible
-  reverted
-  retryable_failed
-  terminal_failed
 }
 
 Enum content.map_origin {
@@ -507,34 +478,9 @@ Enum hive_projection.authorization_mode {
 }
 
 Enum hive_projection.service_account_role {
-  match_publisher
   collectible_issuer
   treasury
   rc_support
-}
-
-Enum hive_projection.match_event_type {
-  match_results_batch
-  match_result_corrected
-  match_result_invalidated
-}
-
-Enum hive_projection.match_result_current_state {
-  current
-  corrected
-  invalidated
-}
-
-Enum hive_projection.match_change_type {
-  correction
-  invalidation
-}
-
-Enum hive_projection.reconciliation_state {
-  pending
-  matched
-  divergent
-  local_result_unavailable
 }
 
 Enum hive_projection.rc_delegation_purpose {
@@ -748,45 +694,6 @@ Table identity.hive_account_claim {
   }
 
   Note: 'The two owner-authorized operations must share one transaction. Canonical authority text is public, deterministic operation input—not private material. Completion waits for the approximately 30-day recovery-account transition and changed_recovery_account verification. Migration adds one pending claim per player.'
-}
-
-Table identity.public_record_disclosure {
-  disclosure_version varchar(32) [pk, not null]
-  content_sha256 char(64) [not null]
-  effective_at timestamptz [not null]
-  retired_at timestamptz
-  ~created_record
-
-  checks {
-    `retired_at IS NULL OR retired_at > effective_at` [name: 'chk_public_disclosure_retired']
-  }
-
-  Note: 'Versioned product disclosure for permanent Hive match-summary fields; this is not a generic legal-consent table.'
-}
-
-Table identity.public_record_disclosure_acknowledgment {
-  id uuid [pk, not null, note: 'Application-generated UUIDv7']
-  disclosure_version varchar(32) [not null]
-  external_identity_id uuid
-  player_id uuid
-  source identity.disclosure_ack_source [not null]
-  acknowledged_at timestamptz [not null]
-  player_linked_at timestamptz
-
-  indexes {
-    (external_identity_id, disclosure_version) [name: 'idx_disclosure_ack_external']
-    (player_id, disclosure_version) [name: 'idx_disclosure_ack_player']
-    disclosure_version [name: 'idx_disclosure_ack_version']
-  }
-
-  checks {
-    `external_identity_id IS NOT NULL OR player_id IS NOT NULL` [name: 'chk_disclosure_ack_subject']
-    `player_linked_at IS NULL OR player_id IS NOT NULL` [name: 'chk_disclosure_ack_player_link']
-    `(source <> 'google_pre_provisioning') OR external_identity_id IS NOT NULL` [name: 'chk_disclosure_ack_google_subject']
-    `(source <> 'direct_hive_pre_participation') OR player_id IS NOT NULL` [name: 'chk_disclosure_ack_hive_subject']
-  }
-
-  Note: 'The Google row is updated with player_id after provisioning instead of duplicated. Migration adds partial unique indexes per non-null external identity/player and disclosure version. No IP, device, browser, email, or token data is stored.'
 }
 
 Table identity.player_profile {
@@ -1263,7 +1170,23 @@ Table game.game_round {
     `(status <> 'completed') OR (ended_at IS NOT NULL AND winning_side IS NOT NULL AND canonical_result_sha256 IS NOT NULL)` [name: 'chk_game_round_completed']
   }
 
-  Note: 'Completed round rows and detailed result children are immutable through service policy and migration triggers. Later public corrections or invalidations append round_result_revision rows and never edit this result.'
+  Note: 'Completed round rows and detailed result children are immutable through service policy and migration triggers. Later corrections or invalidations append round_result_revision rows and never edit this result.'
+}
+
+Table game.round_live_checkpoint {
+  round_id uuid [pk, not null, note: 'UUIDv7; also a foreign key to the active round']
+  format_version smallint [not null]
+  private_state jsonb [not null]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  checks {
+    `format_version > 0` [name: 'chk_round_live_checkpoint_format']
+    `jsonb_typeof(private_state) = 'object'` [name: 'chk_round_live_checkpoint_object']
+    `updated_at >= created_at` [name: 'chk_round_live_checkpoint_time']
+  }
+
+  Note: 'Private Nakama-only recovery checkpoint for one active authoritative round. It contains versioned roles, command idempotency caches, ammunition/reload state, discoveries, likes, avatars, score cadence, and reconnect deadlines. A compare-and-swap update fences stale match handlers. Terminal commit or abort deletes it; it is never exposed through client or public projection contracts.'
 }
 
 Table game.round_participant {
@@ -1360,7 +1283,7 @@ Table game.round_result_revision {
   result_schema_version varchar(32) [not null]
   scoring_rule_version varchar(32) [not null]
   canonical_complete_result_sha256 char(64)
-  canonical_result_object_key text
+  canonical_complete_result bytea
   reason_code varchar(64)
   ~created_record
 
@@ -1372,109 +1295,14 @@ Table game.round_result_revision {
 
   checks {
     `revision_number > 0` [name: 'chk_round_result_revision_number']
-    `(revision_type <> 'initial') OR (revision_number = 1 AND previous_revision_id IS NULL AND reason_code IS NULL AND canonical_complete_result_sha256 IS NOT NULL AND canonical_result_object_key IS NOT NULL)` [name: 'chk_round_result_revision_initial']
-    `(revision_type <> 'correction') OR (previous_revision_id IS NOT NULL AND reason_code IS NOT NULL AND canonical_complete_result_sha256 IS NOT NULL AND canonical_result_object_key IS NOT NULL)` [name: 'chk_round_result_revision_correction']
-    `(revision_type <> 'invalidation') OR (previous_revision_id IS NOT NULL AND reason_code IS NOT NULL AND canonical_complete_result_sha256 IS NULL AND canonical_result_object_key IS NULL)` [name: 'chk_round_result_revision_invalidation']
+    `(revision_type <> 'initial') OR (revision_number = 1 AND previous_revision_id IS NULL AND reason_code IS NULL AND canonical_complete_result_sha256 IS NOT NULL AND canonical_complete_result IS NOT NULL)` [name: 'chk_round_result_revision_initial']
+    `(revision_type <> 'correction') OR (previous_revision_id IS NOT NULL AND reason_code IS NOT NULL AND canonical_complete_result_sha256 IS NOT NULL AND canonical_complete_result IS NOT NULL)` [name: 'chk_round_result_revision_correction']
+    `(revision_type <> 'invalidation') OR (previous_revision_id IS NOT NULL AND reason_code IS NOT NULL AND canonical_complete_result_sha256 IS NULL AND canonical_complete_result IS NULL)` [name: 'chk_round_result_revision_invalidation']
+    `canonical_complete_result IS NULL OR octet_length(canonical_complete_result) BETWEEN 1 AND 1048576` [name: 'chk_round_result_revision_canonical_size']
+    `canonical_complete_result IS NULL OR encode(digest(canonical_complete_result, 'sha256'), 'hex') = canonical_complete_result_sha256` [name: 'chk_round_result_revision_canonical_sha256']
   }
 
-  Note: 'Append-only local result history. previous_revision_id is unique to keep the chain linear; a migration trigger also requires the previous row to belong to the same round and revision_number to advance by one. The initial revision is committed with the terminal detailed result and matches game_round versions/hash.'
-}
-
-Table game.match_publication_request {
-  id uuid [pk, not null, note: 'Application-generated UUIDv7; stable publication request']
-  round_id uuid [not null]
-  result_revision_id uuid [not null, unique]
-  request_type game.match_publication_request_type [not null]
-  state game.match_publication_request_state [not null, default: 'queued']
-  attempt_count integer [not null, default: 0]
-  next_retry_at timestamptz
-  last_attempt_at timestamptz
-  last_failure_code varchar(64)
-  published_at timestamptz
-  ~mutable_record
-
-  indexes {
-    (state, next_retry_at) [name: 'idx_match_publication_request_retry']
-    (round_id, request_type, state) [name: 'idx_match_publication_request_round']
-  }
-
-  checks {
-    `attempt_count >= 0` [name: 'chk_match_publication_request_attempts']
-    `(state <> 'published') OR published_at IS NOT NULL` [name: 'chk_match_publication_request_published']
-  }
-
-  Note: 'The initial request is inserted in the same database transaction as the completed round, detailed rows, and initial result revision. Migration enforces type agreement with the revision and one noncancelled initial request per round.'
-}
-
-Table game.match_publication_outbox {
-  id uuid [pk, not null, note: 'Application-generated UUIDv7']
-  event_uuid uuid [not null, unique, note: 'Stable protocol UUIDv7 across retries']
-  batch_uuid uuid [unique, note: 'Stable logical batch UUIDv7 across retries; initial batches only']
-  event_type hive_projection.match_event_type [not null]
-  schema_version smallint [not null]
-  event_contract_version varchar(32) [not null]
-  publication_period_start timestamptz
-  publication_period_end timestamptz
-  publisher_hive_account varchar(16) [not null]
-  result_count smallint [not null]
-  canonical_payload text [not null]
-  parsed_payload jsonb [not null]
-  payload_sha256 char(64) [not null]
-  payload_byte_count integer [not null]
-  state game.match_publication_outbox_state [not null, default: 'queued']
-  attempt_count integer [not null, default: 0]
-  next_retry_at timestamptz
-  last_attempt_at timestamptz
-  last_failure_code varchar(64)
-  hive_transaction_id varchar(128)
-  operation_id uuid [unique]
-  included_at timestamptz
-  irreversible_at timestamptz
-  reverted_at timestamptz
-  ~mutable_record
-
-  indexes {
-    (state, next_retry_at) [name: 'idx_match_outbox_retry']
-    (event_type, created_at) [name: 'idx_match_outbox_event_type']
-    (publisher_hive_account, state) [name: 'idx_match_outbox_publisher']
-    hive_transaction_id [name: 'idx_match_outbox_transaction']
-  }
-
-  checks {
-    `schema_version > 0` [name: 'chk_match_outbox_schema_version']
-    `(event_type = 'match_results_batch' AND batch_uuid IS NOT NULL AND publication_period_start IS NOT NULL AND publication_period_end IS NOT NULL AND publication_period_end >= publication_period_start) OR (event_type <> 'match_results_batch' AND batch_uuid IS NULL AND publication_period_start IS NULL AND publication_period_end IS NULL AND result_count = 1)` [name: 'chk_match_outbox_event_shape']
-    `publisher_hive_account = lower(publisher_hive_account)` [name: 'chk_match_outbox_publisher_lower']
-    `result_count > 0` [name: 'chk_match_outbox_result_count']
-    `payload_byte_count > 0 AND octet_length(canonical_payload) = payload_byte_count` [name: 'chk_match_outbox_payload_size']
-    `attempt_count >= 0` [name: 'chk_match_outbox_attempts']
-    `(state <> 'included') OR (hive_transaction_id IS NOT NULL AND operation_id IS NOT NULL AND included_at IS NOT NULL)` [name: 'chk_match_outbox_included']
-    `(state <> 'irreversible') OR (operation_id IS NOT NULL AND irreversible_at IS NOT NULL)` [name: 'chk_match_outbox_irreversible']
-    `(state <> 'reverted') OR (operation_id IS NOT NULL AND reverted_at IS NOT NULL)` [name: 'chk_match_outbox_reverted']
-  }
-
-  Note: 'Operational outbox, not the HAF projection. canonical_payload is the exact immutable application payload used across retries; parsed_payload is validated query data. Initial events carry a stable batch UUID and period; correction/invalidation events are single-result events and carry their original-batch lineage inside the event payload/change projection. Initial batching defaults to five minutes, 20 results, or 6 KiB, whichever is reached first; only production tuning is open. A retry may rebuild transaction headers but not logical IDs or payload bytes/hash.'
-}
-
-Table game.match_publication_item {
-  id uuid [pk, not null, note: 'Application-generated UUIDv7']
-  outbox_id uuid [not null]
-  publication_request_id uuid [not null, unique]
-  round_id uuid [not null]
-  result_revision_id uuid [not null]
-  result_position smallint [not null]
-  ~created_record
-
-  indexes {
-    (outbox_id, result_position) [unique, name: 'uq_match_publication_item_position']
-    (result_revision_id, round_id) [name: 'idx_match_publication_item_revision']
-    (round_id, outbox_id) [name: 'idx_match_publication_item_round']
-  }
-
-  checks {
-    `result_position >= 0` [name: 'chk_match_publication_item_position']
-  }
-
-  Note: 'Links durable requests to one immutable payload. Migrations verify request/revision/round/type consistency, enforce one item for correction/invalidation events, and enforce item count/positions against outbox.result_count.'
+  Note: 'Append-only authoritative result history. previous_revision_id is unique to keep the chain linear; a migration trigger also requires the previous row to belong to the same round and revision_number to advance by one. Initial and correction revisions retain the exact canonical UTF-8 JSON bytes with a database-verified SHA-256.'
 }
 
 Table game.player_mode_stat {
@@ -1698,6 +1526,7 @@ Table content.map_distribution {
   platform content.distribution_platform [not null]
   state content.distribution_state [not null, default: 'unavailable']
   required_game_build_version varchar(64) [not null]
+  required_protocol_version varchar(64)
   published_at timestamptz
   withdrawn_at timestamptz
   ~created_record
@@ -1709,6 +1538,7 @@ Table content.map_distribution {
 
   checks {
     `(state = 'unavailable' AND published_at IS NULL AND withdrawn_at IS NULL) OR (state = 'available' AND published_at IS NOT NULL AND withdrawn_at IS NULL) OR (state = 'withdrawn' AND published_at IS NOT NULL AND withdrawn_at IS NOT NULL AND withdrawn_at >= published_at)` [name: 'chk_map_distribution_state_times']
+    `required_protocol_version IS NULL OR (required_protocol_version = btrim(required_protocol_version) AND required_protocol_version <> '')` [name: 'chk_map_distribution_protocol_version']
   }
 }
 
@@ -2206,125 +2036,6 @@ Table hive_projection.operation {
   Note: 'Raw fork-aware operation evidence. Structurally malformed, unsupported, or unauthorized application operations remain here with a rejection reason and do not require a typed projection row.'
 }
 
-Table hive_projection.match_event {
-  event_uuid uuid [pk, not null, note: 'Stable protocol UUIDv7']
-  batch_uuid uuid [unique, note: 'Stable logical batch UUIDv7; initial batches only']
-  operation_id uuid [not null, unique]
-  event_type hive_projection.match_event_type [not null]
-  schema_version smallint [not null]
-  event_contract_version varchar(32) [not null]
-  publication_period_start timestamptz
-  publication_period_end timestamptz
-  publisher_hive_account varchar(16) [not null]
-  result_count smallint [not null]
-  operation_state hive_projection.operation_state [not null]
-  validation_state hive_projection.validation_state [not null, default: 'pending']
-  rejection_reason varchar(128)
-  included_at timestamptz [not null]
-  irreversible_at timestamptz
-  reverted_at timestamptz
-  ~created_record
-
-  indexes {
-    (publisher_hive_account, included_at) [name: 'idx_match_event_publisher']
-    (event_type, operation_state, included_at) [name: 'idx_match_event_state']
-    (validation_state, created_at) [name: 'idx_match_event_validation']
-  }
-
-  checks {
-    `schema_version > 0` [name: 'chk_match_event_schema_version']
-    `(event_type = 'match_results_batch' AND batch_uuid IS NOT NULL AND publication_period_start IS NOT NULL AND publication_period_end IS NOT NULL AND publication_period_end >= publication_period_start) OR (event_type <> 'match_results_batch' AND batch_uuid IS NULL AND publication_period_start IS NULL AND publication_period_end IS NULL AND result_count = 1)` [name: 'chk_match_event_shape']
-    `publisher_hive_account = lower(publisher_hive_account)` [name: 'chk_match_event_publisher_lower']
-    `result_count > 0` [name: 'chk_match_event_result_count']
-    `(event_type = 'match_results_batch') OR result_count = 1` [name: 'chk_match_event_change_count']
-    `(operation_state <> 'irreversible') OR irreversible_at IS NOT NULL` [name: 'chk_match_event_irreversible']
-    `(operation_state <> 'reverted') OR reverted_at IS NOT NULL` [name: 'chk_match_event_reverted']
-    `(validation_state <> 'rejected') OR rejection_reason IS NOT NULL` [name: 'chk_match_event_rejection']
-    `(operation_state = 'included' AND irreversible_at IS NULL AND reverted_at IS NULL) OR (operation_state = 'irreversible' AND irreversible_at IS NOT NULL AND reverted_at IS NULL) OR (operation_state = 'reverted' AND irreversible_at IS NULL AND reverted_at IS NOT NULL)` [name: 'chk_match_event_state_evidence']
-    `(operation_state = 'reverted' AND validation_state = 'reverted' AND rejection_reason IS NULL) OR (operation_state <> 'reverted' AND validation_state = 'accepted' AND rejection_reason IS NULL)` [name: 'chk_match_event_validation_state']
-  }
-
-  Note: 'Normalized HAF-derived event root. Initial batch events carry batch/period fields; correction and invalidation lineage is stored in match_result_change. Full validated payload remains on operation.payload. Projector state follows the referenced operation through inclusion, fork rollback, replay, and irreversibility; only allow-listed publisher events are accepted.'
-}
-
-Table hive_projection.match_result {
-  id uuid [pk, not null, note: 'Application-generated UUIDv7']
-  initial_event_uuid uuid [not null]
-  result_position smallint [not null]
-  round_id uuid [not null, unique]
-  result_schema_version varchar(32) [not null]
-  scoring_rule_version varchar(32) [not null]
-  map_version_id uuid [not null]
-  map_content_sha256 char(64) [not null]
-  server_build_version varchar(64) [not null]
-  match_protocol_version varchar(32) [not null]
-  public_result_sha256 char(64) [not null]
-  current_state hive_projection.match_result_current_state [not null, default: 'current']
-  current_event_uuid uuid [not null]
-  matched_result_revision_id uuid
-  reconciliation_state hive_projection.reconciliation_state [not null, default: 'pending']
-  reconciled_at timestamptz
-  divergence_detected_at timestamptz
-  divergence_reason_code varchar(64)
-  incident_reference varchar(128)
-  ~created_record
-
-  indexes {
-    (initial_event_uuid, result_position) [unique, name: 'uq_match_result_event_position']
-    (id, round_id) [unique, name: 'uq_match_result_round_identity']
-    (map_version_id, created_at) [name: 'idx_match_result_map_version']
-    (current_event_uuid, current_state) [name: 'idx_match_result_current_event']
-    (reconciliation_state, created_at) [name: 'idx_match_result_reconciliation']
-    matched_result_revision_id [name: 'idx_match_result_local_revision']
-  }
-
-  checks {
-    `result_position >= 0` [name: 'chk_match_result_position']
-    `(reconciliation_state <> 'matched') OR (matched_result_revision_id IS NOT NULL AND reconciled_at IS NOT NULL)` [name: 'chk_match_result_matched']
-    `(reconciliation_state <> 'divergent') OR (divergence_detected_at IS NOT NULL AND divergence_reason_code IS NOT NULL)` [name: 'chk_match_result_divergent']
-  }
-
-  Note: 'Integrity/join cache of an accepted initial Hive summary. Detailed participants, discoveries, and likes remain authoritative in game tables. One accepted initial result per round is enforced; current_event_uuid advances linearly only under projector rules, while the original event remains queryable.'
-}
-
-Table hive_projection.match_result_change {
-  event_uuid uuid [pk, not null, note: 'Correction/invalidation protocol UUIDv7']
-  projected_result_id uuid [not null]
-  round_id uuid [not null]
-  original_batch_uuid uuid [not null]
-  original_event_uuid uuid [not null]
-  supersedes_event_uuid uuid [not null]
-  change_type hive_projection.match_change_type [not null]
-  reason_code varchar(64) [not null]
-  replacement_result_revision_id uuid
-  replacement_result_schema_version varchar(32)
-  replacement_scoring_rule_version varchar(32)
-  replacement_map_version_id uuid
-  replacement_map_content_sha256 char(64)
-  replacement_server_build_version varchar(64)
-  replacement_match_protocol_version varchar(32)
-  replacement_public_result_sha256 char(64)
-  ~created_record
-
-  indexes {
-    (round_id, supersedes_event_uuid) [unique, name: 'uq_match_result_change_linear']
-    (projected_result_id, round_id) [name: 'idx_match_result_change_result_round']
-    (projected_result_id, created_at) [name: 'idx_match_result_change_history']
-    original_batch_uuid [name: 'idx_match_result_change_original_batch']
-    original_event_uuid [name: 'idx_match_result_change_original_event']
-    supersedes_event_uuid [name: 'idx_match_result_change_supersedes']
-    replacement_result_revision_id [name: 'idx_match_result_change_revision']
-    replacement_map_version_id [name: 'idx_match_result_change_map_version']
-  }
-
-  checks {
-    `(change_type <> 'correction') OR (replacement_result_revision_id IS NOT NULL AND replacement_result_schema_version IS NOT NULL AND replacement_scoring_rule_version IS NOT NULL AND replacement_map_version_id IS NOT NULL AND replacement_map_content_sha256 IS NOT NULL AND replacement_server_build_version IS NOT NULL AND replacement_match_protocol_version IS NOT NULL AND replacement_public_result_sha256 IS NOT NULL)` [name: 'chk_match_result_change_correction']
-    `(change_type <> 'invalidation') OR (replacement_result_revision_id IS NULL AND replacement_result_schema_version IS NULL AND replacement_scoring_rule_version IS NULL AND replacement_map_version_id IS NULL AND replacement_map_content_sha256 IS NULL AND replacement_server_build_version IS NULL AND replacement_match_protocol_version IS NULL AND replacement_public_result_sha256 IS NULL)` [name: 'chk_match_result_change_invalidation']
-  }
-
-  Note: 'Append-only correction/invalidation projection. The unique supersedes edge prevents branching; projector triggers require original_event_uuid to be the initial batch and event_uuid to have the matching event type. Replacement public summary detail remains in the validated operation payload.'
-}
-
 Table hive_projection.collectible_event {
   event_id uuid [pk, not null]
   operation_id uuid [not null, unique]
@@ -2561,9 +2272,6 @@ Ref fk_hive_account_claim_intent: identity.hive_account_claim.transaction_intent
 Ref fk_claim_change_recovery_op: identity.hive_account_claim.change_recovery_operation_id > hive_projection.operation.id [delete: restrict, update: no action]
 Ref fk_claim_account_update_op: identity.hive_account_claim.account_update_operation_id > hive_projection.operation.id [delete: restrict, update: no action]
 Ref fk_claim_changed_recovery_op: identity.hive_account_claim.changed_recovery_virtual_operation_id > hive_projection.operation.id [delete: restrict, update: no action]
-Ref fk_disclosure_ack_disclosure: identity.public_record_disclosure_acknowledgment.disclosure_version > identity.public_record_disclosure.disclosure_version [delete: restrict, update: no action]
-Ref fk_disclosure_ack_external: identity.public_record_disclosure_acknowledgment.external_identity_id > identity.external_identity.id [delete: restrict, update: no action]
-Ref fk_disclosure_ack_player: identity.public_record_disclosure_acknowledgment.player_id > identity.player.id [delete: restrict, update: no action]
 Ref fk_auth_session_player: identity.auth_session.player_id > identity.player.id [delete: restrict, update: no action]
 Ref fk_auth_session_external: identity.auth_session.external_identity_id > identity.external_identity.id [delete: restrict, update: no action]
 Ref fk_player_preference_player: identity.player.id - identity.player_preference.player_id [delete: restrict, update: no action]
@@ -2604,6 +2312,7 @@ Ref fk_lobby_configuration_lobby: game.lobby.id - game.lobby_configuration.lobby
 Ref fk_lobby_configuration_map: game.lobby_configuration.map_version_id > content.map_version.id [delete: restrict, update: no action]
 Ref fk_game_round_lobby: game.game_round.lobby_id > game.lobby.id [delete: restrict, update: no action]
 Ref fk_game_round_map: game.game_round.map_version_id > content.map_version.id [delete: restrict, update: no action]
+Ref fk_round_live_checkpoint_round: game.game_round.id - game.round_live_checkpoint.round_id [delete: cascade, update: no action]
 Ref fk_round_participant_round: game.round_participant.round_id > game.game_round.id [delete: restrict, update: no action]
 Ref fk_round_participant_player: game.round_participant.player_id > identity.player.id [delete: restrict, update: no action]
 Ref fk_round_discovery_round: game.round_discovery.round_id > game.game_round.id [delete: restrict, update: no action]
@@ -2615,13 +2324,6 @@ Ref fk_round_like_voter: game.round_like.voter_player_id > identity.player.id [d
 Ref fk_round_like_target: game.round_like.(round_id, target_hider_player_id) > game.round_participant.(round_id, player_id) [delete: restrict, update: no action]
 Ref fk_round_result_revision_round: game.round_result_revision.round_id > game.game_round.id [delete: restrict, update: no action]
 Ref fk_round_result_revision_previous: game.round_result_revision.previous_revision_id > game.round_result_revision.id [delete: restrict, update: no action]
-Ref fk_match_publication_request_round: game.match_publication_request.round_id > game.game_round.id [delete: restrict, update: no action]
-Ref fk_match_publication_request_revision: game.match_publication_request.result_revision_id > game.round_result_revision.id [delete: restrict, update: no action]
-Ref fk_match_outbox_operation: game.match_publication_outbox.operation_id > hive_projection.operation.id [delete: restrict, update: no action]
-Ref fk_match_publication_item_outbox: game.match_publication_item.outbox_id > game.match_publication_outbox.id [delete: restrict, update: no action]
-Ref fk_match_publication_item_request: game.match_publication_item.publication_request_id > game.match_publication_request.id [delete: restrict, update: no action]
-Ref fk_match_publication_item_round: game.match_publication_item.round_id > game.game_round.id [delete: restrict, update: no action]
-Ref fk_match_publication_item_revision: game.match_publication_item.(result_revision_id, round_id) > game.round_result_revision.(id, round_id) [delete: restrict, update: no action]
 Ref fk_player_mode_stat_player: game.player_mode_stat.player_id > identity.player.id [delete: restrict, update: no action]
 Ref fk_achievement_badge_definition: game.achievement_definition.badge_collectible_definition_id > commerce.collectible_definition.id [delete: restrict, update: no action]
 Ref fk_player_achievement_player: game.player_achievement.player_id > identity.player.id [delete: restrict, update: no action]
@@ -2680,19 +2382,6 @@ Ref fk_payout_entry: tournament.payout.(tournament_entry_id, tournament_id) > to
 Ref fk_payout_payment: tournament.payout.payment_transaction_id > commerce.payment_transaction.id [delete: restrict, update: no action]
 
 Ref fk_hive_operation_checkpoint: hive_projection.operation.checkpoint_id > hive_projection.block_checkpoint.id [delete: restrict, update: no action]
-Ref fk_match_event_operation: hive_projection.match_event.operation_id > hive_projection.operation.id [delete: restrict, update: no action]
-Ref fk_match_result_initial_event: hive_projection.match_result.initial_event_uuid > hive_projection.match_event.event_uuid [delete: restrict, update: no action]
-Ref fk_match_result_current_event: hive_projection.match_result.current_event_uuid > hive_projection.match_event.event_uuid [delete: restrict, update: no action]
-Ref fk_match_result_round: hive_projection.match_result.round_id > game.game_round.id [delete: restrict, update: no action]
-Ref fk_match_result_map_version: hive_projection.match_result.map_version_id > content.map_version.id [delete: restrict, update: no action]
-Ref fk_match_result_revision: hive_projection.match_result.matched_result_revision_id > game.round_result_revision.id [delete: restrict, update: no action]
-Ref fk_match_change_event: hive_projection.match_event.event_uuid - hive_projection.match_result_change.event_uuid [delete: restrict, update: no action]
-Ref fk_match_change_result: hive_projection.match_result_change.(projected_result_id, round_id) > hive_projection.match_result.(id, round_id) [delete: restrict, update: no action]
-Ref fk_match_change_original_batch: hive_projection.match_result_change.original_batch_uuid > hive_projection.match_event.batch_uuid [delete: restrict, update: no action]
-Ref fk_match_change_original_event: hive_projection.match_result_change.original_event_uuid > hive_projection.match_event.event_uuid [delete: restrict, update: no action]
-Ref fk_match_change_supersedes_event: hive_projection.match_result_change.supersedes_event_uuid > hive_projection.match_event.event_uuid [delete: restrict, update: no action]
-Ref fk_match_change_revision: hive_projection.match_result_change.replacement_result_revision_id > game.round_result_revision.id [delete: restrict, update: no action]
-Ref fk_match_change_map_version: hive_projection.match_result_change.replacement_map_version_id > content.map_version.id [delete: restrict, update: no action]
 Ref fk_collectible_event_operation: hive_projection.collectible_event.operation_id > hive_projection.operation.id [delete: restrict, update: no action]
 Ref fk_collectible_event_payment: hive_projection.collectible_event.payment_transaction_id > commerce.payment_transaction.id [delete: restrict, update: no action]
 Ref fk_asset_transfer_operation: hive_projection.asset_transfer.operation_id > hive_projection.operation.id [delete: restrict, update: no action]

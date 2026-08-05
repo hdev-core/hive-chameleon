@@ -19,113 +19,126 @@ UNITY_BUILD_TARGET=webgl \
 
 Build products go to `clients/unity/Builds/` and are ignored by Git.
 
-Desktop development players read realtime configuration from their process environment. WebGL
-players cannot do that, so the build command can serialize the same values into the development
-player:
+The normal Editor workflow is driven from the repository root:
 
 ```bash
-HIVE_CHAMELEON_API_URL=http://127.0.0.1:3000 \
-NAKAMA_SERVER_KEY=replace-with-the-local-public-server-key \
-REALTIME_DEV_BEARER_TOKEN=replace-with-at-least-32-random-characters \
-UNITY_BUILD_TARGET=webgl \
-  /path/to/Unity -batchmode -quit \
-  -projectPath "$PWD/clients/unity" \
-  -executeMethod HiveChameleon.Editor.DevelopmentBuild.BuildFromCommandLine \
-  -logFile -
+npm run authoritative:start -- --clients 2
 ```
 
-Supply all three realtime variables or none. With none, the development player builds in offline
-mode. The build command never prints their values and regenerates the source scene without them in
-a `finally` block. The ignored WebGL build still contains the development bearer token and must
-never be published or promoted as a release artifact.
+The command starts PostgreSQL, the API, and Nakama, then creates distinct authenticated local
+identities named Client 1 through Client 2. Open this project and press Play. Unity reads the
+selected identity from an ignored owner-only file under `Library/HiveChameleon/`; no credential is
+stored in a scene or committed asset.
 
-When the WebGL files are served from a different origin than the API, add that exact origin to the
-API's comma-separated `HTTP_CORS_ALLOWED_ORIGINS` setting (for example,
-`http://127.0.0.1:8000`). Wildcards, paths, and credential-bearing origins are rejected. A
-same-origin reverse proxy needs no CORS setting.
-Production CORS entries must use HTTPS.
-
-## Persistent lobby and round development panel
-
-Card #30 adds a development-only `OnGUI` panel after the scoped Nakama connection succeeds. It
-supports creating or joining a lobby, copying its ID, updating the configuration, requesting a
-start, leaving, and observing the authoritative host/member/version snapshot.
-
-Card #31 extends the same panel with Hunter nomination, published map-version selection, the
-public preparing-round snapshot, and the current client's private server-assigned role. A client
-can volunteer or withdraw itself, but it cannot name another player or submit a role.
-
-Card #32 adds the first authoritative Casual loop to that panel. The host can apply the minimum
-10-second hiding/30-second hunting development configuration. Hiders see only their own private
-server-assigned hiding slot. Hunters choose among the public aim slots, but the client sends only a
-command ID and aim-slot intent; Nakama validates phase, role, shells, reload timing, and the
-server-owned slot contents before broadcasting a discovery or terminal outcome.
-
-Run the migrated application database, Nakama, and API as described in
-`runtime/nakama/README.md`. Launch the editor or a desktop development player with:
+Switch the identity used on the next Play session with:
 
 ```bash
-HIVE_CHAMELEON_API_URL=http://127.0.0.1:3000 \
-NAKAMA_SERVER_KEY=replace-with-the-local-public-server-key \
-REALTIME_DEV_BEARER_TOKEN=replace-with-a-current-local-access-token \
-  /path/to/Unity -projectPath "$PWD/clients/unity"
+npm run authoritative:use -- --client 2
 ```
 
-The token must be a current access token issued by the local API for a seeded or authenticated
-player who acknowledged the public-match disclosure. It is not a permanent development bypass.
+The equivalent Editor menu is **Hive Chameleon > Local Multiplayer > Use Client 1…10**. Provision
+additional identities first with `npm run authoritative:clients -- --count 10`. Client numbers are
+session labels, not Host/Guest or Hunter/Hider assignments. All lobby and round roles come from
+Nakama and can change while connected.
 
-For a host-migration check, use separate valid player tokens in two clients:
+An unconfigured build opens only the connection-required entry screen: it does not create a local
+round, synthetic players, or placeholder scores. A non-development player deliberately ignores
+all local development credential sources.
 
-1. Create a lobby in the first client and copy its lobby ID.
-2. Join that ID in the second client.
-3. Configure from the first client. Starting a round requires the UUID of a published
-   `content.map_version`; the disposable smoke test creates a non-visual record automatically.
-4. Stop or close the host client.
-5. Confirm the second client's Host field changes to its player UUID and the lobby Version
-   advances. Its configuration button must now succeed.
+A non-development player still opens the online entry screen, but deliberately ignores all local
+development credentials. Until production login/session delivery exists, that screen remains
+unavailable instead of falling back to a local or simulated round.
 
-For the card #31 round-scaffolding check:
+Unity Editor Play does not use browser CORS. The optional local WebGL launcher configures its own
+exact localhost origin when it starts the API. Production CORS entries must use HTTPS.
+
+## Online entry, lobby, and round flow
+
+The development client exposes the current server-backed multiplayer test flow:
+
+1. connect to the scoped Nakama session issued by the API;
+2. create an open/private lobby or join one by lobby code;
+3. see the real connected roster and host;
+4. configure Casual or Infection, timers, Hunters, and ammunition; Chroma District is pinned to
+   the mutually supported official `prism-foundry` content version `m4-4`;
+5. volunteer for Hunter selection or start the match as host; and
+6. enter the 3D arena only after Nakama broadcasts a real round and private role assignment.
+
+Other players are instantiated only from server-attributed avatar snapshots. Hunter fire targets
+the network player ID resolved from the actual humanoid hitbox; map geometry and empty space are
+accepted misses that consume ammunition. The client has no practice-round fallback.
+
+The complete start, identity, logs, cleanup, and troubleshooting commands are in the
+[local authoritative multiplayer runbook](../../docs/local-authoritative-development.md).
+
+For a host-migration check, use two provisioned client identities:
+
+1. Create a lobby in either client and copy its lobby ID.
+2. Join that ID in another client.
+3. Configure from the current host. A fully migrated database automatically attaches the bundled
+   published Chroma District `m4-4` version; players never enter a raw map UUID.
+4. Stop or close whichever client currently owns Host.
+5. Confirm the `HOST` badge moves to the remaining player and the lobby version advances. Its
+   configuration button must now succeed.
+
+For the lobby and role-assignment check:
 
 1. Connect two clients and join the same lobby.
-2. In either client, select **Nominate me as Hunter**.
-3. In the host, paste a published map-version UUID and select
-   **Configure Casual demo: 10s hide / 30s hunt**.
-4. Select **Start authoritative round**.
-5. Both clients must show the same public round UUID, sequence `1`, and `preparing` state.
-6. Each client must show only its own private role. With one configured Hunter and one nominee,
-   the nominee must be the Hunter and the other player the Hider.
+2. Volunteer one client as Hunter.
+3. On the host, select Casual or Infection, confirm Chroma District, save, and start.
+4. Both clients must enter the same server-timed preparing, hiding, and hunting phases.
+5. Each client must receive only its own private role and player state.
+6. Both clients must see the other player's real networked humanoid once the phase and mode permit
+   it.
 
-For the card #32 Casual-round check:
+For the round-presentation check:
 
-1. Apply the Casual demo configuration and start the round.
-2. Both clients must progress from `preparing` to `hiding` and `hunting` from server deadlines.
-3. Only the Hider client may display its private hiding slot.
-4. On the Hunter client, fire at aim slots. Misses consume shells and enforce the server reload.
-5. Finding the final Hider must broadcast one discovery and a terminal Hunter win. If the timer
-   expires first, the terminal state must report a Hider win.
+1. In Casual, identify the Hider by shooting the Hider character. A shot at the street or empty
+   space must consume a shell without producing a discovery.
+2. Confirm a found Casual Hider enters first-person/third-person/free spectator views.
+3. In Infection, confirm the found Hider converts to a Hunter, receives ammunition, can no longer
+   paint, and the round completes when all Hiders convert.
+4. Confirm the left scoreboard shows only initial Hiders in server score batches, approximately
+   every 30 seconds; the original Hunter must never appear as a row.
+5. During Answer Check, keep the arena visible. Found Hider bodies must flash blue and unfound
+   Hider bodies red at their final 3D positions, with names and non-color status cues.
+6. Disconnect and reconnect within 60 seconds; the same server-authorized role and outcome must be
+   restored.
 
-The runtime rejects configuration changes, new nominations, and new joins while the round is
-active. Later cards add durable terminal commit, Infection, Answer Check/scoring, polished
-map/round presentation, and the 60-second reconnect outcome.
+For the cold path, refresh the WebGL page or restart Unity Play while a round is active. The client
+uses its authenticated API session to discover only its own bounded reservation, mints a fresh
+Nakama credential, and rejoins the authoritative match. It does not persist the lobby ID, role, or
+round state locally. The complete expiry and negative test is in the
+[local authoritative multiplayer runbook](../../docs/local-authoritative-development.md#cold-reconnect-check).
 
-No 3D models or gameplay assets are required for this panel. Without the three realtime
-environment values, Play Mode remains intentionally offline and logs that local credentials were
-not supplied.
+The runtime rejects configuration changes and new nominations while the round is active.
+Join-in-progress players enter the authoritative match as eligible spectators; they do not receive
+a late participant role.
+
+## Third-party asset source gate
+
+The MiniWorld Studio city pack is a local testing dependency. The project-authored
+`Assets/HiveChameleon/Resources/City/HC_CityArena.prefab` is kept in the repository, while the
+imported source files under `Assets/MiniWorld Studio/` are ignored and must not be staged,
+committed, or pushed. Each contributor downloads and imports the pack independently by following
+the [local authoritative multiplayer runbook](../../docs/local-authoritative-development.md#local-testing-map).
+The testing environment will be replaced by a separately tracked project-owned map in a future
+task.
 
 Unity builds are currently a local release gate. CI runs the checks that do not require a Unity
 license; add an appropriately isolated licensed runner before making Unity builds a required
 hosted check.
 
-## Public showcase build
+## Local WebGL multiplayer build
 
-From the repository root, build an offline WebGL showcase without serializing any development
-credentials:
+The optional launcher builds one credential-neutral Unity player and serves one short-lived local
+session per client URL:
 
 ```bash
-npm run unity:webgl:build
+npm run authoritative:webgl -- --clients 2
 ```
 
-The command explicitly removes the three development realtime variables from the Unity process,
-then validates the generated `index.html`, loader, data, framework, and WebAssembly files. Deploy
-the result to the already linked Vercel project with `npm run unity:webgl:deploy`. Do not publish a
-WebGL build created manually with development credentials.
+Open the printed `/client/1/` and `/client/2/` URLs in separate browser profiles. The artifact
+contains no bearer token; the localhost server injects a distinct current session into each page.
+It still has no production login flow and must not be deployed. The tooling never closes a running
+Unity Editor to bypass the project lock; close it yourself before requesting a WebGL build.
