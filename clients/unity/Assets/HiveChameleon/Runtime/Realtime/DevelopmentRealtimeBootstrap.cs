@@ -1,5 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
+using HiveChameleon.Presentation;
+using Nakama;
 using UnityEngine;
 
 namespace HiveChameleon.Realtime
@@ -7,113 +11,343 @@ namespace HiveChameleon.Realtime
     [DisallowMultipleComponent]
     public sealed class DevelopmentRealtimeBootstrap : MonoBehaviour
     {
-        private const string DefaultApiBaseUrl = "http://127.0.0.1:3000";
-
-        [SerializeField]
-        private string apiBaseUrl = DefaultApiBaseUrl;
-
-        [SerializeField]
-        private string nakamaServerKey = string.Empty;
-
-        [SerializeField]
-        private string developmentBearerToken = string.Empty;
-
         private readonly CancellationTokenSource _shutdown = new CancellationTokenSource();
-        private IRealtimeConnection _connection;
+        private readonly SemaphoreSlim _connectGate = new SemaphoreSlim(1, 1);
+        private DevelopmentLobbyPanel _menu;
+        private OfficialArenaExperience _experience;
+        private NakamaRealtimeConnection _connection;
+        private NakamaRealtimeConnection _experienceConnection;
+        private string _applicationPlayerId = string.Empty;
+        private string _resolvedApiBaseUrl = string.Empty;
+        private string _resolvedServerKey = string.Empty;
+        private string _resolvedBearerToken = string.Empty;
+        private bool _gameplayActive;
 
-#if UNITY_EDITOR
-        public void ConfigureForDevelopmentBuild(
-            string configuredApiBaseUrl,
-            string configuredServerKey,
-            string configuredBearerToken
-        )
+        private void Start()
         {
-            apiBaseUrl = configuredApiBaseUrl;
-            nakamaServerKey = configuredServerKey;
-            developmentBearerToken = configuredBearerToken;
+            _experience = GetComponent<OfficialArenaExperience>();
+            if (_experience != null)
+            {
+                _experience.enabled = false;
+            }
+
+            _menu = GetComponent<DevelopmentLobbyPanel>();
+            if (_menu == null)
+            {
+                _menu = gameObject.AddComponent<DevelopmentLobbyPanel>();
+            }
+
+            bool configured = AuthoritativeDevelopmentCredentials.TryResolve(
+                out AuthoritativeDevelopmentCredential credential
+            );
+            if (configured)
+            {
+                _resolvedApiBaseUrl = credential.ApiBaseUrl;
+                _resolvedServerKey = credential.NakamaServerKey;
+                _resolvedBearerToken = credential.BearerToken;
+            }
+            _menu.InitializeEntry(
+                configured,
+                configured
+                    ? "Ready to play online."
+                    : "Online play is currently unavailable.",
+                configured ? ConnectAsync : null,
+                _shutdown.Token
+            );
+            if (configured)
+            {
+                _ = TryRestoreOnStartupAsync(_shutdown.Token);
+            }
         }
-#endif
 
-        private async void Start()
+        private void Update()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            string resolvedServerKey = ResolveDevelopmentValue(
-                nakamaServerKey,
-                "NAKAMA_SERVER_KEY"
-            );
-            string resolvedBearerToken = ResolveDevelopmentValue(
-                developmentBearerToken,
-                "REALTIME_DEV_BEARER_TOKEN"
-            );
-            string resolvedApiBaseUrl = ResolveDevelopmentValue(
-                apiBaseUrl,
-                "HIVE_CHAMELEON_API_URL"
-            );
-
             if (
-                string.IsNullOrWhiteSpace(resolvedServerKey)
-                || string.IsNullOrWhiteSpace(resolvedBearerToken)
+                _gameplayActive
+                && (
+                    _connection == null
+                    || _connection.State != RealtimeConnectionState.Connected
+                )
             )
             {
-                DevelopmentLobbyPanel previewPanel = GetComponent<DevelopmentLobbyPanel>();
-                if (previewPanel == null)
+                DeactivateGameplay();
+                _menu?.NotifyConnectionLost();
+            }
+        }
+
+        private async Task ConnectAsync(CancellationToken cancellationToken)
+        {
+            await ConnectAsync(null, cancellationToken);
+        }
+
+        private async Task ConnectAsync(
+            ReconnectDescriptor preferredReconnect,
+            CancellationToken cancellationToken
+        )
+        {
+            await _connectGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (
+                    _connection != null
+                    && _connection.State == RealtimeConnectionState.Connected
+                )
                 {
-                    previewPanel = gameObject.AddComponent<DevelopmentLobbyPanel>();
+                    return;
                 }
-                previewPanel.InitializePreview();
-                Debug.Log(
-                    "Realtime development connection is disabled; showing the credential-free visual preview."
+
+                string interruptedLobbyId = _connection?.CurrentLobby?.id ?? string.Empty;
+                if (await TryReconnectAsync(cancellationToken))
+                {
+                    return;
+                }
+
+                await ReleaseConnectionAsync();
+                cancellationToken.ThrowIfCancellationRequested();
+
+                IRealtimeCredentialProvider credentialProvider =
+                    new HttpRealtimeCredentialProvider(
+                        _resolvedApiBaseUrl,
+                        _resolvedBearerToken
+                    );
+                ReconnectDescriptor reconnect =
+                    preferredReconnect
+                    ?? await credentialProvider.GetReconnectDescriptorAsync(
+                        cancellationToken
+                    );
+                RealtimeSessionCredential credential =
+                    await credentialProvider.GetCredentialAsync(cancellationToken);
+                var connection = new NakamaRealtimeConnection(_resolvedServerKey);
+                try
+                {
+                    await connection.ConnectAsync(credential, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    _connection = connection;
+                    _connection.RoundStateChanged += HandleRoundStateChanged;
+                    _connection.LobbyStateChanged += HandleLobbyStateChanged;
+                    _applicationPlayerId = ResolveApplicationPlayerId(credential);
+                    if (reconnect.Available)
+                    {
+                        await connection.RestoreLobbyAsync(
+                            reconnect.LobbyId,
+                            cancellationToken
+                        );
+                    }
+                    _menu.BindConnection(
+                        connection,
+                        _applicationPlayerId
+                    );
+                    _menu.PrefillLobbyCode(interruptedLobbyId);
+
+                    if (LobbyMenuRules.IsGameplayRound(connection.CurrentRound))
+                    {
+                        ActivateGameplay(connection.CurrentRound);
+                    }
+                }
+                catch
+                {
+                    await connection.CloseAsync();
+                    if (ReferenceEquals(_connection, connection))
+                    {
+                        DetachConnection(connection);
+                        _connection = null;
+                    }
+                    throw;
+                }
+            }
+            finally
+            {
+                _connectGate.Release();
+            }
+        }
+
+        private async Task TryRestoreOnStartupAsync(
+            CancellationToken cancellationToken
+        )
+        {
+            try
+            {
+                IRealtimeCredentialProvider credentialProvider =
+                    new HttpRealtimeCredentialProvider(
+                        _resolvedApiBaseUrl,
+                        _resolvedBearerToken
+                    );
+                ReconnectDescriptor reconnect =
+                    await credentialProvider.GetReconnectDescriptorAsync(
+                        cancellationToken
+                    );
+                if (reconnect.Available)
+                {
+                    await ConnectAsync(reconnect, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning(
+                    $"Could not restore the interrupted online session: {exception.Message}"
                 );
-                return;
+            }
+        }
+
+        private async Task<bool> TryReconnectAsync(
+            CancellationToken cancellationToken
+        )
+        {
+            NakamaRealtimeConnection connection = _connection;
+            if (
+                connection == null
+                || !LobbyMenuRules.CanAttemptReconnect(
+                    connection.State,
+                    connection.CurrentLobby
+                )
+            )
+            {
+                return false;
             }
 
             try
             {
-                IRealtimeCredentialProvider credentialProvider =
-                    new HttpRealtimeCredentialProvider(resolvedApiBaseUrl, resolvedBearerToken);
-                var nakamaConnection = new NakamaRealtimeConnection(resolvedServerKey);
-                _connection = nakamaConnection;
-                RealtimeSessionCredential credential = await credentialProvider.GetCredentialAsync(
-                    _shutdown.Token
-                );
-                await _connection.ConnectAsync(credential, _shutdown.Token);
-
-                DevelopmentLobbyPanel panel = GetComponent<DevelopmentLobbyPanel>();
-                if (panel == null)
+                await connection.ReconnectAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                _menu.BindConnection(connection, _applicationPlayerId);
+                if (LobbyMenuRules.IsGameplayRound(connection.CurrentRound))
                 {
-                    panel = gameObject.AddComponent<DevelopmentLobbyPanel>();
+                    ActivateGameplay(connection.CurrentRound);
                 }
-                panel.Initialize(nakamaConnection, _shutdown.Token);
+                return true;
             }
-            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
-                // Normal object or application shutdown.
+                throw;
             }
-            catch (Exception exception)
+            catch
             {
-                Debug.LogWarning($"Realtime development connection unavailable: {exception.Message}");
+                return false;
             }
-#endif
+        }
+
+        private void HandleRoundStateChanged(RoundSnapshot round)
+        {
+            if (LobbyMenuRules.IsGameplayRound(round))
+            {
+                ActivateGameplay(round);
+            }
+            else
+            {
+                DeactivateGameplay();
+            }
+        }
+
+        private void HandleLobbyStateChanged(LobbySnapshot lobby)
+        {
+            if (lobby == null || lobby.closed)
+            {
+                DeactivateGameplay();
+            }
+        }
+
+        private void ActivateGameplay(RoundSnapshot round)
+        {
+            if (
+                !LobbyMenuRules.IsGameplayRound(round)
+                || _connection == null
+                || _connection.State != RealtimeConnectionState.Connected
+                || _experience == null
+            )
+            {
+                return;
+            }
+
+            if (!ReferenceEquals(_experienceConnection, _connection))
+            {
+                _experience.Initialize(
+                    _connection,
+                    _shutdown.Token,
+                    LeaveActiveLobbyAsync
+                );
+                _experienceConnection = _connection;
+            }
+            _experience.enabled = true;
+            _gameplayActive = true;
+            _menu?.SetGameplayActive(true);
+        }
+
+        private void DeactivateGameplay()
+        {
+            _gameplayActive = false;
+            if (_experience != null)
+            {
+                _experience.enabled = false;
+            }
+            _menu?.SetGameplayActive(false);
+        }
+
+        private async Task LeaveActiveLobbyAsync(
+            CancellationToken cancellationToken
+        )
+        {
+            NakamaRealtimeConnection connection = _connection;
+            if (
+                connection == null
+                || connection.State != RealtimeConnectionState.Connected
+                || connection.CurrentLobby == null
+            )
+            {
+                throw new InvalidOperationException(
+                    "The lobby connection is no longer available."
+                );
+            }
+
+            await connection.LeaveLobbyAsync(cancellationToken);
+            if (ReferenceEquals(_connection, connection))
+            {
+                DeactivateGameplay();
+            }
+        }
+
+        private async Task ReleaseConnectionAsync()
+        {
+            DeactivateGameplay();
+            NakamaRealtimeConnection connection = _connection;
+            if (connection == null)
+            {
+                return;
+            }
+
+            DetachConnection(connection);
+            _connection = null;
+            _applicationPlayerId = string.Empty;
+            _menu?.ClearConnection(connection.CurrentLobby?.id ?? string.Empty);
+            await connection.CloseAsync();
+        }
+
+        private void DetachConnection(NakamaRealtimeConnection connection)
+        {
+            connection.RoundStateChanged -= HandleRoundStateChanged;
+            connection.LobbyStateChanged -= HandleLobbyStateChanged;
         }
 
         private async void OnDestroy()
         {
             _shutdown.Cancel();
-            if (_connection != null)
-            {
-                await _connection.CloseAsync();
-            }
+            await ReleaseConnectionAsync();
             _shutdown.Dispose();
         }
 
-        private static string ResolveDevelopmentValue(string serializedValue, string variableName)
+        private static string ResolveApplicationPlayerId(
+            RealtimeSessionCredential credential
+        )
         {
-#if UNITY_WEBGL && !UNITY_EDITOR
-            return serializedValue;
-#else
-            string environmentValue = Environment.GetEnvironmentVariable(variableName);
-            return string.IsNullOrWhiteSpace(environmentValue) ? serializedValue : environmentValue;
-#endif
+            ISession session = Session.Restore(credential.NakamaToken);
+            IDictionary<string, string> variables = session.Vars;
+            return variables != null
+                && variables.TryGetValue("app_player_id", out string playerId)
+                    ? playerId
+                    : string.Empty;
         }
     }
 }

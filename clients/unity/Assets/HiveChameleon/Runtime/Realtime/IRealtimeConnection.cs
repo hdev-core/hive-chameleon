@@ -21,6 +21,13 @@ namespace HiveChameleon.Realtime
             CancellationToken cancellationToken
         );
 
+        Task<LobbyRpcResponse> ReconnectAsync(CancellationToken cancellationToken);
+
+        Task<LobbyRpcResponse> RestoreLobbyAsync(
+            string lobbyId,
+            CancellationToken cancellationToken
+        );
+
         Task CloseAsync();
     }
 }

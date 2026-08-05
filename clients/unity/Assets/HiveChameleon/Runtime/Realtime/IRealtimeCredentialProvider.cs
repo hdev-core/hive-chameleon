@@ -6,5 +6,9 @@ namespace HiveChameleon.Realtime
     public interface IRealtimeCredentialProvider
     {
         Task<RealtimeSessionCredential> GetCredentialAsync(CancellationToken cancellationToken);
+
+        Task<ReconnectDescriptor> GetReconnectDescriptorAsync(
+            CancellationToken cancellationToken
+        );
     }
 }

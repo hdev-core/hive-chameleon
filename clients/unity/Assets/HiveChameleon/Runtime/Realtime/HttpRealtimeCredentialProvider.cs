@@ -8,6 +8,7 @@ namespace HiveChameleon.Realtime
 {
     public sealed class HttpRealtimeCredentialProvider : IRealtimeCredentialProvider
     {
+        private readonly Uri _reconnectEndpoint;
         private readonly Uri _sessionEndpoint;
         private readonly string _bearerToken;
 
@@ -23,6 +24,7 @@ namespace HiveChameleon.Realtime
             }
 
             _sessionEndpoint = new Uri(baseUri, "api/v1/realtime/session");
+            _reconnectEndpoint = new Uri(baseUri, "api/v1/me/reconnect");
             _bearerToken = bearerToken;
         }
 
@@ -71,6 +73,42 @@ namespace HiveChameleon.Realtime
                 throw new InvalidOperationException("Realtime credential response was not valid JSON.");
             }
             return response.ToCredential();
+        }
+
+        public async Task<ReconnectDescriptor> GetReconnectDescriptorAsync(
+            CancellationToken cancellationToken
+        )
+        {
+            using UnityWebRequest request = UnityWebRequest.Get(_reconnectEndpoint);
+            request.SetRequestHeader("Accept", "application/json");
+            request.SetRequestHeader("Authorization", "Bearer " + _bearerToken);
+
+            UnityWebRequestAsyncOperation operation = request.SendWebRequest();
+            try
+            {
+                while (!operation.isDone)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await Task.Yield();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                request.Abort();
+                throw;
+            }
+
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                throw new InvalidOperationException(
+                    $"Reconnect discovery request failed with HTTP {request.responseCode}."
+                );
+            }
+
+            return ReconnectDescriptor.FromJson(
+                request.downloadHandler.text,
+                DateTimeOffset.UtcNow
+            );
         }
 
         private static string EnsureTrailingSlash(string value)

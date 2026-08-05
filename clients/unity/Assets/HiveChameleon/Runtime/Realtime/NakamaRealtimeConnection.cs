@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,13 +16,26 @@ namespace HiveChameleon.Realtime
         private const long RoundDiscoveryOpcode = 4;
         private const long RoundPlayerStateOpcode = 5;
         private const long HunterFireResultOpcode = 6;
+        private const long RoundSpectatorOpcode = 7;
+        private const long RoundScoreOpcode = 8;
+        private const long RoundAnswerCheckOpcode = 9;
         private const long HunterFireCommandOpcode = 10;
+        private const long AnswerCheckLikeOpcode = 11;
+        private const long AnswerCheckLikeResultOpcode = 12;
+        private const long RoundReconnectOpcode = 13;
+        private const long AvatarStateCommandOpcode = 14;
+        private const long AvatarStateSnapshotOpcode = 15;
+        private const float MinimumAvatarPitch = -58f;
+        private const float MaximumAvatarPitch = 62f;
 
         private readonly string _serverKey;
         private IClient _client;
         private ISession _session;
         private ISocket _socket;
         private IMatch _match;
+        private string _expectedJoiningMatchId = string.Empty;
+        private readonly Dictionary<string, int> _avatarSequenceByPlayer =
+            new Dictionary<string, int>();
 
         public NakamaRealtimeConnection(string serverKey)
         {
@@ -47,6 +61,16 @@ namespace HiveChameleon.Realtime
 
         public HunterFireResult LastFireResult { get; private set; }
 
+        public SpectatorStateSnapshot CurrentSpectatorState { get; private set; }
+
+        public AnswerCheckSnapshot CurrentAnswerCheck { get; private set; }
+
+        public RoundScoreSnapshot CurrentScores { get; private set; }
+
+        public AnswerCheckLikeResult LastLikeResult { get; private set; }
+
+        public RoundReconnectSnapshot CurrentReconnectState { get; private set; }
+
         public event Action<LobbySnapshot> LobbyStateChanged;
 
         public event Action<RoundSnapshot> RoundStateChanged;
@@ -58,6 +82,18 @@ namespace HiveChameleon.Realtime
         public event Action<RoundDiscoverySnapshot> RoundDiscoveryReceived;
 
         public event Action<HunterFireResult> HunterFireResolved;
+
+        public event Action<SpectatorStateSnapshot> SpectatorStateChanged;
+
+        public event Action<AnswerCheckSnapshot> AnswerCheckChanged;
+
+        public event Action<RoundScoreSnapshot> RoundScoresChanged;
+
+        public event Action<AnswerCheckLikeResult> AnswerCheckLikeResolved;
+
+        public event Action<RoundReconnectSnapshot> RoundReconnectChanged;
+
+        public event Action<AvatarStateSnapshot> AvatarStateReceived;
 
         public async Task ConnectAsync(
             RealtimeSessionCredential credential,
@@ -95,22 +131,144 @@ namespace HiveChameleon.Realtime
             }
 
             _socket = _client.NewSocket(useMainThread: true);
-            _socket.Connected += HandleConnected;
-            _socket.Closed += HandleClosed;
-            _socket.ReceivedError += HandleError;
-            _socket.ReceivedMatchState += HandleMatchState;
+            AttachSocketHandlers(_socket);
 
             try
             {
                 await _socket.ConnectAsync(_session, appearOnline: true);
                 cancellationToken.ThrowIfCancellationRequested();
                 State = RealtimeConnectionState.Connected;
-                Debug.Log($"Nakama socket connected for user {_session.UserId}.");
+                Debug.Log("Nakama socket connected.");
             }
             catch
             {
                 State = RealtimeConnectionState.Faulted;
                 await CloseSocketIgnoringErrorsAsync();
+                throw;
+            }
+        }
+
+        public async Task<LobbyRpcResponse> ReconnectAsync(
+            CancellationToken cancellationToken
+        )
+        {
+            if (
+                State != RealtimeConnectionState.Disconnected
+                && State != RealtimeConnectionState.Faulted
+            )
+            {
+                throw new InvalidOperationException(
+                    $"Cannot reconnect while realtime state is {State}."
+                );
+            }
+            if (
+                _client == null
+                || _session == null
+                || CurrentLobby == null
+                || string.IsNullOrWhiteSpace(CurrentLobby.id)
+            )
+            {
+                throw new InvalidOperationException(
+                    "No interrupted lobby session is available to reconnect."
+                );
+            }
+            if (_session.IsExpired)
+            {
+                throw new InvalidOperationException(
+                    "Nakama session expired before the reconnect attempt."
+                );
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            State = RealtimeConnectionState.Connecting;
+            await CloseSocketForReconnectIgnoringErrorsAsync();
+            try
+            {
+                IApiRpc rpc = await _client.RpcAsync(
+                    _session,
+                    "match.reconnect",
+                    JsonUtility.ToJson(
+                        new MatchReconnectCommand { lobby_id = CurrentLobby.id }
+                    ),
+                    canceller: cancellationToken
+                );
+                cancellationToken.ThrowIfCancellationRequested();
+                LobbyRpcResponse response =
+                    JsonUtility.FromJson<LobbyRpcResponse>(rpc.Payload);
+                ValidateReconnectResponse(response, CurrentLobby.id);
+                PublishLobby(response.lobby);
+                if (response.round != null && !string.IsNullOrWhiteSpace(response.round.id))
+                {
+                    PublishRound(response.round);
+                }
+                CurrentReconnectState = response.reconnect;
+                RoundReconnectChanged?.Invoke(response.reconnect);
+
+                _socket = _client.NewSocket(useMainThread: true);
+                AttachSocketHandlers(_socket);
+                await _socket.ConnectAsync(_session, appearOnline: true);
+                cancellationToken.ThrowIfCancellationRequested();
+                await JoinAuthoritativeLobbyAsync(response.match_id, cancellationToken);
+                State = RealtimeConnectionState.Connected;
+                return response;
+            }
+            catch
+            {
+                await CloseSocketForReconnectIgnoringErrorsAsync();
+                State = RealtimeConnectionState.Faulted;
+                throw;
+            }
+        }
+
+        public async Task<LobbyRpcResponse> RestoreLobbyAsync(
+            string lobbyId,
+            CancellationToken cancellationToken
+        )
+        {
+            RequireConnected();
+            if (!LobbyMenuRules.IsUuidV7(lobbyId))
+            {
+                throw new ArgumentException(
+                    "A valid reconnect lobby ID is required.",
+                    nameof(lobbyId)
+                );
+            }
+            if (CurrentLobby != null || _match != null)
+            {
+                throw new InvalidOperationException(
+                    "Leave the current lobby before restoring another one."
+                );
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                IApiRpc rpc = await _client.RpcAsync(
+                    _session,
+                    "match.reconnect",
+                    JsonUtility.ToJson(
+                        new MatchReconnectCommand { lobby_id = lobbyId.Trim() }
+                    ),
+                    canceller: cancellationToken
+                );
+                cancellationToken.ThrowIfCancellationRequested();
+                LobbyRpcResponse response =
+                    JsonUtility.FromJson<LobbyRpcResponse>(rpc.Payload);
+                ValidateReconnectResponse(response, lobbyId.Trim());
+
+                PublishLobby(response.lobby);
+                if (response.round != null && !string.IsNullOrWhiteSpace(response.round.id))
+                {
+                    PublishRound(response.round);
+                }
+                CurrentReconnectState = response.reconnect;
+                RoundReconnectChanged?.Invoke(response.reconnect);
+                await JoinAuthoritativeLobbyAsync(response.match_id, cancellationToken);
+                return response;
+            }
+            catch
+            {
+                ClearLobbyState();
                 throw;
             }
         }
@@ -150,7 +308,7 @@ namespace HiveChameleon.Realtime
                 command,
                 cancellationToken
             );
-            await JoinAuthoritativeLobbyAsync(response.match_id, cancellationToken);
+            await JoinLobbyMatchOrRollbackAsync(response, cancellationToken);
             return response;
         }
 
@@ -170,7 +328,7 @@ namespace HiveChameleon.Realtime
                 command,
                 cancellationToken
             );
-            await JoinAuthoritativeLobbyAsync(response.match_id, cancellationToken);
+            await JoinLobbyMatchOrRollbackAsync(response, cancellationToken);
             return response;
         }
 
@@ -240,7 +398,9 @@ namespace HiveChameleon.Realtime
         }
 
         public async Task<string> FireHunterAsync(
-            int aimSlot,
+            string targetPlayerId,
+            float aimYaw,
+            float aimPitch,
             CancellationToken cancellationToken
         )
         {
@@ -259,32 +419,117 @@ namespace HiveChameleon.Realtime
                     "Hunter fire is available only during the hunting phase."
                 );
             }
-            if (
-                CurrentRoleAssignment == null
-                || CurrentRoleAssignment.role != "hunter"
-            )
+            string currentRole = CurrentRoundPlayerState?.role
+                ?? CurrentRoleAssignment?.role;
+            if (currentRole != "hunter")
             {
                 throw new InvalidOperationException(
                     "Only a server-assigned Hunter can send a fire intent."
                 );
             }
-            if (aimSlot < 1 || aimSlot > CurrentRound.target_slot_count)
+            if (
+                !IsFinite(aimYaw)
+                || !IsFinite(aimPitch)
+                || aimPitch < MinimumAvatarPitch
+                || aimPitch > MaximumAvatarPitch
+            )
             {
                 throw new ArgumentOutOfRangeException(
-                    nameof(aimSlot),
-                    "Aim slot is outside the server-published target range."
+                    nameof(aimPitch),
+                    "Hunter aim is outside the authoritative range."
                 );
             }
-
             cancellationToken.ThrowIfCancellationRequested();
             var command = new HunterFireCommand
             {
                 command_id = Guid.NewGuid().ToString("N"),
-                aim_slot = aimSlot,
+                target_player_id = targetPlayerId?.Trim() ?? string.Empty,
+                aim_yaw = Mathf.Repeat(aimYaw, 360f),
+                aim_pitch = aimPitch,
             };
             await _socket.SendMatchStateAsync(
                 _match.Id,
                 HunterFireCommandOpcode,
+                JsonUtility.ToJson(command)
+            );
+            cancellationToken.ThrowIfCancellationRequested();
+            return command.command_id;
+        }
+
+        public async Task SendAvatarStateAsync(
+            AvatarStateCommand command,
+            CancellationToken cancellationToken
+        )
+        {
+            RequireConnected();
+            if (command == null)
+            {
+                throw new ArgumentNullException(nameof(command));
+            }
+            if (_match == null || string.IsNullOrWhiteSpace(_match.Id))
+            {
+                throw new InvalidOperationException("Join an authoritative lobby match first.");
+            }
+            if (
+                CurrentRound == null
+                || string.IsNullOrWhiteSpace(CurrentRound.id)
+                || (
+                    CurrentRound.status != "preparing"
+                    && CurrentRound.status != "hiding"
+                    && CurrentRound.status != "hunting"
+                    && CurrentRound.status != "answer_check"
+                )
+            )
+            {
+                return;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            await _socket.SendMatchStateAsync(
+                _match.Id,
+                AvatarStateCommandOpcode,
+                JsonUtility.ToJson(command)
+            );
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        public async Task<string> LikeDisguiseAsync(
+            string targetHiderPlayerId,
+            CancellationToken cancellationToken
+        )
+        {
+            RequireConnected();
+            if (_match == null || string.IsNullOrWhiteSpace(_match.Id))
+            {
+                throw new InvalidOperationException("Join an authoritative lobby match first.");
+            }
+            if (
+                CurrentRound == null
+                || CurrentRound.status != "answer_check"
+                || CurrentAnswerCheck == null
+            )
+            {
+                throw new InvalidOperationException(
+                    "Disguise likes are available only during Answer Check."
+                );
+            }
+            if (string.IsNullOrWhiteSpace(targetHiderPlayerId))
+            {
+                throw new ArgumentException(
+                    "A revealed Hider player ID is required.",
+                    nameof(targetHiderPlayerId)
+                );
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var command = new AnswerCheckLikeCommand
+            {
+                command_id = Guid.NewGuid().ToString("N"),
+                target_hider_player_id = targetHiderPlayerId,
+            };
+            await _socket.SendMatchStateAsync(
+                _match.Id,
+                AnswerCheckLikeOpcode,
                 JsonUtility.ToJson(command)
             );
             cancellationToken.ThrowIfCancellationRequested();
@@ -302,11 +547,10 @@ namespace HiveChameleon.Realtime
                 cancellationToken
             );
             _match = null;
+            CurrentLobby = null;
             CurrentRound = null;
-            CurrentRoleAssignment = null;
-            CurrentRoundPlayerState = null;
-            LastDiscovery = null;
-            LastFireResult = null;
+            ClearPerRoundState();
+            LobbyStateChanged?.Invoke(null);
             return response;
         }
 
@@ -349,8 +593,119 @@ namespace HiveChameleon.Realtime
                 throw new InvalidOperationException("Lobby response has no authoritative match ID.");
             }
             cancellationToken.ThrowIfCancellationRequested();
-            _match = await _socket.JoinMatchAsync(matchId);
-            cancellationToken.ThrowIfCancellationRequested();
+            _expectedJoiningMatchId = matchId;
+            try
+            {
+                IMatch joinedMatch = await _socket.JoinMatchAsync(matchId);
+                if (
+                    joinedMatch == null
+                    || !string.Equals(
+                        joinedMatch.Id,
+                        matchId,
+                        StringComparison.Ordinal
+                    )
+                )
+                {
+                    throw new InvalidOperationException(
+                        "Nakama joined an unexpected authoritative match."
+                    );
+                }
+                _match = joinedMatch;
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            finally
+            {
+                _expectedJoiningMatchId = string.Empty;
+            }
+        }
+
+        private async Task JoinLobbyMatchOrRollbackAsync(
+            LobbyRpcResponse response,
+            CancellationToken cancellationToken
+        )
+        {
+            try
+            {
+                await JoinAuthoritativeLobbyAsync(
+                    response.match_id,
+                    cancellationToken
+                );
+            }
+            catch
+            {
+                await RollbackFailedLobbyJoinAsync(response.lobby?.id);
+                throw;
+            }
+        }
+
+        private async Task RollbackFailedLobbyJoinAsync(string lobbyId)
+        {
+            if (
+                !string.IsNullOrWhiteSpace(lobbyId)
+                && _client != null
+                && _session != null
+                && !_session.IsExpired
+            )
+            {
+                try
+                {
+                    await _client.RpcAsync(
+                        _session,
+                        "lobby.leave",
+                        JsonUtility.ToJson(
+                            new LeaveLobbyCommand { lobby_id = lobbyId }
+                        ),
+                        canceller: CancellationToken.None
+                    );
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning(
+                        $"Could not roll back failed lobby join: {exception.Message}"
+                    );
+                }
+            }
+
+            _match = null;
+            _expectedJoiningMatchId = string.Empty;
+            CurrentLobby = null;
+            CurrentRound = null;
+            ClearPerRoundState();
+            LobbyStateChanged?.Invoke(null);
+        }
+
+        private void ClearLobbyState()
+        {
+            _match = null;
+            _expectedJoiningMatchId = string.Empty;
+            CurrentLobby = null;
+            CurrentRound = null;
+            ClearPerRoundState();
+            LobbyStateChanged?.Invoke(null);
+        }
+
+        private static void ValidateReconnectResponse(
+            LobbyRpcResponse response,
+            string expectedLobbyId
+        )
+        {
+            if (
+                response == null
+                || response.lobby == null
+                || !string.Equals(
+                    response.lobby.id,
+                    expectedLobbyId,
+                    StringComparison.Ordinal
+                )
+                || string.IsNullOrWhiteSpace(response.match_id)
+                || response.reconnect == null
+                || !response.reconnect.outcome_preserved
+            )
+            {
+                throw new InvalidOperationException(
+                    "match.reconnect returned an invalid reservation."
+                );
+            }
         }
 
         private LobbySnapshot RequireCurrentLobby()
@@ -385,10 +740,7 @@ namespace HiveChameleon.Realtime
                 return;
             }
 
-            socket.Connected -= HandleConnected;
-            socket.Closed -= HandleClosed;
-            socket.ReceivedError -= HandleError;
-            socket.ReceivedMatchState -= HandleMatchState;
+            DetachSocketHandlers(socket);
             try
             {
                 await socket.CloseAsync();
@@ -398,14 +750,51 @@ namespace HiveChameleon.Realtime
                 Debug.LogWarning($"Nakama socket cleanup failed: {exception.Message}");
             }
             _match = null;
+            _expectedJoiningMatchId = string.Empty;
             _session = null;
             _client = null;
             CurrentLobby = null;
             CurrentRound = null;
-            CurrentRoleAssignment = null;
-            CurrentRoundPlayerState = null;
-            LastDiscovery = null;
-            LastFireResult = null;
+            ClearPerRoundState();
+        }
+
+        private async Task CloseSocketForReconnectIgnoringErrorsAsync()
+        {
+            ISocket socket = _socket;
+            _socket = null;
+            _match = null;
+            _expectedJoiningMatchId = string.Empty;
+            if (socket == null)
+            {
+                return;
+            }
+            DetachSocketHandlers(socket);
+            try
+            {
+                await socket.CloseAsync();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning(
+                    $"Interrupted Nakama socket cleanup failed: {exception.Message}"
+                );
+            }
+        }
+
+        private void AttachSocketHandlers(ISocket socket)
+        {
+            socket.Connected += HandleConnected;
+            socket.Closed += HandleClosed;
+            socket.ReceivedError += HandleError;
+            socket.ReceivedMatchState += HandleMatchState;
+        }
+
+        private void DetachSocketHandlers(ISocket socket)
+        {
+            socket.Connected -= HandleConnected;
+            socket.Closed -= HandleClosed;
+            socket.ReceivedError -= HandleError;
+            socket.ReceivedMatchState -= HandleMatchState;
         }
 
         private void HandleConnected()
@@ -417,6 +806,7 @@ namespace HiveChameleon.Realtime
         {
             State = RealtimeConnectionState.Disconnected;
             _match = null;
+            _expectedJoiningMatchId = string.Empty;
             Debug.LogWarning($"Nakama socket closed: {reason}");
         }
 
@@ -428,7 +818,11 @@ namespace HiveChameleon.Realtime
 
         private void HandleMatchState(IMatchState matchState)
         {
-            if (matchState == null || matchState.State == null)
+            if (
+                matchState == null
+                || matchState.State == null
+                || !IsExpectedMatch(matchState.MatchId)
+            )
             {
                 return;
             }
@@ -459,6 +853,10 @@ namespace HiveChameleon.Realtime
                                 "Private round role payload is invalid."
                             );
                         }
+                        if (!IsCurrentRound(assignment.round_id))
+                        {
+                            return;
+                        }
                         CurrentRoleAssignment = assignment;
                         RoundRoleAssigned?.Invoke(assignment);
                         break;
@@ -479,12 +877,15 @@ namespace HiveChameleon.Realtime
                             || string.IsNullOrWhiteSpace(discovery.hunter_player_id)
                             || string.IsNullOrWhiteSpace(discovery.hider_player_id)
                             || discovery.sequence < 1
-                            || discovery.aim_slot < 1
                         )
                         {
                             throw new InvalidOperationException(
                                 "Authoritative discovery payload is invalid."
                             );
+                        }
+                        if (!IsCurrentRound(discovery.round_id))
+                        {
+                            return;
                         }
                         LastDiscovery = discovery;
                         RoundDiscoveryReceived?.Invoke(discovery);
@@ -497,13 +898,21 @@ namespace HiveChameleon.Realtime
                             || string.IsNullOrWhiteSpace(playerState.round_id)
                             || string.IsNullOrWhiteSpace(playerState.player_id)
                             || (playerState.role != "hunter" && playerState.role != "hider")
-                            || (playerState.status != "active" && playerState.status != "found")
+                            || (
+                                playerState.status != "active"
+                                && playerState.status != "found"
+                                && playerState.status != "converted"
+                            )
                             || playerState.shells_remaining < 0
                         )
                         {
                             throw new InvalidOperationException(
                                 "Private round player-state payload is invalid."
                             );
+                        }
+                        if (!IsCurrentRound(playerState.round_id))
+                        {
+                            return;
                         }
                         CurrentRoundPlayerState = playerState;
                         RoundPlayerStateChanged?.Invoke(playerState);
@@ -522,8 +931,178 @@ namespace HiveChameleon.Realtime
                                 "Private Hunter fire-result payload is invalid."
                             );
                         }
+                        if (!IsCurrentRound(fireResult.round_id))
+                        {
+                            return;
+                        }
                         LastFireResult = fireResult;
                         HunterFireResolved?.Invoke(fireResult);
+                        break;
+                    case RoundSpectatorOpcode:
+                        SpectatorStateSnapshot spectator =
+                            JsonUtility.FromJson<SpectatorStateSnapshot>(payload);
+                        if (
+                            spectator == null
+                            || string.IsNullOrWhiteSpace(spectator.round_id)
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Private spectator-state payload is invalid."
+                            );
+                        }
+                        if (!IsCurrentRound(spectator.round_id))
+                        {
+                            return;
+                        }
+                        CurrentSpectatorState = spectator;
+                        SpectatorStateChanged?.Invoke(spectator);
+                        break;
+                    case RoundScoreOpcode:
+                        RoundScoreSnapshot scores =
+                            JsonUtility.FromJson<RoundScoreSnapshot>(payload);
+                        if (
+                            scores == null
+                            || string.IsNullOrWhiteSpace(scores.round_id)
+                            || string.IsNullOrWhiteSpace(scores.scoring_rule_version)
+                            || scores.batch_sequence < 1
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Round score payload is invalid."
+                            );
+                        }
+                        if (!IsCurrentRound(scores.round_id))
+                        {
+                            return;
+                        }
+                        if (
+                            CurrentScores == null
+                            || CurrentScores.round_id != scores.round_id
+                            || scores.batch_sequence
+                                > CurrentScores.batch_sequence
+                        )
+                        {
+                            CurrentScores = scores;
+                            RoundScoresChanged?.Invoke(scores);
+                        }
+                        break;
+                    case RoundAnswerCheckOpcode:
+                        AnswerCheckSnapshot answerCheck =
+                            JsonUtility.FromJson<AnswerCheckSnapshot>(payload);
+                        if (
+                            answerCheck == null
+                            || string.IsNullOrWhiteSpace(answerCheck.round_id)
+                            || string.IsNullOrWhiteSpace(answerCheck.deadline)
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Answer Check payload is invalid."
+                            );
+                        }
+                        if (!IsCurrentRound(answerCheck.round_id))
+                        {
+                            return;
+                        }
+                        CurrentAnswerCheck = answerCheck;
+                        AnswerCheckChanged?.Invoke(answerCheck);
+                        break;
+                    case AnswerCheckLikeResultOpcode:
+                        AnswerCheckLikeResult likeResult =
+                            JsonUtility.FromJson<AnswerCheckLikeResult>(payload);
+                        if (
+                            likeResult == null
+                            || string.IsNullOrWhiteSpace(likeResult.round_id)
+                            || string.IsNullOrWhiteSpace(likeResult.reason)
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Answer Check like-result payload is invalid."
+                            );
+                        }
+                        if (!IsCurrentRound(likeResult.round_id))
+                        {
+                            return;
+                        }
+                        LastLikeResult = likeResult;
+                        AnswerCheckLikeResolved?.Invoke(likeResult);
+                        break;
+                    case RoundReconnectOpcode:
+                        RoundReconnectSnapshot reconnect =
+                            JsonUtility.FromJson<RoundReconnectSnapshot>(payload);
+                        if (
+                            reconnect == null
+                            || string.IsNullOrWhiteSpace(reconnect.round_id)
+                            || string.IsNullOrWhiteSpace(reconnect.player_id)
+                            || reconnect.status != "restored"
+                            || !reconnect.outcome_preserved
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Private reconnect-state payload is invalid."
+                            );
+                        }
+                        if (!IsCurrentRound(reconnect.round_id))
+                        {
+                            return;
+                        }
+                        CurrentReconnectState = reconnect;
+                        RoundReconnectChanged?.Invoke(reconnect);
+                        break;
+                    case AvatarStateSnapshotOpcode:
+                        AvatarStateSnapshot avatar =
+                            JsonUtility.FromJson<AvatarStateSnapshot>(payload);
+                        if (
+                            avatar == null
+                            || string.IsNullOrWhiteSpace(avatar.round_id)
+                            || string.IsNullOrWhiteSpace(avatar.player_id)
+                            || (avatar.role != "hunter" && avatar.role != "hider")
+                            || !IsFinite(avatar.pitch)
+                            || avatar.pitch < MinimumAvatarPitch
+                            || avatar.pitch > MaximumAvatarPitch
+                            || avatar.sequence < 1
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Avatar-state payload is invalid."
+                            );
+                        }
+                        if (!IsCurrentRound(avatar.round_id))
+                        {
+                            return;
+                        }
+                        bool isLocalAvatar =
+                            string.Equals(
+                                avatar.player_id,
+                                CurrentRoundPlayerState?.player_id,
+                                StringComparison.Ordinal
+                            )
+                            || string.Equals(
+                                avatar.player_id,
+                                CurrentRoleAssignment?.player_id,
+                                StringComparison.Ordinal
+                            );
+                        bool missingLastSequence =
+                            !_avatarSequenceByPlayer.TryGetValue(
+                                avatar.player_id,
+                                out int lastSequence
+                            );
+                        if (
+                            missingLastSequence
+                            || avatar.sequence > lastSequence
+                            || (
+                                avatar.correction
+                                && isLocalAvatar
+                                && avatar.sequence == lastSequence
+                            )
+                        )
+                        {
+                            if (missingLastSequence || avatar.sequence > lastSequence)
+                            {
+                                _avatarSequenceByPlayer[avatar.player_id] =
+                                    avatar.sequence;
+                            }
+                            AvatarStateReceived?.Invoke(avatar);
+                        }
                         break;
                 }
             }
@@ -541,14 +1120,77 @@ namespace HiveChameleon.Realtime
 
         private void PublishRound(RoundSnapshot round)
         {
+            if (
+                CurrentRound != null
+                && !string.Equals(
+                    CurrentRound.id,
+                    round.id,
+                    StringComparison.Ordinal
+                )
+                && round.sequence_number <= CurrentRound.sequence_number
+            )
+            {
+                return;
+            }
             if (CurrentRound == null || CurrentRound.id != round.id)
             {
-                CurrentRoundPlayerState = null;
-                LastDiscovery = null;
-                LastFireResult = null;
+                ClearPerRoundState();
             }
             CurrentRound = round;
             RoundStateChanged?.Invoke(round);
+        }
+
+        private bool IsExpectedMatch(string matchId)
+        {
+            if (string.IsNullOrWhiteSpace(matchId))
+            {
+                return false;
+            }
+            if (!string.IsNullOrWhiteSpace(_expectedJoiningMatchId))
+            {
+                return string.Equals(
+                    matchId,
+                    _expectedJoiningMatchId,
+                    StringComparison.Ordinal
+                );
+            }
+            return _match != null
+                && !string.IsNullOrWhiteSpace(_match.Id)
+                && string.Equals(
+                    matchId,
+                    _match.Id,
+                    StringComparison.Ordinal
+                );
+        }
+
+        private bool IsCurrentRound(string roundId)
+        {
+            return CurrentRound != null
+                && !string.IsNullOrWhiteSpace(CurrentRound.id)
+                && string.Equals(
+                    roundId,
+                    CurrentRound.id,
+                    StringComparison.Ordinal
+                );
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private void ClearPerRoundState()
+        {
+            CurrentRoleAssignment = null;
+            CurrentRoundPlayerState = null;
+            LastDiscovery = null;
+            LastFireResult = null;
+            CurrentSpectatorState = null;
+            CurrentAnswerCheck = null;
+            CurrentScores = null;
+            LastLikeResult = null;
+            CurrentReconnectState = null;
+            _avatarSequenceByPlayer.Clear();
         }
     }
 }

@@ -131,6 +131,7 @@ func registerRealtime(
 		"lobby.nominate_hunter":      lobbies.nominateHunterRPC,
 		"lobby.update_configuration": lobbies.updateConfigurationRPC,
 		"lobby.start":                lobbies.startRPC,
+		"match.reconnect":            lobbies.reconnectRPC,
 	}
 	for _, name := range realtimeRPCNames {
 		handler := featureNotReadyRPC

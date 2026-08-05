@@ -146,6 +146,39 @@ func (s *lobbyService) leaveRPC(
 	return encodeLobbyResponse(*response)
 }
 
+func (s *lobbyService) reconnectRPC(
+	ctx context.Context,
+	logger runtime.Logger,
+	_ *sql.DB,
+	nk runtime.NakamaModule,
+	payload string,
+) (string, error) {
+	playerID, err := trustedPlayerID(ctx)
+	if err != nil {
+		return "", asLobbyRuntimeError(err)
+	}
+	var request matchReconnectRequest
+	if err := decodeLobbyPayload(payload, &request); err != nil {
+		return "", asLobbyRuntimeError(err)
+	}
+	if err := validateLobbyID(request.LobbyID); err != nil {
+		return "", asLobbyRuntimeError(err)
+	}
+	matchID, err := ensureLobbyMatch(ctx, nk, request.LobbyID)
+	if err != nil {
+		return "", logLobbyFailure(logger, "match.reconnect match binding", err)
+	}
+	response, err := sendLobbySignal(ctx, nk, matchID, lobbySignal{
+		Type:     "reconnect",
+		PlayerID: playerID,
+	})
+	if err != nil {
+		return "", logLobbyFailure(logger, "match.reconnect", err)
+	}
+	response.MatchID = matchID
+	return encodeLobbyResponse(*response)
+}
+
 func (s *lobbyService) updateConfigurationRPC(
 	ctx context.Context,
 	logger runtime.Logger,
