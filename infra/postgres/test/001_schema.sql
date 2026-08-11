@@ -24,14 +24,14 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(*) = 68
+    SELECT count(*) = 74
       FROM information_schema.tables
      WHERE table_schema IN (
        'identity', 'social', 'game', 'content', 'commerce', 'tournament', 'hive_projection'
      )
        AND table_type = 'BASE TABLE'
   ),
-  'all 68 modeled tables exist'
+  'all 74 modeled tables exist'
 );
 
 SELECT pg_temp.assert_true(
@@ -121,7 +121,7 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(DISTINCT type.oid) = 70
+    SELECT count(DISTINCT type.oid) = 76
       FROM pg_type type
       JOIN pg_namespace namespace ON namespace.oid = type.typnamespace
       JOIN pg_enum enum_value ON enum_value.enumtypid = type.oid
@@ -134,7 +134,7 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(*) = 132
+    SELECT count(*) = 152
       FROM pg_constraint foreign_key
       JOIN pg_class table_class ON table_class.oid = foreign_key.conrelid
       JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
@@ -199,14 +199,19 @@ SELECT pg_temp.assert_true(
 );
 
 SELECT pg_temp.assert_true(
-  NOT EXISTS (
-    SELECT 1
+  (
+    SELECT count(*) = 6
       FROM information_schema.tables
      WHERE (table_schema = 'game' AND table_name LIKE 'match_publication%')
         OR (table_schema = 'hive_projection' AND table_name IN (
           'match_event', 'match_result', 'match_result_change'
         ))
-        OR (table_schema = 'identity' AND table_name LIKE 'public_record_disclosure%')
+  )
+  AND NOT EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = 'identity'
+       AND table_name LIKE 'public_record_disclosure%'
   )
   AND EXISTS (
     SELECT 1
@@ -217,7 +222,7 @@ SELECT pg_temp.assert_true(
        AND data_type = 'bytea'
        AND is_nullable = 'YES'
   ),
-  'local result bytes exist without obsolete publication or disclosure tables'
+  'local result bytes and the on-chain publication pipeline coexist, without obsolete disclosure tables'
 );
 
 SELECT pg_temp.assert_true(
@@ -233,10 +238,10 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(*) = 8
+    SELECT count(*) = 9
       FROM pg_roles
      WHERE rolname IN (
-       'hc_api', 'hc_nakama', 'hc_provisioning',
+       'hc_api', 'hc_nakama', 'hc_provisioning', 'hc_match_publisher',
        'hc_collectible_issuer', 'hc_treasury', 'hc_rc_support',
        'hc_projector', 'hc_security_auditor'
      )
@@ -257,7 +262,7 @@ SELECT pg_temp.assert_true(
       FROM pg_auth_members membership
       JOIN pg_roles member_role ON member_role.oid = membership.member
      WHERE member_role.rolname IN (
-       'hc_api', 'hc_nakama', 'hc_provisioning',
+       'hc_api', 'hc_nakama', 'hc_provisioning', 'hc_match_publisher',
        'hc_collectible_issuer', 'hc_treasury', 'hc_rc_support',
        'hc_projector', 'hc_security_auditor'
      )

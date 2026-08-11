@@ -203,7 +203,7 @@ SELECT pg_temp.assert_true(
        AND relation.relname = 'transaction_intent'
   )
   AND (
-    SELECT count(*) = 7
+    SELECT count(*) = 8
       FROM pg_policies
      WHERE schemaname = 'hive_projection'
        AND tablename = 'transaction_intent'

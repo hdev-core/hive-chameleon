@@ -188,6 +188,16 @@ VALUES (
   convert_to('{"round":"01900000-0000-7000-8000-000000000530","revision":1}', 'UTF8')
 );
 
+INSERT INTO game.match_publication_request (
+  id, round_id, result_revision_id, request_type
+)
+VALUES (
+  '01900000-0000-7000-8000-000000000534',
+  '01900000-0000-7000-8000-000000000530',
+  '01900000-0000-7000-8000-000000000533',
+  'initial'
+);
+
 UPDATE game.game_round
    SET status = 'completed',
        winning_side = 'hunters',
