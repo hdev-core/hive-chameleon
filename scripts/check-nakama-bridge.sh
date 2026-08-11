@@ -288,7 +288,6 @@ export SMOKE_PLAYER_ID="$(random_uuid_v7)"
 export SMOKE_PLAYER_TWO_ID="$(random_uuid_v7)"
 export SMOKE_AUTH_SESSION_ID="$(random_uuid_v7)"
 export SMOKE_AUTH_SESSION_TWO_ID="$(random_uuid_v7)"
-export SMOKE_MAP_VERSION_ID="019fab2b-c400-7000-8000-000000000002"
 export AUTH_TOKEN_SECRET="$(random_base64url 32)"
 export AUTH_IDENTITY_LOOKUP_KEY="$(random_base64url 32)"
 export HC_POSTGRES_PORT="$(free_port)"
@@ -298,6 +297,100 @@ export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:${HC_POSTGRES_PORT}/
 export HC_NAKAMA_DATABASE_URL="postgres://postgres:postgres@host.docker.internal:${HC_POSTGRES_PORT}/hive_chameleon?sslmode=disable"
 
 cd "${repository_root}"
+
+backend_map_content_version="$(
+  sed -n 's/.*defaultOfficialMapContentVersion = "\([^"]*\)".*/\1/p' \
+    runtime/nakama/lobby_store.go \
+    | head -n 1
+)"
+unity_map_content_version="$(
+  sed -n 's/.*public const string ContentVersion = "\([^"]*\)".*/\1/p' \
+    clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
+    | head -n 1
+)"
+backend_geometry_version="$(
+  sed -n 's/.*officialAuthorityGeometryVersion *= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/authority_geometry.go \
+    | head -n 1
+)"
+unity_geometry_version="$(
+  sed -n 's/.*public const string AuthorityGeometryVersion *= *//p' \
+    clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
+    | head -n 1
+)"
+if [[ -z "${unity_geometry_version}" ]]; then
+  unity_geometry_version="$(
+    sed -n '/public const string AuthorityGeometryVersion/{n;s/^[[:space:]]*"\([^"]*\)";.*/\1/p;}' \
+      clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
+      | head -n 1
+  )"
+fi
+backend_geometry_digest="$(
+  sed -n 's/.*officialAuthorityGeometryExpectedDigest *= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/authority_geometry.go \
+    | head -n 1
+)"
+unity_geometry_digest="$(
+  sed -n '/public const string AuthorityGeometryDigest/{n;s/^[[:space:]]*"\([^"]*\)";.*/\1/p;}' \
+    clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
+    | head -n 1
+)"
+backend_build_version="$(
+  sed -n 's/.*gameServerBuildVersion *= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/round_scaffold.go \
+    | head -n 1
+)"
+unity_build_version="$(
+  sed -n '/public const string SupportedGameServerBuildVersion/{n;s/^[[:space:]]*"\([^"]*\)";.*/\1/p;}' \
+    clients/unity/Assets/HiveChameleon/Runtime/Realtime/LobbyMenuRules.cs \
+    | head -n 1
+)"
+backend_protocol_version="$(
+  sed -n 's/.*matchProtocolVersion *= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/round_scaffold.go \
+    | head -n 1
+)"
+unity_protocol_version="$(
+  sed -n 's/.*public const string SupportedProtocolVersion = "\([^"]*\)".*/\1/p' \
+    clients/unity/Assets/HiveChameleon/Runtime/Realtime/LobbyMenuRules.cs \
+    | head -n 1
+)"
+
+assert_runtime_contract() {
+  local label="$1"
+  local backend_value="$2"
+  local unity_value="$3"
+
+  if [[ -z "${backend_value}" \
+     || -z "${unity_value}" \
+     || "${backend_value}" != "${unity_value}" ]]; then
+    echo "Backend and Unity ${label} values must match." >&2
+    echo "Backend: ${backend_value:-missing}" >&2
+    echo "Unity: ${unity_value:-missing}" >&2
+    exit 1
+  fi
+}
+
+assert_runtime_contract \
+  "official map content version" \
+  "${backend_map_content_version}" \
+  "${unity_map_content_version}"
+assert_runtime_contract \
+  "authority geometry version" \
+  "${backend_geometry_version}" \
+  "${unity_geometry_version}"
+assert_runtime_contract \
+  "authority geometry digest" \
+  "${backend_geometry_digest}" \
+  "${unity_geometry_digest}"
+assert_runtime_contract \
+  "game-server build version" \
+  "${backend_build_version}" \
+  "${unity_build_version}"
+assert_runtime_contract \
+  "realtime protocol version" \
+  "${backend_protocol_version}" \
+  "${unity_protocol_version}"
 
 echo "Building the NestJS bridge and isolated Nakama runtime..."
 npm run build --workspace @hive-chameleon/api

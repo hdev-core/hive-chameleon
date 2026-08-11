@@ -51,8 +51,8 @@ namespace HiveChameleon.Tests
             );
         }
 
-        [TestCase("", "m4-4")]
-        [TestCase("not-a-map-version", "m4-4")]
+        [TestCase("", "m4-5")]
+        [TestCase("not-a-map-version", "m4-5")]
         [TestCase(MapVersionId, "")]
         [TestCase(MapVersionId, "m4-3")]
         public void GameplayRejectsMissingOrIncompatibleMapMetadata(
@@ -89,7 +89,7 @@ namespace HiveChameleon.Tests
                 "{\"id\":\"0199abc1-2345-7abc-bdef-0123456789ae\","
                 + "\"map_version_id\":\""
                 + MapVersionId
-                + "\",\"map_content_version\":\"m4-4\","
+                + "\",\"map_content_version\":\"m4-5\","
                 + "\"game_server_build_version\":\"hive-chameleon-m4-dev\","
                 + "\"protocol_version\":\"m4-v2\","
                 + "\"authority_geometry_version\":\""

@@ -24,7 +24,7 @@ namespace HiveChameleon.Tests
             yield return null;
 
             Assert.That(CityDistrictMap.OfficialSlug, Is.EqualTo("prism-foundry"));
-            Assert.That(CityDistrictMap.ContentVersion, Is.EqualTo("m4-4"));
+            Assert.That(CityDistrictMap.ContentVersion, Is.EqualTo("m4-5"));
             Assert.That(
                 CityDistrictMap.AuthorityGeometryVersion,
                 Is.EqualTo("chroma-district-authority-proxy-1")

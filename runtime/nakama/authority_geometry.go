@@ -9,7 +9,7 @@ import (
 
 const (
 	officialAuthorityGeometryVersion        = "chroma-district-authority-proxy-1"
-	officialAuthorityGeometryExpectedDigest = "sha256:a39e5e7ae0e3f8f3d7fffc718f5e93047799f8d1338afa8b25b5d3ee0021c9a8"
+	officialAuthorityGeometryExpectedDigest = "sha256:6f98a71c09aa8b66aaa6ae3d107e82d2fa09a666d71516221a3af6e07383fd72"
 
 	authorityPlayerRadius          = 0.38
 	authorityPlayerSkinWidth       = 0.08
