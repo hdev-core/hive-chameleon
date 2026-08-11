@@ -1,18 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { COLLECTIBLE_INTENT_FIXTURE } from './testing/fixtures.js';
+import { MATCH_INTENT_FIXTURE } from './testing/fixtures.js';
 import { HttpIsolatedSignerClient } from './http-signer-client.js';
 
 const request = {
-  idempotencyKey: COLLECTIBLE_INTENT_FIXTURE.idempotencyKey,
-  policyVersion: 'collectible-policy-1',
-  role: 'collectible_issuer',
-  account: 'item-issuer',
+  idempotencyKey: MATCH_INTENT_FIXTURE.idempotencyKey,
+  policyVersion: 'match-policy-1',
+  role: 'match_publisher',
+  account: 'match-pub',
   authority: 'posting',
   expectedPublicKey: 'STM7u41yX66A2r6JNBrgawxT51sPxRMTJAW1QaEwdxQfFePGvCDET',
-  signerKeyReference: 'fixture/collectible-issuer/posting',
-  eventFamily: 'collectible',
-  eventType: 'collectible_issued',
+  signerKeyReference: 'fixture/match-publisher/posting',
+  eventFamily: 'match',
+  eventType: 'match_results_batch',
   canonicalPayload: '{}',
   canonicalOperationJson: '{}',
   canonicalOperationHash: 'a'.repeat(64),

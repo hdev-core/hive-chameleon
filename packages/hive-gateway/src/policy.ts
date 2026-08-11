@@ -38,7 +38,7 @@ export function authorizeOfficialEvent(
   }
 
   const family = eventFamily(intent.event);
-  const expectedRole = 'collectible_issuer';
+  const expectedRole = family === 'match' ? 'match_publisher' : 'collectible_issuer';
   if (authorization.role !== expectedRole) {
     throw new HiveGatewayError(
       'policy_denied',
@@ -97,6 +97,16 @@ function assertAuthorizationShape(
 
 function assertPayloadAccount(event: HiveChameleonEvent, account: string): void {
   switch (event.type) {
+    case 'match_results_batch':
+    case 'match_result_corrected':
+    case 'match_result_invalidated':
+      if (event.data.publisher !== account) {
+        throw new HiveGatewayError(
+          'policy_denied',
+          'Match publisher does not match signing account',
+        );
+      }
+      return;
     case 'collectible_issued':
       if (event.data.issuer !== account) {
         throw new HiveGatewayError(

@@ -1,21 +1,22 @@
 import { Buffer } from 'node:buffer';
+import { z } from 'zod';
 
 import { canonicalJson, parseJson, type JsonValue } from '../canonical/json.js';
 import { HiveGatewayError } from '../errors.js';
 import { collectibleEventSchema, type CollectibleEvent } from './collectible.js';
 import { HIVE_CHAMELEON_MAX_PAYLOAD_BYTES } from './common.js';
+import { matchEventSchema, type MatchEvent } from './match.js';
 
-export const hiveChameleonEventSchema = collectibleEventSchema;
+export const hiveChameleonEventSchema = z.discriminatedUnion('type', [
+  ...matchEventSchema.options,
+  ...collectibleEventSchema.options,
+]);
 
-export type HiveChameleonEvent = CollectibleEvent;
-export type HiveChameleonEventFamily = 'collectible';
+export type HiveChameleonEvent = MatchEvent | CollectibleEvent;
+export type HiveChameleonEventFamily = 'collectible' | 'match';
 
 export function eventFamily(event: HiveChameleonEvent): HiveChameleonEventFamily {
-  switch (event.type) {
-    case 'collectible_issued':
-    case 'collectible_revoked':
-      return 'collectible';
-  }
+  return event.type.startsWith('match_') ? 'match' : 'collectible';
 }
 
 export function serializeHiveChameleonEvent(value: unknown): string {

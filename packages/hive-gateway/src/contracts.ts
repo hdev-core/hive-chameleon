@@ -1,7 +1,8 @@
 import type { HiveChameleonEvent, HiveChameleonEventFamily } from './protocol/events.js';
 
 export type HiveAuthority = 'active' | 'owner' | 'posting';
-export type OfficialServiceRole = 'collectible_issuer' | 'rc_support' | 'treasury';
+export type OfficialServiceRole =
+  'collectible_issuer' | 'match_publisher' | 'rc_support' | 'treasury';
 
 export interface OfficialServiceAuthorization {
   readonly mode: 'official_service';

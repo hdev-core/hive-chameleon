@@ -11,9 +11,9 @@ import {
 } from './testing/fakes.js';
 import {
   MANAGED_SIGNING_FIXTURE,
-  COLLECTIBLE_AUTHORIZATION_FIXTURE,
-  COLLECTIBLE_EVENT_FIXTURE,
-  COLLECTIBLE_INTENT_FIXTURE,
+  MATCH_AUTHORIZATION_FIXTURE,
+  MATCH_EVENT_FIXTURE,
+  MATCH_INTENT_FIXTURE,
 } from './testing/fixtures.js';
 
 describe('Hive Gateway and isolated signer boundary', () => {
@@ -27,14 +27,14 @@ describe('Hive Gateway and isolated signer boundary', () => {
     const gateway = new HiveGateway(chain);
 
     const prepared = await gateway.prepareOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_INTENT_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
     const result = await gateway.broadcastOfficialEvent(prepared, signer);
 
     expect(result).toEqual({
       transactionId: prepared.transactionId,
-      eventType: 'collectible_issued',
+      eventType: 'match_results_batch',
     });
     expect(provider.requests).toHaveLength(1);
     expect(provider.requests[0]).not.toHaveProperty('privateKey');
@@ -50,8 +50,8 @@ describe('Hive Gateway and isolated signer boundary', () => {
     const signer = createSigner(chain, provider);
     const gateway = new HiveGateway(chain);
     const prepared = await gateway.prepareOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_INTENT_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
 
     await expect(
@@ -71,16 +71,16 @@ describe('Hive Gateway and isolated signer boundary', () => {
     const provider = new FixtureDigestSignatureProvider(MANAGED_SIGNING_FIXTURE.signature);
     const signer = createSigner(chain, provider);
     const gateway = new HiveGateway(chain);
-    const unapprovedAuthorization = {
-      ...COLLECTIBLE_AUTHORIZATION_FIXTURE,
-      account: 'other-issuer',
-    };
+    if (MATCH_EVENT_FIXTURE.type !== 'match_results_batch') {
+      throw new Error('Expected the batch fixture');
+    }
+    const unapprovedAuthorization = { ...MATCH_AUTHORIZATION_FIXTURE, account: 'other-pub' };
     const prepared = await gateway.prepareOfficialEvent(
       {
-        ...COLLECTIBLE_INTENT_FIXTURE,
+        ...MATCH_INTENT_FIXTURE,
         event: {
-          ...COLLECTIBLE_EVENT_FIXTURE,
-          data: { ...COLLECTIBLE_EVENT_FIXTURE.data, issuer: 'other-issuer' },
+          ...MATCH_EVENT_FIXTURE,
+          data: { ...MATCH_EVENT_FIXTURE.data, publisher: 'other-pub' },
         },
       },
       unapprovedAuthorization,
@@ -100,8 +100,8 @@ describe('Hive Gateway and isolated signer boundary', () => {
     const provider = new FixtureDigestSignatureProvider(MANAGED_SIGNING_FIXTURE.signature);
     const signer = createSigner(chain, provider);
     const prepared = await new HiveGateway(chain).prepareOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_INTENT_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
     const request = preparedToRequest(prepared);
 
@@ -121,19 +121,22 @@ describe('Hive Gateway and isolated signer boundary', () => {
     const signer = createSigner(chain, provider);
     const gateway = new HiveGateway(chain);
     const first = await gateway.prepareOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_INTENT_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
     await signer.sign(preparedToRequest(first));
+    if (MATCH_EVENT_FIXTURE.type !== 'match_results_batch') {
+      throw new Error('Expected the batch fixture');
+    }
     const conflicting = await gateway.prepareOfficialEvent(
       {
-        ...COLLECTIBLE_INTENT_FIXTURE,
+        ...MATCH_INTENT_FIXTURE,
         event: {
-          ...COLLECTIBLE_EVENT_FIXTURE,
+          ...MATCH_EVENT_FIXTURE,
           event_id: '0190f6d2-7c00-7000-8000-000000000009',
         },
       },
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
 
     await expect(signer.sign(preparedToRequest(conflicting))).rejects.toMatchObject({
@@ -151,16 +154,16 @@ describe('Hive Gateway and isolated signer boundary', () => {
     );
     const firstSigner = createSigner(firstChain, provider, ledger);
     const first = await new HiveGateway(firstChain).prepareOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_INTENT_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
     await firstSigner.sign(preparedToRequest(first));
 
     const secondChain = new FixtureHiveChain(MANAGED_SIGNING_FIXTURE.publicKey, 'a'.repeat(64));
     const secondSigner = createSigner(secondChain, provider, ledger);
     const second = await new HiveGateway(secondChain).prepareOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_INTENT_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
 
     await expect(secondSigner.sign(preparedToRequest(second))).rejects.toMatchObject({
@@ -178,8 +181,8 @@ describe('Hive Gateway and isolated signer boundary', () => {
     const ledger = new CompletionFailingLedger();
     const signer = createSigner(chain, provider, ledger);
     const prepared = await new HiveGateway(chain).prepareOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
+      MATCH_INTENT_FIXTURE,
+      MATCH_AUTHORIZATION_FIXTURE,
     );
     const request = preparedToRequest(prepared);
 
@@ -204,7 +207,7 @@ function createSigner(
   return new PolicyEnforcingSignerBoundary(
     chain,
     provider,
-    new StaticOfficialSignerPolicy([COLLECTIBLE_AUTHORIZATION_FIXTURE]),
+    new StaticOfficialSignerPolicy([MATCH_AUTHORIZATION_FIXTURE]),
     idempotency,
   );
 }

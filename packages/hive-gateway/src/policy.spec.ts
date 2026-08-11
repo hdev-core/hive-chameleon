@@ -2,37 +2,31 @@ import { describe, expect, it } from 'vitest';
 
 import type { HiveGatewayError } from './errors.js';
 import { authorizeOfficialEvent } from './policy.js';
-import {
-  COLLECTIBLE_AUTHORIZATION_FIXTURE,
-  COLLECTIBLE_INTENT_FIXTURE,
-} from './testing/fixtures.js';
+import { MATCH_AUTHORIZATION_FIXTURE, MATCH_INTENT_FIXTURE } from './testing/fixtures.js';
 
 describe('official service operation policy', () => {
-  it('allows the scoped issuer to construct one posting custom_json', () => {
-    const result = authorizeOfficialEvent(
-      COLLECTIBLE_INTENT_FIXTURE,
-      COLLECTIBLE_AUTHORIZATION_FIXTURE,
-    );
+  it('allows the scoped publisher to construct one posting custom_json', () => {
+    const result = authorizeOfficialEvent(MATCH_INTENT_FIXTURE, MATCH_AUTHORIZATION_FIXTURE);
 
     expect(result.operation.required_auths).toEqual([]);
-    expect(result.operation.required_posting_auths).toEqual(['item-issuer']);
+    expect(result.operation.required_posting_auths).toEqual(['match-pub']);
     expect(result.operation.id).toBe('hive.chameleon');
   });
 
-  it('denies an unrelated service role', () => {
+  it('denies cross-role signing', () => {
     expect(() =>
-      authorizeOfficialEvent(COLLECTIBLE_INTENT_FIXTURE, {
-        ...COLLECTIBLE_AUTHORIZATION_FIXTURE,
-        role: 'treasury',
+      authorizeOfficialEvent(MATCH_INTENT_FIXTURE, {
+        ...MATCH_AUTHORIZATION_FIXTURE,
+        role: 'collectible_issuer',
       }),
     ).toThrowError(expect.objectContaining<Partial<HiveGatewayError>>({ code: 'policy_denied' }));
   });
 
-  it('denies an issuer/account mismatch', () => {
+  it('denies a publisher/account mismatch', () => {
     expect(() =>
-      authorizeOfficialEvent(COLLECTIBLE_INTENT_FIXTURE, {
-        ...COLLECTIBLE_AUTHORIZATION_FIXTURE,
-        account: 'other-issuer',
+      authorizeOfficialEvent(MATCH_INTENT_FIXTURE, {
+        ...MATCH_AUTHORIZATION_FIXTURE,
+        account: 'other-pub',
       }),
     ).toThrowError(expect.objectContaining<Partial<HiveGatewayError>>({ code: 'policy_denied' }));
   });
