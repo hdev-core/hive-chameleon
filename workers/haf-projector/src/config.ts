@@ -11,6 +11,7 @@ export interface HafProjectorRuntimeConfig {
   readonly hafahApiUrl: string;
   readonly hiveRpcUrl: string;
   readonly operationTypeIds: readonly number[];
+  readonly matchPublishers: readonly string[];
   readonly collectibleIssuers: readonly string[];
   readonly pageSize: number;
   readonly requestTimeoutMs: number;
@@ -99,6 +100,12 @@ export function loadHafProjectorConfig(
       parseIntegerList(
         required(environment, 'HAF_PROJECTOR_OPERATION_TYPE_IDS'),
         'HAF_PROJECTOR_OPERATION_TYPE_IDS',
+      ),
+    ),
+    matchPublishers: Object.freeze(
+      parseAccountList(
+        required(environment, 'HAF_PROJECTOR_MATCH_PUBLISHERS', true),
+        'HAF_PROJECTOR_MATCH_PUBLISHERS',
       ),
     ),
     collectibleIssuers: Object.freeze(

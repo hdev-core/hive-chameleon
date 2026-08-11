@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { serializeHiveChameleonEvent } from '@hive-chameleon/hive-gateway';
-import { COLLECTIBLE_EVENT_FIXTURE } from '@hive-chameleon/hive-gateway/testing';
+import { MATCH_EVENT_FIXTURE } from '@hive-chameleon/hive-gateway/testing';
 
 import type { HafBlock, OperationDecision } from '../model.js';
 import {
@@ -28,7 +28,7 @@ const decision: OperationDecision = {
     blockId: block.id,
     blockTimestamp: block.timestamp,
     operationType: 'custom_json_operation',
-    primaryAccount: 'unknown-signer',
+    primaryAccount: 'match-pub',
     requiredAuthority: 'posting',
     applicationId: 'hive.chameleon',
     payload: { id: 'hive.chameleon', json: '{}' },
@@ -118,7 +118,10 @@ describe('PostgreSQL projection store', () => {
     expect(operationInsert?.values?.[5]).toBe(true);
   });
 
-  it('stores an accepted application event as reversible raw evidence in the block transaction', async () => {
+  it('stores an accepted match event as reversible typed evidence in the same block transaction', async () => {
+    if (MATCH_EVENT_FIXTURE.type !== 'match_results_batch') {
+      throw new Error('fixture is not a match batch');
+    }
     const client = new RecordingSqlClient();
     const operationId = '0190f6d2-7c00-7000-8000-000000000002';
     const ids = ['0190f6d2-7c00-7000-8000-000000000001', operationId];
@@ -131,31 +134,37 @@ describe('PostgreSQL projection store', () => {
         ...decision.evidence,
         payload: {
           required_auths: [],
-          required_posting_auths: ['item-issuer'],
+          required_posting_auths: ['match-pub'],
           id: 'hive.chameleon',
-          json: serializeHiveChameleonEvent(COLLECTIBLE_EVENT_FIXTURE),
+          json: serializeHiveChameleonEvent(MATCH_EVENT_FIXTURE),
         },
       },
       validationState: 'accepted',
-      event: COLLECTIBLE_EVENT_FIXTURE,
+      event: MATCH_EVENT_FIXTURE,
     };
 
     await store.applyBlock('hive-mainnet', block, [acceptedDecision], '2026-07-11T12:07:00.000Z');
 
-    const operationInsert = client.statements.find(({ text }) =>
-      text.includes('INSERT INTO hive_projection.operation'),
+    const eventInsert = client.statements.find(({ text }) =>
+      text.includes('INSERT INTO hive_projection.match_event'),
     );
-    expect(operationInsert?.values?.[0]).toBe(operationId);
-    expect(operationInsert?.values?.[15]).toBe('accepted');
-    expect(client.statements.some(({ text }) => text.includes('collectible_event'))).toBe(false);
+    expect(eventInsert?.values?.slice(0, 4)).toEqual([
+      MATCH_EVENT_FIXTURE.event_id,
+      MATCH_EVENT_FIXTURE.data.batch_id,
+      operationId,
+      'match_results_batch',
+    ]);
   });
 
-  it('materializes accepted collectible evidence only at irreversibility', async () => {
+  it('promotes typed match evidence and materializes results only at irreversibility', async () => {
+    if (MATCH_EVENT_FIXTURE.type !== 'match_results_batch') {
+      throw new Error('fixture is not a match batch');
+    }
     const client = new FinalizationSqlClient({
       required_auths: [],
-      required_posting_auths: ['item-issuer'],
+      required_posting_auths: ['match-pub'],
       id: 'hive.chameleon',
-      json: serializeHiveChameleonEvent(COLLECTIBLE_EVENT_FIXTURE),
+      json: serializeHiveChameleonEvent(MATCH_EVENT_FIXTURE),
     });
     const store = new PostgresProjectionStore(new SingleClientPool(client), {
       endpointIdentity: 'https://hafah.example/api',
@@ -164,12 +173,12 @@ describe('PostgreSQL projection store', () => {
 
     await store.finalizeThrough('hive-mainnet', 1, '2026-07-11T12:08:00.000Z');
 
-    expect(client.statements.some(({ text }) => text.includes("SET state = 'irreversible'"))).toBe(
-      true,
-    );
+    expect(
+      client.statements.some(({ text }) => text.includes("SET operation_state = 'irreversible'")),
+    ).toBe(true);
     expect(
       client.statements.some(({ text }) =>
-        text.includes('INSERT INTO hive_projection.collectible_event'),
+        text.includes('INSERT INTO hive_projection.match_result'),
       ),
     ).toBe(true);
   });
@@ -241,8 +250,9 @@ class FinalizationSqlClient implements SqlClientPort {
           transaction_id: 'b'.repeat(40),
           block_number: 1,
           block_timestamp: block.timestamp,
-          primary_account: 'item-issuer',
+          primary_account: 'match-pub',
           payload: this.payload,
+          match_event_uuid: MATCH_EVENT_FIXTURE.event_id,
         },
       ];
     }

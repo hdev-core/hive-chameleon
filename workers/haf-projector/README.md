@@ -15,10 +15,11 @@ the all-zero HAfAH sentinel normalize to no transaction identity.
 
 Persistence is the `ProjectionStore` port. The PostgreSQL implementation uses #22's
 `hive_projection.block_checkpoint`, raw operation validation fields, and `sync_cursor` in one
-transaction per applied block. Accepted application operations are retained immediately as
-reversible raw evidence. Collectible ownership views are materialized only when the source operation becomes
-irreversible, so a pre-LIB fork can revert pending evidence without corrupting the business view.
-The included in-memory store is exported only from the testing subpath and refuses production use.
+transaction per applied block. Accepted match envelopes are retained immediately as reversible
+typed evidence. Match-result/current-head and collectible ownership views are materialized only
+when the source operation becomes irreversible, so a pre-LIB fork can revert pending evidence
+without corrupting the business view. The included in-memory store is exported only from the
+testing subpath and refuses production use.
 
 ## Run the worker
 
@@ -37,8 +38,8 @@ npm run build --workspace @hive-chameleon/haf-projector
 npm run start --workspace @hive-chameleon/haf-projector
 ```
 
-`DATABASE_URL`, both source URLs, the source/network identity, HAfAH operation type IDs, and the
-collectible-issuer allow-list are mandatory. An explicitly empty account list means deny all for
+`DATABASE_URL`, both source URLs, the source/network identity, HAfAH operation type IDs, and both
+publisher/issuer allow-lists are mandatory. An explicitly empty account list means deny all for
 that event family. Production database URLs must select `sslmode=require`, `verify-ca`, or
 `verify-full`; source URLs are always credential-free HTTPS. Page size, request timeout, database
 pool bounds, polling/backoff, clock skew, batch size, and maximum reorganization depth have

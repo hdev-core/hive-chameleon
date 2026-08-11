@@ -44,6 +44,7 @@ async function run(): Promise<void> {
       nextUuidV7: createUuidV7,
     });
     const validator = new HiveOperationValidator({
+      matchPublishers: new Set(config.matchPublishers),
       collectibleIssuers: new Set(config.collectibleIssuers),
       maximumFutureClockSkewMs: config.maximumFutureClockSkewMs,
     });

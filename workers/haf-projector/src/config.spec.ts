@@ -9,7 +9,8 @@ const validEnvironment = {
   HAF_PROJECTOR_HAFAH_API_URL: 'https://hafah.example.invalid/api/',
   HAF_PROJECTOR_HIVE_RPC_URL: 'https://hive-rpc.example.invalid/',
   HAF_PROJECTOR_OPERATION_TYPE_IDS: '18, 91',
-  HAF_PROJECTOR_COLLECTIBLE_ISSUERS: 'item-issuer,other-issuer',
+  HAF_PROJECTOR_MATCH_PUBLISHERS: 'match-pub,other-pub',
+  HAF_PROJECTOR_COLLECTIBLE_ISSUERS: '',
 } as const;
 
 describe('HAF projector runtime configuration', () => {
@@ -18,7 +19,8 @@ describe('HAF projector runtime configuration', () => {
 
     expect(config.sourceName).toBe('hive-mainnet');
     expect(config.operationTypeIds).toEqual([18, 91]);
-    expect(config.collectibleIssuers).toEqual(['item-issuer', 'other-issuer']);
+    expect(config.matchPublishers).toEqual(['match-pub', 'other-pub']);
+    expect(config.collectibleIssuers).toEqual([]);
     expect(config.pageSize).toBe(1_000);
     expect(config.maxReorgDepth).toBe(200);
     expect(config.databaseUrl).toBe(validEnvironment.DATABASE_URL);
@@ -63,7 +65,7 @@ describe('HAF projector runtime configuration', () => {
     expect(() =>
       loadHafProjectorConfig({
         ...validEnvironment,
-        HAF_PROJECTOR_COLLECTIBLE_ISSUERS: 'Not-Normalized',
+        HAF_PROJECTOR_MATCH_PUBLISHERS: 'Not-Normalized',
       }),
     ).toThrow('invalid Hive account');
   });

@@ -99,6 +99,9 @@ function classifyFailure(error: unknown): Readonly<Record<string, string>> {
   if (error instanceof HafProjectorError) {
     return { errorType: error.name, errorCode: error.code };
   }
+  // Unexpected (non-domain) errors are logged by stable code only. Their raw
+  // messages may embed secrets (e.g. a Postgres connection string with a
+  // password), so they are never emitted — see the worker spec's leak guard.
   return { errorType: 'UnexpectedError', errorCode: 'unexpected_error' };
 }
 

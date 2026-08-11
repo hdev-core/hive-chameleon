@@ -1,5 +1,5 @@
 import { serializeHiveChameleonEvent } from '@hive-chameleon/hive-gateway';
-import { COLLECTIBLE_EVENT_FIXTURE } from '@hive-chameleon/hive-gateway/testing';
+import { MATCH_EVENT_FIXTURE } from '@hive-chameleon/hive-gateway/testing';
 import { describe, expect, it } from 'vitest';
 
 import type { HafBlock, HafOperation } from '../model.js';
@@ -12,14 +12,14 @@ describe('fork-aware HAF projector', () => {
   it('persists pending evidence and promotes it only through LIB', async () => {
     const source = new FixtureHafSource();
     const blocks = chain('a', 2);
-    source.replaceChain(blocks, [collectibleOperation(2, '2000')]);
+    source.replaceChain(blocks, [matchOperation(2, '2000')]);
     source.lastIrreversibleBlock = 1;
     const store = new InMemoryProjectionStore();
     const projector = createProjector(source, store);
 
     await projector.runOnce();
     expect(store.operations).toMatchObject([
-      { validationState: 'accepted', state: 'included', event: { type: 'collectible_issued' } },
+      { validationState: 'accepted', state: 'included', event: { type: 'match_results_batch' } },
     ]);
 
     source.lastIrreversibleBlock = 2;
@@ -31,14 +31,14 @@ describe('fork-aware HAF projector', () => {
   it('finds a common ancestor, retains reverted evidence, and applies the replacement branch', async () => {
     const source = new FixtureHafSource();
     const initial = chain('a', 3);
-    source.replaceChain(initial, [collectibleOperation(2, '2000')]);
+    source.replaceChain(initial, [matchOperation(2, '2000')]);
     source.lastIrreversibleBlock = 1;
     const store = new InMemoryProjectionStore();
     const projector = createProjector(source, store);
     await projector.runOnce();
 
     const replacement = [initial[0] as HafBlock, ...chainFrom('b', 2, 4, initial[0]?.id ?? '')];
-    source.replaceChain(replacement, [collectibleOperation(3, '3000')]);
+    source.replaceChain(replacement, [matchOperation(3, '3000')]);
 
     const reconciliation = await projector.runOnce();
     expect(reconciliation.revertedTo).toBe(1);
@@ -67,8 +67,8 @@ describe('fork-aware HAF projector', () => {
   it('keeps finality and fork state isolated between configured sources', async () => {
     const firstSource = new FixtureHafSource('first-source');
     const secondSource = new FixtureHafSource('second-source');
-    firstSource.replaceChain(chain('a', 1), [collectibleOperation(1, '1000')]);
-    secondSource.replaceChain(chain('b', 1), [collectibleOperation(1, '2000')]);
+    firstSource.replaceChain(chain('a', 1), [matchOperation(1, '1000')]);
+    secondSource.replaceChain(chain('b', 1), [matchOperation(1, '2000')]);
     const store = new InMemoryProjectionStore();
     const firstProjector = createProjector(firstSource, store);
     const secondProjector = createProjector(secondSource, store);
@@ -87,7 +87,7 @@ describe('fork-aware HAF projector', () => {
   it('rejects operation evidence that disagrees with the block checkpoint', async () => {
     const source = new FixtureHafSource();
     source.replaceChain(chain('a', 1), [
-      { ...collectibleOperation(1, '1000'), timestamp: '2026-07-11T12:06:59.000Z' },
+      { ...matchOperation(1, '1000'), timestamp: '2026-07-11T12:06:59.000Z' },
     ]);
     const projector = createProjector(source, new InMemoryProjectionStore());
 
@@ -100,7 +100,7 @@ describe('fork-aware HAF projector', () => {
     const initial = chain('a', 2);
     const replacement = chain('b', 2);
     const source = new ChangingDuringOperationReadSource(replacement);
-    source.replaceChain(initial, [collectibleOperation(2, '2000')]);
+    source.replaceChain(initial, [matchOperation(2, '2000')]);
     const store = new InMemoryProjectionStore();
     const projector = createProjector(source, store);
 
@@ -111,7 +111,7 @@ describe('fork-aware HAF projector', () => {
 
   it('refuses finality when Hive RPC and HAfAH disagree on the LIB identity', async () => {
     const source = new FixtureHafSource();
-    source.replaceChain(chain('a', 2), [collectibleOperation(2, '2000')]);
+    source.replaceChain(chain('a', 2), [matchOperation(2, '2000')]);
     source.lastIrreversibleBlock = 2;
     source.irreversibleBlockIdOverride = 'f'.repeat(40);
     const store = new InMemoryProjectionStore();
@@ -129,7 +129,7 @@ describe('fork-aware HAF projector', () => {
       id: `c${'0'.repeat(39)}`,
     };
     const source = new ChangingAtFinalizationSource(changedFirstBlock);
-    source.replaceChain(initial, [collectibleOperation(1, '1000')]);
+    source.replaceChain(initial, [matchOperation(1, '1000')]);
     source.lastIrreversibleBlock = 2;
     const store = new InMemoryProjectionStore();
     const projector = createProjector(source, store, { maxBlocksPerRun: 1 });
@@ -149,6 +149,7 @@ function createProjector(
     source,
     store,
     new HiveOperationValidator({
+      matchPublishers: new Set(['match-pub']),
       collectibleIssuers: new Set(['item-issuer']),
     }),
     { ...options, now: () => new Date('2026-07-11T12:07:00.000Z') },
@@ -213,7 +214,7 @@ function chainFrom(prefix: string, from: number, to: number, previousId: string)
   return blocks;
 }
 
-function collectibleOperation(blockNumber: number, sourceOperationId: string): HafOperation {
+function matchOperation(blockNumber: number, sourceOperationId: string): HafOperation {
   return {
     sourceOperationId,
     transactionId: blockNumber.toString(16).padStart(40, '0'),
@@ -224,9 +225,9 @@ function collectibleOperation(blockNumber: number, sourceOperationId: string): H
     operationType: 'custom_json_operation',
     value: {
       required_auths: [],
-      required_posting_auths: ['item-issuer'],
+      required_posting_auths: ['match-pub'],
       id: 'hive.chameleon',
-      json: serializeHiveChameleonEvent(COLLECTIBLE_EVENT_FIXTURE),
+      json: serializeHiveChameleonEvent(MATCH_EVENT_FIXTURE),
     },
   };
 }

@@ -1,5 +1,5 @@
 import { serializeHiveChameleonEvent } from '@hive-chameleon/hive-gateway';
-import { COLLECTIBLE_EVENT_FIXTURE } from '@hive-chameleon/hive-gateway/testing';
+import { MATCH_EVENT_FIXTURE } from '@hive-chameleon/hive-gateway/testing';
 import { describe, expect, it } from 'vitest';
 
 import type { HafBlock, HafOperation } from '../model.js';
@@ -16,9 +16,9 @@ describe('Hive operation validator', () => {
   it('accepts a canonical event from the allow-listed role', () => {
     const validator = createValidator();
 
-    expect(validator.validate(operation('item-issuer'), block)).toMatchObject({
+    expect(validator.validate(operation('match-pub'), block)).toMatchObject({
       validationState: 'accepted',
-      event: { type: 'collectible_issued' },
+      event: { type: 'match_results_batch' },
     });
   });
 
@@ -35,8 +35,8 @@ describe('Hive operation validator', () => {
   it('retains raw rejection evidence for a malformed operation in the application namespace', () => {
     const validator = createValidator();
     const malformed = {
-      ...operation('item-issuer'),
-      value: { id: 'hive.chameleon', required_posting_auths: 'item-issuer' },
+      ...operation('match-pub'),
+      value: { id: 'hive.chameleon', required_posting_auths: 'match-pub' },
     };
 
     expect(validator.validate(malformed, block)).toMatchObject({
@@ -48,7 +48,7 @@ describe('Hive operation validator', () => {
 
   it('ignores unrelated application namespaces', () => {
     const validator = createValidator();
-    const unrelated = operation('item-issuer', 'other.application');
+    const unrelated = operation('match-pub', 'other.application');
 
     expect(validator.validate(unrelated, block)).toBeNull();
   });
@@ -56,6 +56,7 @@ describe('Hive operation validator', () => {
 
 function createValidator(): HiveOperationValidator {
   return new HiveOperationValidator({
+    matchPublishers: new Set(['match-pub']),
     collectibleIssuers: new Set(['item-issuer']),
   });
 }
@@ -73,7 +74,7 @@ function operation(signer: string, applicationId = 'hive.chameleon'): HafOperati
       required_auths: [],
       required_posting_auths: [signer],
       id: applicationId,
-      json: serializeHiveChameleonEvent(COLLECTIBLE_EVENT_FIXTURE),
+      json: serializeHiveChameleonEvent(MATCH_EVENT_FIXTURE),
     },
   };
 }
