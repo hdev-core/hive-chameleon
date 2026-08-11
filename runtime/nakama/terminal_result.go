@@ -53,6 +53,7 @@ type terminalLike struct {
 type terminalResultCommit struct {
 	RoundID                 string
 	RevisionID              string
+	PublicationRequestID    string
 	EndedAt                 time.Time
 	WinningSide             string
 	ResultSchemaVersion     string
@@ -234,6 +235,18 @@ func commitTerminalResult(
 		return "", fmt.Errorf("insert initial result revision: %w", err)
 	}
 
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO game.match_publication_request
+		  (id, round_id, result_revision_id, request_type)
+		 VALUES ($1, $2, $3, 'initial')`,
+		input.PublicationRequestID,
+		input.RoundID,
+		input.RevisionID,
+	); err != nil {
+		return "", fmt.Errorf("insert initial match publication request: %w", err)
+	}
+
 	result, err = tx.ExecContext(
 		ctx,
 		`UPDATE game.game_round
@@ -311,8 +324,9 @@ func assertTerminalResultReplay(
 
 func validateTerminalResult(input terminalResultCommit) (string, error) {
 	for label, value := range map[string]string{
-		"round ID":    input.RoundID,
-		"revision ID": input.RevisionID,
+		"round ID":               input.RoundID,
+		"revision ID":            input.RevisionID,
+		"publication request ID": input.PublicationRequestID,
 	} {
 		if _, err := canonicalUUIDV7ToCompact(value); err != nil {
 			return "", fmt.Errorf("invalid %s", label)

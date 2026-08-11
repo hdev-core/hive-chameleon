@@ -251,6 +251,13 @@ func buildAuthoritativeTerminalResult(
 	if err != nil {
 		return terminalResultCommit{}, err
 	}
+	publicationRequestID, err := deterministicUUIDV7(
+		completedAt,
+		round.ID+"|publication-request|initial|1",
+	)
+	if err != nil {
+		return terminalResultCommit{}, err
+	}
 	document := canonicalRoundResultDocument{
 		Version:             1,
 		RoundID:             round.ID,
@@ -273,6 +280,7 @@ func buildAuthoritativeTerminalResult(
 	return terminalResultCommit{
 		RoundID:                 round.ID,
 		RevisionID:              revisionID,
+		PublicationRequestID:    publicationRequestID,
 		EndedAt:                 completedAt.UTC(),
 		WinningSide:             state.WinningSide,
 		ResultSchemaVersion:     resultSchemaVersion,

@@ -38,6 +38,9 @@ func TestCommitTerminalResultCommitsBundleAndCompletesRoundLast(t *testing.T) {
 	mock.ExpectExec("INSERT INTO game.round_discovery").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO game.round_like").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO game.round_result_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO game.match_publication_request").
+		WithArgs(input.PublicationRequestID, input.RoundID, input.RevisionID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE game.game_round").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM game.round_live_checkpoint").
 		WithArgs(input.RoundID).
@@ -88,6 +91,9 @@ func TestCommitTerminalResultReplaysSameCanonicalBundle(t *testing.T) {
 	if outcome != terminalResultReplayed {
 		t.Fatalf("expected replayed, got %q", outcome)
 	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("replay must not insert a duplicate publication request: %v", err)
+	}
 }
 
 func TestValidateTerminalResultRejectsNonParticipantDiscovery(t *testing.T) {
@@ -104,6 +110,7 @@ func terminalResultFixture() terminalResultCommit {
 	return terminalResultCommit{
 		RoundID:                 "01900000-0000-7000-8000-000000000001",
 		RevisionID:              "01900000-0000-7000-8000-000000000002",
+		PublicationRequestID:    "01900000-0000-7000-8000-000000000003",
 		EndedAt:                 endedAt,
 		WinningSide:             "hunters",
 		ResultSchemaVersion:     "match-result-1",
