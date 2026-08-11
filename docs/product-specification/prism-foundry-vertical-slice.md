@@ -3,7 +3,7 @@
 Chroma District is the player-facing identity of Hive Chameleon's first
 playable official arena. The stable backend and map-catalog slug remains
 `prism-foundry` for compatibility; it is not the arena's display name or a
-gameplay concept. The current bundled content version is `m4-4`.
+gameplay concept. The current bundled content version is `m4-5`.
 
 ## M4 gameplay boundary
 
@@ -133,7 +133,7 @@ arena.
 Automated and manual acceptance must verify:
 
 - the compatibility slug remains `prism-foundry` and the content version is
-  `m4-4`;
+  `m4-5`;
 - Chroma District loads with static, non-interactive environment geometry and
   valid Hunter/Hider spawn areas;
 - Hiders are humanoid player characters and can move, camouflage their own

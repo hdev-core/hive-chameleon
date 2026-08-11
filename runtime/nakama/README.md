@@ -61,7 +61,7 @@ Nakama-authoritative match. Host commands lock and recheck both the current open
 `game.lobby_host_assignment` and the caller's expected lobby version. Disconnecting or leaving
 outside an active round closes the membership and migrates the host in one serializable
 transaction; the empty lobby closes without treating host ownership as a permanent role. New
-lobbies select only the published official `prism-foundry` content version `m4-4` when both desktop
+lobbies select only the published official `prism-foundry` content version `m4-5` when both desktop
 and web distributions declare the same supported game build and realtime protocol. Configuration
 and round start reject every other map UUID, version, lifecycle, unavailable distribution, or
 incompatible build/protocol contract. Public round snapshots carry the immutable map-version UUID,

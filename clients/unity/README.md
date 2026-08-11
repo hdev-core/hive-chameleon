@@ -60,7 +60,7 @@ The development client exposes the current server-backed multiplayer test flow:
 2. create an open/private lobby or join one by lobby code;
 3. see the real connected roster and host;
 4. configure Casual or Infection, timers, Hunters, and ammunition; Chroma District is pinned to
-   the mutually supported official `prism-foundry` content version `m4-4`;
+   the mutually supported official `prism-foundry` content version `m4-5`;
 5. volunteer for Hunter selection or start the match as host; and
 6. enter the 3D arena only after Nakama broadcasts a real round and private role assignment.
 
@@ -76,7 +76,7 @@ For a host-migration check, use two provisioned client identities:
 1. Create a lobby in either client and copy its lobby ID.
 2. Join that ID in another client.
 3. Configure from the current host. A fully migrated database automatically attaches the bundled
-   published Chroma District `m4-4` version; players never enter a raw map UUID.
+   published Chroma District `m4-5` version; players never enter a raw map UUID.
 4. Stop or close whichever client currently owns Host.
 5. Confirm the `HOST` badge moves to the remaining player and the lobby version advances. Its
    configuration button must now succeed.

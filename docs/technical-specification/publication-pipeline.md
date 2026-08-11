@@ -17,6 +17,23 @@ database constraint verifies their SHA-256. A repeated round ID is an idempotent
 the bytes, hash, schema, scoring rules, and detailed evidence match. Conflicting retries fail
 closed. Later corrections append a linear revision; existing revisions are immutable.
 
+## Match publisher
+
+`workers/match-publisher` turns terminal-result publication requests into immutable
+`match_results_batch` events. `commitTerminalResult` inserts the initial `game.match_publication_request`
+row in the same serializable transaction as the completed round; nothing about batching or broadcast
+happens on that hot path. The worker locks eligible requests, orders results by completion time and
+round ID, and freezes the event UUID, batch UUID, canonical JSON bytes, SHA-256, byte count, and
+ordered membership into `game.match_publication_outbox`/`match_publication_item` in one serializable
+transaction. It flushes at five minutes, 20 results, or 6 KiB, whichever is reached first; a result
+that cannot fit alone is rejected and logged, never truncated.
+
+Broadcast attempts claim an existing outbox row with a lease and reparse/rehash the stored canonical
+payload on every retry, keeping its logical event/batch identity. Like the collectible issuer, the
+worker holds no private key: it journals the prepared signing attempt in
+`hive_projection.transaction_intent`, then sends the complete unsigned WAX transaction to an HTTPS
+isolated signer that independently enforces the `match_publisher` role and posting policy.
+
 ## Collectible issuer
 
 `workers/collectible-issuer` accepts trusted internal commands for `collectible_issued` and
@@ -34,11 +51,13 @@ role/account/public-key/key-reference tuple, and durably fences each signing att
 
 The HAF projector stores raw application operation evidence immediately. Before LIB, a fork marks
 that evidence reverted and does not mutate business state. Only an irreversible, accepted,
-allow-listed collectible event may advance the collectible projection and ownership cache.
+allow-listed collectible or match event may advance its projection: the collectible ownership cache,
+or `hive_projection.match_event`/`match_result`/`match_result_change`.
 
 Issuance must match a local collectible definition, owner, metadata hash, and optional payment
-reference. Revocation must reference its finalized issuance. Reprocessing is idempotent by stable
-event and operation identity.
+reference. Revocation must reference its finalized issuance. An initial match result must match its
+local round, revision, and map evidence; corrections and invalidations must reference their prior
+event in an unbroken chain. Reprocessing is idempotent by stable event and operation identity.
 
 ## Deployment gates
 
