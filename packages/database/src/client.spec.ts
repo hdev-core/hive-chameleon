@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 
-import { withTransaction, type TransactionOptions } from './client.js';
+import { createDatabasePool, withTransaction, type TransactionOptions } from './client.js';
 
 function databaseDouble(query: PoolClient['query'] = vi.fn().mockResolvedValue({})) {
   const client = {
@@ -79,5 +79,31 @@ describe('withTransaction', () => {
       'Unsupported transaction isolation level',
     );
     expect(pool.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe('createDatabasePool', () => {
+  it('keeps an idle-client backend error non-fatal instead of crashing the process', async () => {
+    const pool = createDatabasePool({
+      // A port with no listener: the pool is never actually dialed here, so the
+      // test only asserts the default 'error' listener the factory installs.
+      connectionString: 'postgres://unused:unused@127.0.0.1:1/unused',
+    });
+    try {
+      expect(pool.listenerCount('error')).toBeGreaterThanOrEqual(1);
+
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      // Emitting 'error' with no listener would throw here (Node's unhandled
+      // 'error' semantics); with the factory's listener it is swallowed + logged.
+      expect(() =>
+        pool.emit('error', new Error('terminating connection due to administrator command')),
+      ).not.toThrow();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('database_pool_idle_client_error'),
+      );
+      stderr.mockRestore();
+    } finally {
+      await pool.end();
+    }
   });
 });
