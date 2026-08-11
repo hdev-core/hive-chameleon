@@ -74,6 +74,7 @@ func (s *lobbyService) createRPC(
 	if err != nil {
 		return "", logLobbyFailure(logger, "lobby.create", err)
 	}
+	reconcileDepartedLobbyMatch(ctx, logger, nk, snapshot.DepartedLobbyID, playerID)
 	matchID, err := ensureLobbyMatch(ctx, nk, snapshot.ID)
 	if err != nil {
 		return "", logLobbyFailure(logger, "lobby.create match binding", err)
@@ -104,6 +105,7 @@ func (s *lobbyService) joinRPC(
 	if err != nil {
 		return "", logLobbyFailure(logger, "lobby.join", err)
 	}
+	reconcileDepartedLobbyMatch(ctx, logger, nk, snapshot.DepartedLobbyID, playerID)
 	matchID, err := ensureLobbyMatch(ctx, nk, snapshot.ID)
 	if err != nil {
 		return "", logLobbyFailure(logger, "lobby.join match binding", err)
@@ -401,6 +403,42 @@ func sendLobbySignal(
 		return nil, errors.New("authoritative lobby match returned no response")
 	}
 	return result.Response, nil
+}
+
+func reconcileDepartedLobbyMatch(
+	ctx context.Context,
+	logger runtime.Logger,
+	nk lobbyNakama,
+	lobbyID string,
+	playerID string,
+) {
+	if lobbyID == "" || playerID == "" {
+		return
+	}
+	object, err := readLobbyMatchBinding(ctx, nk, lobbyID)
+	if err != nil {
+		logger.Warn("read departed lobby match binding %s: %v", lobbyID, err)
+		return
+	}
+	if object == nil {
+		return
+	}
+	binding, err := parseLobbyMatchBinding(object.Value)
+	if err != nil {
+		logger.Warn("parse departed lobby match binding %s: %v", lobbyID, err)
+		return
+	}
+	match, err := nk.MatchGet(ctx, binding.MatchID)
+	if err != nil || match == nil {
+		return
+	}
+	if _, err := sendLobbySignal(ctx, nk, binding.MatchID, lobbySignal{
+		Type:        "leave",
+		PlayerID:    playerID,
+		LeaveReason: "host_left",
+	}); err != nil {
+		logger.Warn("reconcile departed lobby match %s: %v", lobbyID, err)
+	}
 }
 
 func encodeLobbyResponse(response lobbyRPCResponse) (string, error) {

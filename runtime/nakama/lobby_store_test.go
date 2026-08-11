@@ -33,6 +33,9 @@ func TestCreateLobbySelectsCurrentAvailableOfficialMap(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT round.id::text, membership.lobby_id::text").
+		WithArgs(playerID).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT lobby_id::text").
 		WithArgs(playerID).
 		WillReturnError(sql.ErrNoRows)
@@ -284,6 +287,230 @@ func TestOfficialRoundMapRejectsIncompatibleDistributionContract(t *testing.T) {
 		mapVersionID,
 	); err == nil {
 		t.Fatal("accepted an incompatible official map distribution")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestReleaseAbandonedRoundPresenceAbortsSilentRound(t *testing.T) {
+	t.Parallel()
+
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	playerID := "01900000-0000-7000-8000-000000000011"
+	roundID := "01900000-0000-7000-8000-000000000030"
+	lobbyID := "01900000-0000-7000-8000-000000000020"
+	// Last activity is well beyond the grace window, so the presence is unrecoverable.
+	lastActivity := now.Add(-abandonedRoundGraceDuration - time.Minute)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT round.id::text, membership.lobby_id::text").
+		WithArgs(playerID).
+		WillReturnRows(
+			sqlmock.NewRows([]string{"round_id", "lobby_id", "last_activity"}).
+				AddRow(roundID, lobbyID, lastActivity),
+		)
+	mock.ExpectExec("UPDATE game.game_round").
+		WithArgs(
+			roundID,
+			now,
+			now.Add(-abandonedRoundGraceDuration),
+			reconnectWindowExpiredRoundAbortReason,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM game.round_live_checkpoint").
+		WithArgs(roundID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE game.lobby_host_assignment").
+		WithArgs(lobbyID, now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE game.lobby_membership").
+		WithArgs(lobbyID, now).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE game.lobby").
+		WithArgs(lobbyID, now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := releaseAbandonedRoundPresence(context.Background(), tx, playerID, now); err != nil {
+		t.Fatalf("release abandoned round presence: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestReleaseAbandonedRoundPresenceDoesNotRaceFreshCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	playerID := "01900000-0000-7000-8000-000000000011"
+	roundID := "01900000-0000-7000-8000-000000000030"
+	lobbyID := "01900000-0000-7000-8000-000000000020"
+	lastActivity := now.Add(-abandonedRoundGraceDuration - time.Second)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT round.id::text, membership.lobby_id::text").
+		WithArgs(playerID).
+		WillReturnRows(
+			sqlmock.NewRows([]string{"round_id", "lobby_id", "last_activity"}).
+				AddRow(roundID, lobbyID, lastActivity),
+		)
+	mock.ExpectExec("UPDATE game.game_round").
+		WithArgs(
+			roundID,
+			now,
+			now.Add(-abandonedRoundGraceDuration),
+			reconnectWindowExpiredRoundAbortReason,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := releaseAbandonedRoundPresence(context.Background(), tx, playerID, now); err != nil {
+		t.Fatalf("reconcile concurrently revived round: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestAbortRoundRetainsLobbyAndDeletesPrivateCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	roundID := "01900000-0000-7000-8000-000000000030"
+	lobbyID := "01900000-0000-7000-8000-000000000020"
+	store := &postgresLobbyStore{database: database, now: func() time.Time { return now }}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE game.game_round").
+		WithArgs(roundID, lobbyID, reconnectWindowExpiredRoundAbortReason, now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM game.round_live_checkpoint").
+		WithArgs(roundID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := store.AbortRound(
+		context.Background(),
+		lobbyID,
+		roundID,
+		reconnectWindowExpiredRoundAbortReason,
+		now,
+	); err != nil {
+		t.Fatalf("abort unreachable round: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestAbortRoundIsIdempotentAfterConcurrentCleanup(t *testing.T) {
+	t.Parallel()
+
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	roundID := "01900000-0000-7000-8000-000000000030"
+	lobbyID := "01900000-0000-7000-8000-000000000020"
+	store := &postgresLobbyStore{database: database, now: func() time.Time { return now }}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE game.game_round").
+		WithArgs(roundID, lobbyID, reconnectWindowExpiredRoundAbortReason, now).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT status::text").
+		WithArgs(roundID, lobbyID).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("aborted"))
+	mock.ExpectExec("DELETE FROM game.round_live_checkpoint").
+		WithArgs(roundID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	if err := store.AbortRound(
+		context.Background(),
+		lobbyID,
+		roundID,
+		reconnectWindowExpiredRoundAbortReason,
+		now,
+	); err != nil {
+		t.Fatalf("repeat concurrent round abort: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestReleaseAbandonedRoundPresenceKeepsRoundWithinGraceWindow(t *testing.T) {
+	t.Parallel()
+
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create SQL mock: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	playerID := "01900000-0000-7000-8000-000000000011"
+	roundID := "01900000-0000-7000-8000-000000000030"
+	lobbyID := "01900000-0000-7000-8000-000000000020"
+	// A player still inside the reconnect window must never be swept up.
+	lastActivity := now.Add(-time.Second)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT round.id::text, membership.lobby_id::text").
+		WithArgs(playerID).
+		WillReturnRows(
+			sqlmock.NewRows([]string{"round_id", "lobby_id", "last_activity"}).
+				AddRow(roundID, lobbyID, lastActivity),
+		)
+	mock.ExpectCommit()
+
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := releaseAbandonedRoundPresence(context.Background(), tx, playerID, now); err != nil {
+		t.Fatalf("release abandoned round presence: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)

@@ -300,6 +300,8 @@ func (m *persistentLobbyMatch) MatchLoop(
 	}
 	now := m.nowUTC()
 	state.expireReconnectReservations(now)
+	state.queueUnreachableRoundParticipants(now)
+	hadPendingLeaves := len(state.PendingLeaves) > 0
 	if len(state.PendingLeaves) > 0 {
 		closed, err := m.flushPendingLeaves(ctx, state)
 		if err != nil {
@@ -309,6 +311,35 @@ func (m *persistentLobbyMatch) MatchLoop(
 		if closed {
 			return nil
 		}
+	}
+
+	if state.noReachableRoundParticipants(now) {
+		if err := m.store.AbortRound(
+			ctx,
+			state.LobbyID,
+			state.Round.ID,
+			reconnectWindowExpiredRoundAbortReason,
+			now,
+		); err != nil {
+			logger.Error("abort round with no reachable participants; retrying: %v", err)
+			return state
+		}
+		state.Round.Status = "aborted"
+		state.Round.EndedAt = now
+		state.Round.PhaseDeadline = nil
+		state.Round.WinningSide = ""
+		state.Round.CompletionReason = reconnectWindowExpiredRoundAbortReason
+		state.AuthoritativeRound = nil
+		clear(state.ReconnectReservations)
+		clear(state.AvatarStates)
+		state.resetScoreCache()
+		state.LiveStateDirty = false
+		m.broadcastState(logger, dispatcher, state)
+		m.broadcastRoundState(logger, dispatcher, state)
+		return state
+	}
+
+	if hadPendingLeaves {
 		if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
 			logger.Error("persist expired reconnect state: %v", err)
 			return nil
@@ -643,7 +674,8 @@ func (m *persistentLobbyMatch) MatchSignal(
 				newLobbyProblem(grpcInvalidArgument, "invalid hunter nomination signal"),
 			)
 		}
-		if state.Round != nil {
+		if state.Round != nil &&
+			state.Round.Status != "completed" && state.Round.Status != "aborted" {
 			return state, encodeLobbySignalError(
 				newLobbyProblem(
 					grpcFailedPrecondition,
@@ -697,8 +729,9 @@ func (m *persistentLobbyMatch) MatchSignal(
 				newLobbyProblem(grpcInvalidArgument, "invalid lobby start signal"),
 			)
 		}
-		if state.Round != nil && state.Round.Status == "completed" {
-			completedRoundID := state.Round.ID
+		if state.Round != nil &&
+			(state.Round.Status == "completed" || state.Round.Status == "aborted") {
+			previousRoundID := state.Round.ID
 			state.Round = nil
 			state.AuthoritativeRound = nil
 			clear(state.AvatarStates)
@@ -706,11 +739,11 @@ func (m *persistentLobbyMatch) MatchSignal(
 			state.resetScoreCache()
 			if err := m.store.DeleteLiveRoundCheckpoint(
 				ctx,
-				completedRoundID,
+				previousRoundID,
 			); err != nil {
 				logger.Warn(
-					"delete stale completed-round checkpoint %s: %v",
-					completedRoundID,
+					"delete stale terminal-round checkpoint %s: %v",
+					previousRoundID,
 					err,
 				)
 			}

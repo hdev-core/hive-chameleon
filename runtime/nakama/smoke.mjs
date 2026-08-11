@@ -12,7 +12,6 @@ const requiredEnvironment = [
   'SMOKE_AUTH_SESSION_TWO_ID',
   'SMOKE_PLAYER_ID',
   'SMOKE_PLAYER_TWO_ID',
-  'SMOKE_MAP_VERSION_ID',
   'SMOKE_NAKAMA_CONTAINER_ID',
 ];
 
@@ -123,6 +122,21 @@ try {
   await hostSocket.connect(session, true, 1_000);
   await guestSocket.connect(secondSession, true, 1_000);
 
+  const supersededHostLobby = await lobbyRpc(hostSocket, 'lobby.create', {
+    max_players: 2,
+    name: 'Superseded host lobby',
+    region_code: 'local',
+    visibility: 'public',
+  });
+  await hostSocket.joinMatch(supersededHostLobby.match_id);
+  const supersededGuestLobby = await lobbyRpc(guestSocket, 'lobby.create', {
+    max_players: 2,
+    name: 'Superseded guest lobby',
+    region_code: 'local',
+    visibility: 'public',
+  });
+  await guestSocket.joinMatch(supersededGuestLobby.match_id);
+
   const created = await lobbyRpc(hostSocket, 'lobby.create', {
     max_players: 2,
     name: 'Bridge smoke lobby',
@@ -137,6 +151,16 @@ try {
   if (typeof created.match_id !== 'string' || created.match_id.length === 0) {
     throw new Error('lobby.create did not return an authoritative match ID');
   }
+  if (
+    created.lobby.id === supersededHostLobby.lobby.id ||
+    Object.hasOwn(created.lobby, 'departed_lobby_id')
+  ) {
+    throw new Error('lobby.create did not replace the previous lobby cleanly');
+  }
+  const officialMapVersionId = created.lobby.configuration?.map_version_id;
+  if (typeof officialMapVersionId !== 'string' || officialMapVersionId.length === 0) {
+    throw new Error('lobby.create did not select the current official map release');
+  }
   await hostSocket.joinMatch(created.match_id);
 
   const joined = await lobbyRpc(guestSocket, 'lobby.join', {
@@ -150,6 +174,12 @@ try {
   });
   if (joined.match_id !== created.match_id) {
     throw new Error('lobby.join resolved a different authoritative match');
+  }
+  if (
+    joined.lobby.id === supersededGuestLobby.lobby.id ||
+    Object.hasOwn(joined.lobby, 'departed_lobby_id')
+  ) {
+    throw new Error('lobby.join did not switch away from the previous lobby cleanly');
   }
   const joinedNames = new Map(
     joined.lobby.members.map((member) => [member.player_id, member.display_name]),
@@ -239,7 +269,7 @@ try {
     hiding_duration_seconds: 10,
     hunting_duration_seconds: 60,
     lobby_id: created.lobby.id,
-    map_version_id: process.env.SMOKE_MAP_VERSION_ID,
+    map_version_id: officialMapVersionId,
     reload_duration_ms: 100,
     shell_limit: 6,
   });
@@ -277,13 +307,12 @@ try {
     typeof started.round?.id !== 'string' ||
     started.round.status !== 'preparing' ||
     started.round.sequence_number !== 1 ||
-    started.round.map_version_id !== process.env.SMOKE_MAP_VERSION_ID ||
-    started.round.map_content_version !== 'm4-4' ||
+    started.round.map_version_id !== officialMapVersionId ||
+    !/^m\d+-\d+$/.test(started.round.map_content_version) ||
     started.round.game_server_build_version !== 'hive-chameleon-m4-dev' ||
     started.round.protocol_version !== 'm4-v2' ||
     started.round.authority_geometry_version !== 'chroma-district-authority-proxy-1' ||
-    started.round.authority_geometry_digest !==
-      'sha256:a39e5e7ae0e3f8f3d7fffc718f5e93047799f8d1338afa8b25b5d3ee0021c9a8'
+    !/^sha256:[0-9a-f]{64}$/.test(started.round.authority_geometry_digest)
   ) {
     throw new Error('lobby.start did not create a preparing round');
   }

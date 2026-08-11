@@ -2,7 +2,10 @@ package main
 
 import "time"
 
-const reconnectReservationDuration = 60 * time.Second
+const (
+	reconnectReservationDuration           = 60 * time.Second
+	reconnectWindowExpiredRoundAbortReason = "reconnect_window_expired"
+)
 
 type roundReconnectReservation struct {
 	PlayerID       string
@@ -170,5 +173,75 @@ func (s *persistentLobbyState) expireReconnectReservations(now time.Time) {
 		delete(s.ReconnectReservations, playerID)
 		s.PendingLeaves[playerID] = "host_disconnected"
 		s.markLiveRoundDirty()
+	}
+}
+
+// queueUnreachableRoundParticipants restores the active-round presence
+// invariant after lifecycle races: every participant must either have a live
+// presence, own an unexpired reconnect reservation, or be queued for a durable
+// lobby departure. A participant that never reached MatchJoin (or whose
+// presence was lost without a corresponding MatchLeave callback) must not keep
+// the authoritative round alive forever.
+func (s *persistentLobbyState) queueUnreachableRoundParticipants(now time.Time) bool {
+	if s == nil || s.AuthoritativeRound == nil || !s.reconnectManagedPhase() {
+		return false
+	}
+	if s.PendingLeaves == nil {
+		s.PendingLeaves = make(map[string]string)
+	}
+	changed := false
+	for playerID := range s.AuthoritativeRound.Assignments {
+		if len(presencesForPlayer(s, playerID)) > 0 {
+			continue
+		}
+		if reservation, reserved := s.ReconnectReservations[playerID]; reserved {
+			if now.Before(reservation.ExpiresAt) {
+				continue
+			}
+			delete(s.ReconnectReservations, playerID)
+		}
+		if _, queued := s.PendingLeaves[playerID]; queued {
+			continue
+		}
+		s.PendingLeaves[playerID] = "host_disconnected"
+		changed = true
+	}
+	if changed {
+		s.markLiveRoundDirty()
+	}
+	return changed
+}
+
+// noReachableRoundParticipants reports whether a live, pre-terminal round has
+// nobody who can still play or reconnect. Join-in-progress spectators are not
+// round participants and therefore do not make an otherwise abandoned round
+// continue ticking.
+func (s *persistentLobbyState) noReachableRoundParticipants(now time.Time) bool {
+	if s == nil || s.Round == nil || s.AuthoritativeRound == nil ||
+		!s.reconnectManagedPhase() ||
+		len(s.AuthoritativeRound.Assignments) == 0 {
+		return false
+	}
+	for playerID := range s.AuthoritativeRound.Assignments {
+		if len(presencesForPlayer(s, playerID)) > 0 {
+			return false
+		}
+		if reservation, reserved := s.ReconnectReservations[playerID]; reserved &&
+			now.Before(reservation.ExpiresAt) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *persistentLobbyState) reconnectManagedPhase() bool {
+	if s == nil || s.AuthoritativeRound == nil {
+		return false
+	}
+	switch s.AuthoritativeRound.Phase {
+	case "preparing", "hiding", "hunting":
+		return true
+	default:
+		return false
 	}
 }

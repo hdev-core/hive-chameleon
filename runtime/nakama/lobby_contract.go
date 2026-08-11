@@ -138,6 +138,7 @@ type lobbySnapshot struct {
 	Members             []lobbyMemberSnapshot      `json:"members"`
 	HunterNomineeIDs    []string                   `json:"hunter_nominee_player_ids"`
 	Configuration       lobbyConfigurationSnapshot `json:"configuration"`
+	DepartedLobbyID     string                     `json:"-"`
 }
 
 type lobbyRPCResponse struct {
@@ -179,6 +180,7 @@ type lobbyStore interface {
 	) error
 	DeleteLiveRoundCheckpoint(context.Context, string) error
 	UpdateRoundPhase(context.Context, string, string) error
+	AbortRound(context.Context, string, string, string, time.Time) error
 	CommitTerminalResult(
 		context.Context,
 		terminalResultCommit,

@@ -78,6 +78,101 @@ func TestReconnectExpiryQueuesDurableLobbyDeparture(t *testing.T) {
 	}
 }
 
+func TestUnreachableRoundParticipantIsQueuedForDurableDeparture(t *testing.T) {
+	t.Parallel()
+
+	round := casualRoundFixture()
+	authoritative, err := newAuthoritativeRoundState(&round)
+	if err != nil {
+		t.Fatalf("create authoritative round: %v", err)
+	}
+	connectedID := round.RoleAssignments[0].PlayerID
+	unreachableID := round.RoleAssignments[1].PlayerID
+	now := round.StartedAt.Add(time.Second)
+	lobby := &persistentLobbyState{
+		Round:              &round,
+		AuthoritativeRound: authoritative,
+		Presences: map[string]lobbyPresence{
+			"connected-session": {
+				PlayerID: connectedID,
+				Presence: testPresence{sessionID: "connected-session"},
+			},
+		},
+		PendingLeaves:         make(map[string]string),
+		ReconnectReservations: make(map[string]roundReconnectReservation),
+	}
+
+	if !lobby.queueUnreachableRoundParticipants(now) {
+		t.Fatal("unreachable participant did not change lifecycle state")
+	}
+	if lobby.PendingLeaves[unreachableID] != "host_disconnected" {
+		t.Fatalf("unreachable participant was not queued: %#v", lobby.PendingLeaves)
+	}
+	if lobby.noReachableRoundParticipants(now) {
+		t.Fatal("a connected participant was treated as unreachable")
+	}
+}
+
+func TestRoundBecomesUnreachableOnlyAfterLastReservationExpires(t *testing.T) {
+	t.Parallel()
+
+	round := casualRoundFixture()
+	authoritative, err := newAuthoritativeRoundState(&round)
+	if err != nil {
+		t.Fatalf("create authoritative round: %v", err)
+	}
+	now := round.StartedAt.Add(time.Second)
+	lobby := &persistentLobbyState{
+		Round:                 &round,
+		AuthoritativeRound:    authoritative,
+		Presences:             make(map[string]lobbyPresence),
+		PendingLeaves:         make(map[string]string),
+		ReconnectReservations: make(map[string]roundReconnectReservation),
+	}
+	for playerID := range authoritative.Assignments {
+		if !lobby.reserveReconnect(playerID, now) {
+			t.Fatalf("participant %s was not reserved", playerID)
+		}
+	}
+
+	if lobby.noReachableRoundParticipants(now.Add(59 * time.Second)) {
+		t.Fatal("round became unreachable before the reconnect deadline")
+	}
+	lobby.expireReconnectReservations(now.Add(reconnectReservationDuration))
+	if !lobby.noReachableRoundParticipants(now.Add(reconnectReservationDuration)) {
+		t.Fatal("round remained reachable after every reservation expired")
+	}
+}
+
+func TestTerminalRoundIsNotAbortedForMissingPresences(t *testing.T) {
+	t.Parallel()
+
+	round := casualRoundFixture()
+	authoritative, err := newAuthoritativeRoundState(&round)
+	if err != nil {
+		t.Fatalf("create authoritative round: %v", err)
+	}
+	authoritative.BeginAnswerCheck(
+		"hiders",
+		"hunt_timeout",
+		round.StartedAt.Add(time.Minute),
+	)
+	lobby := &persistentLobbyState{
+		Round:                 &round,
+		AuthoritativeRound:    authoritative,
+		Presences:             make(map[string]lobbyPresence),
+		PendingLeaves:         make(map[string]string),
+		ReconnectReservations: make(map[string]roundReconnectReservation),
+	}
+
+	if lobby.queueUnreachableRoundParticipants(round.StartedAt.Add(time.Minute)) {
+		t.Fatal("terminal participants were queued before result commit")
+	}
+	if lobby.noReachableRoundParticipants(round.StartedAt.Add(time.Minute)) {
+		t.Fatal("terminal round was marked for abandonment before result commit")
+	}
+}
+
 func TestCrashRecoveryReservationsUseCheckpointDeadlineAndNeverExtend(t *testing.T) {
 	t.Parallel()
 
