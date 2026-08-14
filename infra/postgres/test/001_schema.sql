@@ -76,13 +76,13 @@ SELECT pg_temp.assert_true(
   (
     SELECT count(*) = 1
       FROM content.map
-     WHERE slug = 'prism-foundry'
-       AND title = 'Chroma District'
+     WHERE slug = 'neon-service-arcade'
+       AND title = 'Neon Service Arcade'
        AND origin = 'official'
        AND creator_player_id IS NULL
        AND lifecycle = 'published'
   ),
-  'the clean migrated database contains the published Chroma District official map'
+  'the clean migrated database contains the published Neon Service Arcade official map'
 );
 
 SELECT pg_temp.assert_true(
@@ -90,16 +90,15 @@ SELECT pg_temp.assert_true(
     SELECT count(*) = 1
       FROM content.map_version version
       JOIN content.map map_definition ON map_definition.id = version.map_id
-     WHERE map_definition.slug = 'prism-foundry'
-       AND version.version_number = 'm4-4'
+     WHERE map_definition.slug = 'neon-service-arcade'
+       AND version.version_number = 'm2'
        AND version.status = 'published'
-       AND version.license_declaration_version = 'official-bundled-provenance-1'
+       AND version.license_declaration_version = 'user-supplied-bundled-1'
        AND version.manifest ->> 'delivery' = 'bundled_in_game_client'
-       AND version.manifest
-             #>> '{asset_provenance,environment,raw_source_redistribution}'
-           = 'unreviewed_do_not_publish'
+       AND version.manifest #>> '{asset_provenance,environment,source}'
+           = 'user-supplied Blender arena build'
   ),
-  'the official m4-4 catalog record is explicit without claiming raw source redistribution'
+  'the official Neon Service Arcade m2 catalog record declares its bundled provenance'
 );
 
 SELECT pg_temp.assert_true(
@@ -108,15 +107,27 @@ SELECT pg_temp.assert_true(
       FROM content.map_distribution distribution
       JOIN content.map_version version ON version.id = distribution.map_version_id
       JOIN content.map map_definition ON map_definition.id = version.map_id
-     WHERE map_definition.slug = 'prism-foundry'
-       AND version.version_number = 'm4-4'
+     WHERE map_definition.slug = 'neon-service-arcade'
+       AND version.version_number = 'm2'
        AND distribution.platform IN ('desktop', 'web')
        AND distribution.state = 'available'
        AND distribution.required_game_build_version = 'hive-chameleon-m4-dev'
        AND distribution.required_protocol_version = 'm4-v2'
        AND distribution.published_at IS NOT NULL
   ),
-  'Chroma District m4-4 is available for both bundled desktop and web clients'
+  'Neon Service Arcade m2 is available for both bundled desktop and web clients'
+);
+
+SELECT pg_temp.assert_true(
+  (
+    SELECT is_nullable = 'NO'
+       AND column_default = 'false'
+      FROM information_schema.columns
+     WHERE table_schema = 'identity'
+       AND table_name = 'player'
+       AND column_name = 'is_guest'
+  ),
+  'guest identity state is explicit and non-null'
 );
 
 SELECT pg_temp.assert_true(
