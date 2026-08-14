@@ -1,5 +1,8 @@
 # Chroma District official arena
 
+> Historical reference: this arena is no longer selectable. Neon Service Arcade `m2` superseded
+> it as the sole bundled official release on 2026-08-14.
+
 Chroma District is the player-facing identity of Hive Chameleon's first
 playable official arena. The stable backend and map-catalog slug remains
 `prism-foundry` for compatibility; it is not the arena's display name or a

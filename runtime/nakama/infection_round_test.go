@@ -328,15 +328,17 @@ func TestFinalizeInfectionRoundQueuesCompleteTerminalEvidence(t *testing.T) {
 
 func infectionRoundFixture() roundSnapshot {
 	startedAt := time.Date(2026, time.July, 28, 15, 0, 0, 0, time.UTC)
+	arena := defaultOfficialArenaTestDefinition()
 	return roundSnapshot{
 		ID:                       "01900000-0000-7000-8000-000000000101",
 		SequenceNumber:           2,
 		Mode:                     "infection",
-		MapContentVersion:        defaultOfficialMapContentVersion,
+		MapSlug:                  arena.Slug,
+		MapContentVersion:        arena.ContentVersion,
 		GameServerBuildVersion:   gameServerBuildVersion,
 		ProtocolVersion:          matchProtocolVersion,
-		AuthorityGeometryVersion: officialAuthorityGeometryVersion,
-		AuthorityGeometryDigest:  officialAuthorityGeometryDigest,
+		AuthorityGeometryVersion: arena.Geometry.Version,
+		AuthorityGeometryDigest:  arena.GeometryDigest,
 		Status:                   "preparing",
 		StartedAt:                startedAt,
 		HidersTotal:              2,

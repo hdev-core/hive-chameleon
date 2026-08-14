@@ -32,6 +32,8 @@ type roundSnapshot struct {
 	SequenceNumber           int                   `json:"sequence_number"`
 	Mode                     string                `json:"mode"`
 	MapVersionID             string                `json:"map_version_id"`
+	MapSlug                  string                `json:"map_slug"`
+	MapDisplayName           string                `json:"map_display_name"`
 	MapContentVersion        string                `json:"map_content_version"`
 	GameServerBuildVersion   string                `json:"game_server_build_version"`
 	ProtocolVersion          string                `json:"protocol_version"`
@@ -59,6 +61,8 @@ type roundPublicSnapshot struct {
 	SequenceNumber           int        `json:"sequence_number"`
 	Mode                     string     `json:"mode"`
 	MapVersionID             string     `json:"map_version_id"`
+	MapSlug                  string     `json:"map_slug"`
+	MapDisplayName           string     `json:"map_display_name"`
 	MapContentVersion        string     `json:"map_content_version"`
 	GameServerBuildVersion   string     `json:"game_server_build_version"`
 	ProtocolVersion          string     `json:"protocol_version"`
@@ -81,6 +85,8 @@ func (r roundSnapshot) Public() roundPublicSnapshot {
 		SequenceNumber:           r.SequenceNumber,
 		Mode:                     r.Mode,
 		MapVersionID:             r.MapVersionID,
+		MapSlug:                  r.MapSlug,
+		MapDisplayName:           r.MapDisplayName,
 		MapContentVersion:        r.MapContentVersion,
 		GameServerBuildVersion:   r.GameServerBuildVersion,
 		ProtocolVersion:          r.ProtocolVersion,
@@ -363,16 +369,27 @@ func (s *postgresLobbyStore) StartRound(
 	if err != nil {
 		return lobbySnapshot{}, roundSnapshot{}, err
 	}
+	arena, available := officialArenaForContent(
+		mapContract.MapSlug,
+		mapContract.ContentVersion,
+	)
+	if !available {
+		return lobbySnapshot{}, roundSnapshot{}, errors.New(
+			"selected official arena is not loaded",
+		)
+	}
 	round := roundSnapshot{
 		ID:                       roundID,
 		SequenceNumber:           sequenceNumber,
 		Mode:                     configuration.Mode,
 		MapVersionID:             *configuration.MapVersionID,
+		MapSlug:                  mapContract.MapSlug,
+		MapDisplayName:           mapContract.DisplayName,
 		MapContentVersion:        mapContract.ContentVersion,
 		GameServerBuildVersion:   mapContract.GameServerBuildVersion,
 		ProtocolVersion:          mapContract.ProtocolVersion,
-		AuthorityGeometryVersion: officialAuthorityGeometryVersion,
-		AuthorityGeometryDigest:  officialAuthorityGeometryDigest,
+		AuthorityGeometryVersion: arena.Geometry.Version,
+		AuthorityGeometryDigest:  arena.GeometryDigest,
 		Status:                   "preparing",
 		StartedAt:                startedAt,
 		HidersTotal:              len(assignments) - int(configuration.HunterCount),
@@ -395,6 +412,7 @@ func (s *postgresLobbyStore) StartRound(
 		Round:                 &round,
 		AuthoritativeRound:    authoritativeRound,
 		AvatarStates:          initializeRoundAvatarStates(&round, authoritativeRound),
+		PaintStates:           initializeRoundPaintStates(authoritativeRound),
 		ReconnectReservations: make(map[string]roundReconnectReservation),
 	}
 	if _, err := initialState.initializeScoreCache(round.StartedAt); err != nil {
@@ -434,6 +452,8 @@ func (s *postgresLobbyStore) ActiveRound(
 		        round.sequence_number,
 		        round.mode::text,
 		        round.map_version_id::text,
+		        map_definition.slug,
+		        map_definition.title,
 		        version.version_number,
 		        round.game_server_build_version,
 		        round.protocol_version,
@@ -444,6 +464,8 @@ func (s *postgresLobbyStore) ActiveRound(
 		   FROM game.game_round AS round
 		   JOIN content.map_version AS version
 		     ON version.id = round.map_version_id
+		   JOIN content.map AS map_definition
+		     ON map_definition.id = version.map_id
 		  WHERE round.lobby_id = $1
 		    AND round.status NOT IN ('completed', 'aborted')
 		  ORDER BY round.sequence_number DESC
@@ -454,6 +476,8 @@ func (s *postgresLobbyStore) ActiveRound(
 		&round.SequenceNumber,
 		&round.Mode,
 		&round.MapVersionID,
+		&round.MapSlug,
+		&round.MapDisplayName,
 		&round.MapContentVersion,
 		&round.GameServerBuildVersion,
 		&round.ProtocolVersion,
@@ -471,8 +495,6 @@ func (s *postgresLobbyStore) ActiveRound(
 	}
 	round.RoleAssignments = make([]roundRoleAssignment, 0)
 	round.DiscoveredHiderPlayerIDs = make([]string, 0)
-	round.AuthorityGeometryVersion = officialAuthorityGeometryVersion
-	round.AuthorityGeometryDigest = officialAuthorityGeometryDigest
 	mapContract, err := loadOfficialRoundMapContract(
 		ctx,
 		s.database,
@@ -481,11 +503,19 @@ func (s *postgresLobbyStore) ActiveRound(
 	if err != nil {
 		return nil, fmt.Errorf("validate active round map contract: %w", err)
 	}
-	if mapContract.ContentVersion != round.MapContentVersion ||
+	if mapContract.MapSlug != round.MapSlug ||
+		mapContract.DisplayName != round.MapDisplayName ||
+		mapContract.ContentVersion != round.MapContentVersion ||
 		mapContract.GameServerBuildVersion != round.GameServerBuildVersion ||
 		mapContract.ProtocolVersion != round.ProtocolVersion {
 		return nil, errors.New("active round map compatibility contract changed")
 	}
+	arena, err := officialArenaForRound(&round)
+	if err != nil {
+		return nil, fmt.Errorf("load active round authority geometry: %w", err)
+	}
+	round.AuthorityGeometryVersion = arena.Geometry.Version
+	round.AuthorityGeometryDigest = arena.GeometryDigest
 	return &round, nil
 }
 

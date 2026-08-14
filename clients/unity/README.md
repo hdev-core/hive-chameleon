@@ -59,8 +59,8 @@ The development client exposes the current server-backed multiplayer test flow:
 1. connect to the scoped Nakama session issued by the API;
 2. create an open/private lobby or join one by lobby code;
 3. see the real connected roster and host;
-4. configure Casual or Infection, timers, Hunters, and ammunition; Chroma District is pinned to
-   the mutually supported official `prism-foundry` content version `m4-5`;
+4. configure Casual or Infection, timers, Hunters, and ammunition; Neon Service Arcade is pinned
+   to the sole mutually supported official `neon-service-arcade` content version `m2`;
 5. volunteer for Hunter selection or start the match as host; and
 6. enter the 3D arena only after Nakama broadcasts a real round and private role assignment.
 
@@ -76,7 +76,7 @@ For a host-migration check, use two provisioned client identities:
 1. Create a lobby in either client and copy its lobby ID.
 2. Join that ID in another client.
 3. Configure from the current host. A fully migrated database automatically attaches the bundled
-   published Chroma District `m4-5` version; players never enter a raw map UUID.
+   published Neon Service Arcade `m2` version; players never enter a raw map UUID.
 4. Stop or close whichever client currently owns Host.
 5. Confirm the `HOST` badge moves to the remaining player and the lobby version advances. Its
    configuration button must now succeed.
@@ -85,7 +85,7 @@ For the lobby and role-assignment check:
 
 1. Connect two clients and join the same lobby.
 2. Volunteer one client as Hunter.
-3. On the host, select Casual or Infection, confirm Chroma District, save, and start.
+3. On the host, select Casual or Infection, confirm Neon Service Arcade, save, and start.
 4. Both clients must enter the same server-timed preparing, hiding, and hunting phases.
 5. Each client must receive only its own private role and player state.
 6. Both clients must see the other player's real networked humanoid once the phase and mode permit
@@ -105,6 +105,13 @@ For the round-presentation check:
 6. Disconnect and reconnect within 60 seconds; the same server-authorized role and outcome must be
    restored.
 
+For the Hider body-painting check, press `P` during the server-owned preparing or hiding phase.
+Left-drag paints, right-drag orbits, wheel zooms, `Shift` + wheel or `[`/`]` resizes the brush,
+hold `F` for the underlying Material Sample, press `R` for the explicitly lit Rendered Sample, and
+press `X` for local-body x-ray. Painting closes when hunting begins. The complete mechanic,
+protocol, color rules, performance budgets, and visual acceptance matrix are in the
+[body-painting specification](../../docs/product-specification/body-painting-system.md).
+
 For the cold path, refresh the WebGL page or restart Unity Play while a round is active. The client
 uses its authenticated API session to discover only its own bounded reservation, mints a fresh
 Nakama credential, and rejoins the authoritative match. It does not persist the lobby ID, role, or
@@ -115,15 +122,13 @@ The runtime rejects configuration changes and new nominations while the round is
 Join-in-progress players enter the authoritative match as eligible spectators; they do not receive
 a late participant role.
 
-## Third-party asset source gate
+## Arena source gate
 
-The MiniWorld Studio city pack is a local testing dependency. The project-authored
-`Assets/HiveChameleon/Resources/City/HC_CityArena.prefab` is kept in the repository, while the
-imported source files under `Assets/MiniWorld Studio/` are ignored and must not be staged,
-committed, or pushed. Each contributor downloads and imports the pack independently by following
-the [local authoritative multiplayer runbook](../../docs/local-authoritative-development.md#local-testing-map).
-The testing environment will be replaced by a separately tracked project-owned map in a future
-task.
+Neon Service Arcade is bundled directly with the client and is the only selectable arena. Its
+FBX, extracted textures, runtime prefab, review scene, and matching authoritative collision
+manifest must move together whenever the arena is revised. Before distributing those source
+assets publicly, complete the provenance and redistribution review recorded in the
+[arena specification](../../docs/product-specification/neon-service-arcade-vertical-slice.md).
 
 Unity builds are currently a local release gate. CI runs the checks that do not require a Unity
 license; add an appropriately isolated licensed runner before making Unity builds a required

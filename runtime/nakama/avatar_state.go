@@ -127,6 +127,10 @@ func (s *persistentLobbyState) applyAvatarState(
 	if s == nil || s.AuthoritativeRound == nil || s.Round == nil {
 		return roundAvatarStateSnapshot{}, errors.New("active round required")
 	}
+	arena, err := officialArenaForRound(s.Round)
+	if err != nil {
+		return roundAvatarStateSnapshot{}, err
+	}
 	playerState, participant := s.AuthoritativeRound.PlayerState(playerID)
 	if !participant {
 		return roundAvatarStateSnapshot{}, errors.New("round participant required")
@@ -153,6 +157,7 @@ func (s *persistentLobbyState) applyAvatarState(
 		previous,
 		command,
 		now,
+		arena,
 	); err != nil {
 		return roundAvatarStateSnapshot{}, err
 	}
@@ -187,15 +192,31 @@ func finiteNumber(value float64) bool {
 }
 
 func validAvatarPosition(x float64, y float64, z float64) bool {
+	definition, _ := officialArenaForContent(
+		defaultOfficialMapSlug,
+		defaultOfficialMapContentVersion,
+	)
+	return validAvatarPositionForArena(x, y, z, definition)
+}
+
+func validAvatarPositionForArena(
+	x float64,
+	y float64,
+	z float64,
+	arena *officialArenaDefinition,
+) bool {
+	if arena == nil {
+		return false
+	}
 	return finiteNumber(x) &&
 		finiteNumber(y) &&
 		finiteNumber(z) &&
-		x >= -officialArenaHorizontalLimit &&
-		x <= officialArenaHorizontalLimit &&
-		z >= -officialArenaHorizontalLimit &&
-		z <= officialArenaHorizontalLimit &&
-		y >= officialArenaMinimumY &&
-		y <= officialArenaMaximumY
+		x >= -arena.HorizontalLimit &&
+		x <= arena.HorizontalLimit &&
+		z >= -arena.HorizontalLimit &&
+		z <= arena.HorizontalLimit &&
+		y >= arena.MinimumY &&
+		y <= arena.MaximumY
 }
 
 func validAvatarColor(value float64) bool {
@@ -233,8 +254,12 @@ func initializeRoundAvatarStates(
 	if round == nil || authoritative == nil {
 		return states
 	}
+	arena, err := officialArenaForRound(round)
+	if err != nil {
+		return states
+	}
 	for playerID, assignment := range authoritative.Assignments {
-		spawn := officialSpawnForPlayer(playerID, assignment.Role)
+		spawn := arenaSpawnForPlayer(arena, playerID, assignment.Role)
 		states[playerID] = roundAvatarStateSnapshot{
 			RoundID:     round.ID,
 			PlayerID:    playerID,
@@ -246,9 +271,9 @@ func initializeRoundAvatarStates(
 			PositionZ:   spawn[2],
 			Yaw:         180,
 			Pitch:       0,
-			BodyR:       0.68,
-			BodyG:       0.76,
-			BodyB:       0.78,
+			BodyR:       1,
+			BodyG:       1,
+			BodyB:       1,
 			AccentR:     0.16,
 			AccentG:     0.87,
 			AccentB:     0.88,
@@ -283,11 +308,14 @@ func validateAvatarMotion(
 	previous roundAvatarStateSnapshot,
 	command avatarStateCommand,
 	now time.Time,
+	arenas ...*officialArenaDefinition,
 ) error {
-	if !validAvatarPosition(
+	arena := selectedOfficialArena(arenas)
+	if !validAvatarPositionForArena(
 		command.PositionX,
 		command.PositionY,
 		command.PositionZ,
+		arena,
 	) {
 		return errors.New("avatar position is outside the official arena")
 	}
@@ -299,11 +327,12 @@ func validateAvatarMotion(
 	commandHeight := authorityPlayerHeight(command.Pose)
 	if authorityCapsuleIntersectsStatic(
 		authorityPlayerCapsule(commandPosition, commandHeight),
+		&arena.Geometry,
 	) {
 		return errors.New("avatar position intersects official arena geometry")
 	}
 	if previous.Sequence == 0 {
-		spawn := officialSpawnForPlayer(playerID, initialRole)
+		spawn := arenaSpawnForPlayer(arena, playerID, initialRole)
 		distance := math.Sqrt(
 			math.Pow(command.PositionX-spawn[0], 2) +
 				math.Pow(command.PositionY-spawn[1], 2) +
@@ -355,6 +384,7 @@ func validateAvatarMotion(
 		previousPosition,
 		commandPosition,
 		sweepHeight,
+		&arena.Geometry,
 	) {
 		return errors.New("avatar movement intersects official arena geometry")
 	}
@@ -370,9 +400,17 @@ func shortestYawDistance(left float64, right float64) float64 {
 }
 
 func officialSpawnForPlayer(playerID string, role string) [3]float64 {
-	spawns := officialHiderSpawns
+	return arenaSpawnForPlayer(selectedOfficialArena(nil), playerID, role)
+}
+
+func arenaSpawnForPlayer(
+	arena *officialArenaDefinition,
+	playerID string,
+	role string,
+) [3]float64 {
+	spawns := arena.HiderSpawns
 	if role == "hunter" {
-		spawns = officialHunterSpawns
+		spawns = arena.HunterSpawns
 	}
 	hash := int64(17)
 	for _, character := range playerID {
@@ -387,6 +425,22 @@ func officialSpawnForPlayer(playerID string, role string) [3]float64 {
 	return spawns[int(hash32)%len(spawns)]
 }
 
+func selectedOfficialArena(
+	arenas []*officialArenaDefinition,
+) *officialArenaDefinition {
+	if len(arenas) > 0 && arenas[0] != nil {
+		return arenas[0]
+	}
+	definition, ok := officialArenaForContent(
+		defaultOfficialMapSlug,
+		defaultOfficialMapContentVersion,
+	)
+	if !ok {
+		panic("default official arena is unavailable")
+	}
+	return definition
+}
+
 func (s *persistentLobbyState) authorizeFireTarget(
 	hunterPlayerID string,
 	command hunterFireCommand,
@@ -395,7 +449,12 @@ func (s *persistentLobbyState) authorizeFireTarget(
 	if command.TargetPlayerID == "" {
 		return command
 	}
-	if s == nil || s.AuthoritativeRound == nil {
+	if s == nil || s.AuthoritativeRound == nil || s.Round == nil {
+		command.TargetPlayerID = ""
+		return command
+	}
+	arena, err := officialArenaForRound(s.Round)
+	if err != nil {
 		command.TargetPlayerID = ""
 		return command
 	}
@@ -434,7 +493,7 @@ func (s *persistentLobbyState) authorizeFireTarget(
 		firingHunter.Yaw = *command.AimYaw
 		firingHunter.Pitch = *command.AimPitch
 	}
-	if !withinHunterFireLineOfSight(firingHunter, target) {
+	if !withinHunterFireLineOfSight(firingHunter, target, &arena.Geometry) {
 		command.TargetPlayerID = ""
 	}
 	return command
@@ -443,7 +502,9 @@ func (s *persistentLobbyState) authorizeFireTarget(
 func withinHunterFireLineOfSight(
 	hunter roundAvatarStateSnapshot,
 	target roundAvatarStateSnapshot,
+	geometries ...*authorityGeometryManifest,
 ) bool {
+	geometry := selectedAuthorityGeometry(geometries)
 	origin := authorityVector{
 		X: hunter.PositionX,
 		Y: hunter.PositionY + authorityPlayerEyeHeight(hunter.Pose),
@@ -474,6 +535,7 @@ func withinHunterFireLineOfSight(
 		origin,
 		direction,
 		targetDistance,
+		geometry,
 	)
 	return !staticHit ||
 		staticDistance+authorityRayEpsilon >= targetDistance

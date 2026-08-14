@@ -3,6 +3,26 @@ using System;
 namespace HiveChameleon.Realtime
 {
     [Serializable]
+    public sealed class AvailableMapSnapshot
+    {
+        public string map_version_id = string.Empty;
+        public string map_slug = string.Empty;
+        public string display_name = string.Empty;
+        public string description = string.Empty;
+        public string content_version = string.Empty;
+        public string authority_geometry_version = string.Empty;
+        public string authority_geometry_digest = string.Empty;
+        public int recommended_minimum_players;
+        public int recommended_maximum_players;
+    }
+
+    [Serializable]
+    public sealed class AvailableMapResponse
+    {
+        public AvailableMapSnapshot[] maps = Array.Empty<AvailableMapSnapshot>();
+    }
+
+    [Serializable]
     public sealed class LobbyMemberSnapshot
     {
         public string player_id = string.Empty;
@@ -50,6 +70,8 @@ namespace HiveChameleon.Realtime
         public int sequence_number;
         public string mode = string.Empty;
         public string map_version_id = string.Empty;
+        public string map_slug = string.Empty;
+        public string map_display_name = string.Empty;
         public string map_content_version = string.Empty;
         public string game_server_build_version = string.Empty;
         public string protocol_version = string.Empty;
@@ -376,6 +398,84 @@ namespace HiveChameleon.Realtime
         public int sequence;
         public string occurred_at = string.Empty;
         public bool correction;
+    }
+
+    [Serializable]
+    public sealed class PaintPoint
+    {
+        public float u;
+        public float v;
+
+        public PaintPoint() { }
+
+        public PaintPoint(float horizontal, float vertical)
+        {
+            u = horizontal;
+            v = vertical;
+        }
+    }
+
+    [Serializable]
+    public sealed class PaintMaterialSnapshot
+    {
+        public float base_r = 1f;
+        public float base_g = 1f;
+        public float base_b = 1f;
+        public float metallic;
+        public float roughness = 0.82f;
+        public float emission_r;
+        public float emission_g;
+        public float emission_b;
+        public float emission_intensity;
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeCommand
+    {
+        public string body_id = string.Empty;
+        public string renderer_id = string.Empty;
+        public PaintPoint[] points = Array.Empty<PaintPoint>();
+        public float radius = 0.04f;
+        public float hardness = 1f;
+        public float opacity = 1f;
+        public PaintMaterialSnapshot material = new PaintMaterialSnapshot();
+        public int channels = 1;
+        public long client_sequence;
+        public long client_tick;
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeSnapshot
+    {
+        public string round_id = string.Empty;
+        public string player_id = string.Empty;
+        public string body_id = string.Empty;
+        public string renderer_id = string.Empty;
+        public PaintPoint[] points = Array.Empty<PaintPoint>();
+        public float radius;
+        public float hardness;
+        public float opacity;
+        public PaintMaterialSnapshot material = new PaintMaterialSnapshot();
+        public int channels;
+        public long sequence;
+        public long client_sequence;
+        public long client_tick;
+        public string occurred_at = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeBatch
+    {
+        public PaintStrokeSnapshot[] strokes = Array.Empty<PaintStrokeSnapshot>();
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeResult
+    {
+        public string round_id = string.Empty;
+        public long client_sequence;
+        public bool accepted;
+        public string reason = string.Empty;
     }
 
     [Serializable]

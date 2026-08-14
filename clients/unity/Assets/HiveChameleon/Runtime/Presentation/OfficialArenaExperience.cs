@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using HiveChameleon.Painting;
 using HiveChameleon.Realtime;
 using UnityEngine;
 
@@ -19,16 +20,6 @@ namespace HiveChameleon.Presentation
         private const float AvatarSendInterval = 0.1f;
         private const float ScoreboardDisplaySeconds = 7f;
 
-        private static readonly Color[] CamouflagePalette =
-        {
-            new Color(0.68f, 0.76f, 0.78f),
-            new Color(0.17f, 0.2f, 0.23f),
-            new Color(0.56f, 0.2f, 0.16f),
-            new Color(0.32f, 0.46f, 0.26f),
-            new Color(0.71f, 0.61f, 0.43f),
-            new Color(0.16f, 0.38f, 0.59f),
-        };
-
         private static readonly string[] PoseNames =
         {
             "idle",
@@ -43,21 +34,28 @@ namespace HiveChameleon.Presentation
             new Dictionary<string, CamouflagedPlayerAvatar>();
         private readonly Dictionary<string, bool> _answerCheckReveals =
             new Dictionary<string, bool>();
+        private readonly Dictionary<string, SortedDictionary<long, PaintStrokeSnapshot>>
+            _pendingPaintStrokes =
+                new Dictionary<string, SortedDictionary<long, PaintStrokeSnapshot>>();
 
         private readonly Color _ink = new Color(0.012f, 0.025f, 0.04f, 0.93f);
-        private readonly Color _inkSoft = new Color(0.018f, 0.045f, 0.065f, 0.86f);
         private readonly Color _cyan = new Color(0.16f, 0.87f, 0.88f);
         private readonly Color _lime = new Color(0.64f, 0.94f, 0.32f);
         private readonly Color _amber = new Color(1f, 0.6f, 0.16f);
         private readonly Color _red = new Color(0.98f, 0.19f, 0.3f);
 
-        private CityDistrictMap _map;
+        private IAuthoritativeArenaMap _map;
+        private GameObject _mapObject;
+        private string _arenaSlug = string.Empty;
         private Camera _camera;
         private Transform _playerRig;
         private CharacterController _controller;
         private GameObject _localHunterAvatar;
         private GameObject _localHiderAvatar;
         private GameObject _firstPersonWeapon;
+        private HumanoidPresentationRig _localHunterRig;
+        private HumanoidPresentationRig _localHiderRig;
+        private PlayerPaintMode _paintMode;
         private NakamaRealtimeConnection _connection;
         private CancellationTokenSource _lifetime;
         private Func<CancellationToken, Task> _leaveLobby;
@@ -85,13 +83,13 @@ namespace HiveChameleon.Presentation
         private bool _isCrouching;
         private int _cameraMode;
         private int _spectatorCameraMode = 1;
-        private int _bodyPaletteIndex;
         private int _localPose = 1;
         private float _yaw = 180f;
         private float _pitch = 5f;
         private float _freeYaw = 180f;
         private float _freePitch = 18f;
         private float _verticalVelocity;
+        private Vector3 _localPresentationVelocity;
         private float _nextAvatarSendAt;
         private float _weaponKickUntil;
         private float _hitMarkerUntil;
@@ -99,8 +97,8 @@ namespace HiveChameleon.Presentation
         private string _lastRoundId = string.Empty;
         private string _spectatorTargetPlayerId = string.Empty;
         private string _pauseStatus = string.Empty;
-        private Color _localBodyColor = CamouflagePalette[0];
-        private Color _localAccentColor = CamouflagePalette[0];
+        private Color _localBodyColor = Color.white;
+        private Color _localAccentColor = new Color(0.16f, 0.87f, 0.88f);
         private Color _lastAppliedLocalBody;
         private Color _lastAppliedLocalAccent;
         private bool _localColorsApplied;
@@ -154,6 +152,8 @@ namespace HiveChameleon.Presentation
             _connection.RoundScoresChanged += HandleScores;
             _connection.RoundReconnectChanged += HandleReconnect;
             _connection.AvatarStateReceived += HandleAvatarState;
+            _connection.PaintStrokeReceived += HandlePaintStroke;
+            _connection.PaintStrokeResolved += HandlePaintStrokeResult;
             _lifetime?.Dispose();
             _lifetime = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
             _pauseOpen = false;
@@ -169,24 +169,36 @@ namespace HiveChameleon.Presentation
 
         private void BuildExperience()
         {
-            if (_experienceBuilt)
+            if (
+                !AuthoritativeArenaCatalog.TryResolve(
+                    _connection?.CurrentRound,
+                    out AuthoritativeArenaDefinition definition
+                )
+            )
             {
                 return;
             }
-
-            GameObject mapObject = GameObject.Find(
-                $"{CityDistrictMap.DisplayName} // Official Arena"
-            );
-            if (mapObject == null)
+            if (
+                _map == null
+                || !string.Equals(
+                    _arenaSlug,
+                    definition.Slug,
+                    StringComparison.Ordinal
+                )
+            )
             {
-                mapObject = new GameObject(
-                    $"{CityDistrictMap.DisplayName} // Official Arena"
-                );
+                if (_mapObject != null)
+                {
+                    Destroy(_mapObject);
+                }
+                _map = definition.Instantiate(out _mapObject);
+                _arenaSlug = definition.Slug;
+                _arenaActive = false;
             }
-            _map = mapObject.GetComponent<CityDistrictMap>();
-            if (_map == null)
+            if (_experienceBuilt)
             {
-                _map = mapObject.AddComponent<CityDistrictMap>();
+                _map.ApplyPresentationEnvironment(_camera);
+                return;
             }
 
             _camera = Camera.main;
@@ -198,6 +210,7 @@ namespace HiveChameleon.Presentation
             }
             _camera.fieldOfView = 72f;
             _camera.nearClipPlane = 0.06f;
+            _map.ApplyPresentationEnvironment(_camera);
 
             var rigObject = new GameObject("Local Player Rig");
             _playerRig = rigObject.transform;
@@ -218,9 +231,12 @@ namespace HiveChameleon.Presentation
                 "Local Hunter",
                 _playerRig,
                 new Color(0.88f, 0.91f, 0.94f),
-                CamouflagePalette[0]
+                new Color(0.16f, 0.87f, 0.88f)
             );
             _localHunterAvatar.SetActive(false);
+            _localHunterRig = HumanoidPlayerFactory.PresentationRigFor(
+                _localHunterAvatar
+            );
 
             _localHiderAvatar = HumanoidPlayerFactory.CreateHider(
                 "Local Hider",
@@ -229,6 +245,13 @@ namespace HiveChameleon.Presentation
                 _localAccentColor
             );
             _localHiderAvatar.SetActive(false);
+            _localHiderRig = HumanoidPlayerFactory.PresentationRigFor(
+                _localHiderAvatar
+            );
+            HumanoidPlayerFactory.SharePaintAppearance(
+                _localHiderAvatar,
+                _localHunterAvatar
+            );
 
             _firstPersonWeapon = HumanoidPlayerFactory.CreateFirstPersonRifle(
                 "Hunter Rifle Viewmodel",
@@ -242,6 +265,30 @@ namespace HiveChameleon.Presentation
             _firstPersonWeapon.transform.localScale = Vector3.one * 0.7f;
             _firstPersonWeapon.SetActive(false);
             UpdateWeaponViewmodel();
+            _paintMode = new PlayerPaintMode(
+                _camera,
+                _playerRig,
+                _controller,
+                _localHiderAvatar,
+                _connection,
+                _lifetime.Token,
+                () => CurrentPhase,
+                () => ServerRole,
+                pose =>
+                {
+                    _localPose = Mathf.Clamp(pose, 0, PoseNames.Length - 1);
+                    ApplyLocalPose();
+                    _nextAvatarSendAt = 0f;
+                },
+                active =>
+                {
+                    if (active)
+                    {
+                        _cameraMode = 1;
+                    }
+                }
+            );
+            ApplyPendingPaintStrokes(LocalPlayerId);
             _experienceBuilt = true;
         }
 
@@ -270,6 +317,22 @@ namespace HiveChameleon.Presentation
                 ApplyRoundVisuals();
                 UpdateWeaponViewmodel();
                 return;
+            }
+            if (_paintMode != null)
+            {
+                float paintScale = Mathf.Max(
+                    0.72f,
+                    Mathf.Min(Screen.width / 1600f, Screen.height / 900f)
+                );
+                _paintMode.Tick(paintScale);
+                if (_paintMode.IsActive)
+                {
+                    ApplyLocalPose();
+                    ApplyRoundVisuals();
+                    UpdateWeaponViewmodel();
+                    UpdateAvatarBroadcast();
+                    return;
+                }
             }
             if (!IsSpectating && !HasPlayerControlAuthority)
             {
@@ -304,7 +367,7 @@ namespace HiveChameleon.Presentation
                 return;
             }
             BuildExperience();
-            _map.gameObject.SetActive(true);
+            _mapObject.SetActive(true);
             if (_arenaActive)
             {
                 _controller.enabled =
@@ -331,6 +394,10 @@ namespace HiveChameleon.Presentation
 
         private void EnterDormantState()
         {
+            if (_paintMode != null && _paintMode.IsActive)
+            {
+                _paintMode.Exit();
+            }
             if (_controller != null)
             {
                 _controller.enabled = false;
@@ -338,9 +405,9 @@ namespace HiveChameleon.Presentation
             _localHunterAvatar?.SetActive(false);
             _localHiderAvatar?.SetActive(false);
             _firstPersonWeapon?.SetActive(false);
-            if (_map != null)
+            if (_mapObject != null)
             {
-                _map.gameObject.SetActive(false);
+                _mapObject.SetActive(false);
             }
             foreach (CamouflagedPlayerAvatar avatar in _avatars.Values)
             {
@@ -391,6 +458,10 @@ namespace HiveChameleon.Presentation
             if (_leaveLobbyBusy)
             {
                 return;
+            }
+            if (open && _paintMode != null && _paintMode.IsActive)
+            {
+                _paintMode.Exit();
             }
             _pauseOpen = open;
             _pauseStatus = string.Empty;
@@ -479,6 +550,7 @@ namespace HiveChameleon.Presentation
             {
                 speed *= 0.56f;
             }
+            _localPresentationVelocity = movement * speed;
             if (_controller.isGrounded && _verticalVelocity < 0f)
             {
                 _verticalVelocity = -2f;
@@ -498,6 +570,25 @@ namespace HiveChameleon.Presentation
             );
 
             ApplyLocalPose();
+            bool grounded = _controller.isGrounded;
+            _localHiderRig?.SetMotion(
+                _localPresentationVelocity,
+                SprintSpeed,
+                grounded,
+                _isCrouching,
+                false,
+                false,
+                _pitch
+            );
+            _localHunterRig?.SetMotion(
+                _localPresentationVelocity,
+                SprintSpeed,
+                grounded,
+                _isCrouching,
+                true,
+                false,
+                _pitch
+            );
             if (_cameraMode == 0)
             {
                 _camera.transform.localPosition = Vector3.Lerp(
@@ -546,6 +637,13 @@ namespace HiveChameleon.Presentation
 
             bool hunter = ServerRole == "hunter";
             bool hider = ServerRole == "hider";
+            if (_paintMode != null && _paintMode.IsActive)
+            {
+                _localHunterAvatar?.SetActive(false);
+                _localHiderAvatar?.SetActive(hider);
+                _firstPersonWeapon?.SetActive(false);
+                return;
+            }
             _localHunterAvatar?.SetActive(thirdPerson && hunter);
             _localHiderAvatar?.SetActive(thirdPerson && hider);
             _firstPersonWeapon?.SetActive(
@@ -569,26 +667,9 @@ namespace HiveChameleon.Presentation
             }
 
             bool appearanceChanged = false;
-            if (Input.GetKeyDown(KeyCode.Q))
-            {
-                CycleCamouflageColor(-1);
-                appearanceChanged = true;
-            }
-            if (Input.GetKeyDown(KeyCode.E))
-            {
-                CycleCamouflageColor(1);
-                appearanceChanged = true;
-            }
             if (Input.GetKeyDown(KeyCode.V))
             {
                 _localPose = (_localPose + 1) % PoseNames.Length;
-                appearanceChanged = true;
-            }
-            if (Input.GetKeyDown(KeyCode.F) && TrySampleEnvironment(out Color sampled))
-            {
-                _localBodyColor = sampled;
-                _localAccentColor = sampled;
-                _bodyPaletteIndex = -1;
                 appearanceChanged = true;
             }
 
@@ -597,68 +678,6 @@ namespace HiveChameleon.Presentation
                 ApplyLocalAppearance();
                 _nextAvatarSendAt = 0f;
             }
-        }
-
-        private void CycleCamouflageColor(int direction)
-        {
-            int next =
-                _bodyPaletteIndex < 0
-                    ? direction < 0
-                        ? CamouflagePalette.Length - 1
-                        : 0
-                    : _bodyPaletteIndex + direction;
-            SetCamouflageColor(Wrap(next, CamouflagePalette.Length));
-        }
-
-        private void SetCamouflageColor(int paletteIndex)
-        {
-            _bodyPaletteIndex = Wrap(paletteIndex, CamouflagePalette.Length);
-            _localBodyColor = CamouflagePalette[_bodyPaletteIndex];
-            _localAccentColor = _localBodyColor;
-            ApplyLocalAppearance();
-            _nextAvatarSendAt = 0f;
-        }
-
-        private bool TrySampleEnvironment(out Color sampled)
-        {
-            sampled = _localBodyColor;
-            if (
-                !Physics.Raycast(
-                    _camera.transform.position,
-                    _camera.transform.forward,
-                    out RaycastHit hit,
-                    30f,
-                    Physics.DefaultRaycastLayers,
-                    QueryTriggerInteraction.Ignore
-                )
-                || hit.collider.GetComponentInParent<CamouflagedPlayerAvatar>() != null
-            )
-            {
-                return false;
-            }
-
-            Renderer renderer =
-                hit.collider.GetComponent<Renderer>()
-                ?? hit.collider.GetComponentInParent<Renderer>();
-            Material material = renderer == null ? null : renderer.sharedMaterial;
-            if (material == null)
-            {
-                return false;
-            }
-            if (material.HasProperty("_BaseColor"))
-            {
-                sampled = material.GetColor("_BaseColor");
-            }
-            else if (material.HasProperty("_Color"))
-            {
-                sampled = material.GetColor("_Color");
-            }
-            else
-            {
-                return false;
-            }
-            sampled.a = 1f;
-            return true;
         }
 
         private void ApplyLocalAppearance()
@@ -677,27 +696,16 @@ namespace HiveChameleon.Presentation
             _localHiderAvatar.transform.localPosition = Vector3.zero;
             _localHiderAvatar.transform.localRotation = Quaternion.identity;
             _localHiderAvatar.transform.localScale = Vector3.one;
-            if (pose == 3)
-            {
-                _localHiderAvatar.transform.localPosition = new Vector3(
-                    0f,
-                    -0.24f,
-                    0f
-                );
-                _localHiderAvatar.transform.localScale = new Vector3(
-                    1f,
-                    0.84f,
-                    1f
-                );
-            }
-            else if (pose == 5)
-            {
-                _localHiderAvatar.transform.localRotation = Quaternion.Euler(
-                    0f,
-                    0f,
-                    7f
-                );
-            }
+            bool paintActive = _paintMode != null && _paintMode.IsActive;
+            _localHiderRig?.SetMotion(
+                paintActive ? Vector3.zero : _localPresentationVelocity,
+                SprintSpeed,
+                _controller == null || _controller.isGrounded,
+                pose == 3,
+                pose == 4,
+                pose == 5 || paintActive,
+                _pitch
+            );
         }
 
         private void UpdateTargeting()
@@ -832,11 +840,33 @@ namespace HiveChameleon.Presentation
                 return;
             }
             float kick = Time.unscaledTime < _weaponKickUntil ? -0.12f : 0f;
-            Vector3 target = new Vector3(0.35f, -0.28f, 0.68f + kick);
+            float horizontalSpeed = new Vector2(
+                _localPresentationVelocity.x,
+                _localPresentationVelocity.z
+            ).magnitude;
+            float movementAmount = Mathf.Clamp01(horizontalSpeed / SprintSpeed);
+            float gait = Time.unscaledTime * Mathf.Lerp(5.5f, 11f, movementAmount);
+            float bobX = Mathf.Sin(gait) * 0.018f * movementAmount;
+            float bobY = Mathf.Abs(Mathf.Cos(gait)) * 0.014f * movementAmount;
+            Vector3 target = new Vector3(
+                0.35f + bobX,
+                -0.28f - bobY,
+                0.68f + kick
+            );
             _firstPersonWeapon.transform.localPosition = Vector3.Lerp(
                 _firstPersonWeapon.transform.localPosition,
                 target,
                 Time.unscaledDeltaTime * 24f
+            );
+            Quaternion targetRotation = Quaternion.Euler(
+                4f + bobY * 35f,
+                180f,
+                -bobX * 45f
+            );
+            _firstPersonWeapon.transform.localRotation = Quaternion.Slerp(
+                _firstPersonWeapon.transform.localRotation,
+                targetRotation,
+                Time.unscaledDeltaTime * 18f
             );
         }
 
@@ -1308,6 +1338,7 @@ namespace HiveChameleon.Presentation
             );
             avatar.SetNetworkPose(position, yaw, true);
             _avatars[playerId] = avatar;
+            ApplyPendingPaintStrokes(playerId);
             return avatar;
         }
 
@@ -1352,6 +1383,7 @@ namespace HiveChameleon.Presentation
             }
             _avatars.Clear();
             _answerCheckReveals.Clear();
+            _pendingPaintStrokes.Clear();
             _aimedPlayer = null;
             _spectatorTargetPlayerId = string.Empty;
         }
@@ -1661,19 +1693,17 @@ namespace HiveChameleon.Presentation
             float width = Screen.width / scale;
             float height = Screen.height / scale;
 
+            if (_paintMode != null && _paintMode.IsActive)
+            {
+                _paintMode.Draw(width, height);
+                GUI.matrix = previous;
+                return;
+            }
             DrawTopBar(width);
             DrawScoreboard(height);
             if (!_pauseOpen)
             {
                 DrawCrosshair(width, height);
-                if (
-                    ServerRole == "hider"
-                    && !IsSpectating
-                    && HasPlayerControlAuthority
-                )
-                {
-                    DrawHiderPalette(height);
-                }
                 if (IsSpectating)
                 {
                     DrawSpectatorHud(width, height);
@@ -1793,7 +1823,7 @@ namespace HiveChameleon.Presentation
             DrawRect(new Rect(identity.x, identity.y, 3f, identity.height), _cyan);
             GUI.Label(
                 new Rect(identity.x + 15f, identity.y + 5f, 215f, 18f),
-                CityDistrictMap.DisplayName.ToUpperInvariant(),
+                CurrentArenaDisplayName.ToUpperInvariant(),
                 _hudLabelStyle
             );
             GUI.Label(
@@ -1858,6 +1888,17 @@ namespace HiveChameleon.Presentation
                     CurrentShells.ToString("00", CultureInfo.InvariantCulture),
                     _hudValueStyle
                 );
+            }
+        }
+
+        private string CurrentArenaDisplayName
+        {
+            get
+            {
+                string displayName = _connection?.CurrentRound?.map_display_name;
+                return string.IsNullOrWhiteSpace(displayName)
+                    ? AuthoritativeArenaCatalog.NeonServiceArcadeDisplayName
+                    : displayName;
             }
         }
 
@@ -1951,46 +1992,6 @@ namespace HiveChameleon.Presentation
                     ),
                     _smallStyle
                 );
-            }
-        }
-
-        private void DrawHiderPalette(float height)
-        {
-            Rect panel = new Rect(22f, height - 96f, 320f, 72f);
-            DrawPanel(panel, _inkSoft);
-            GUI.Label(
-                new Rect(panel.x + 14f, panel.y + 8f, panel.width - 28f, 18f),
-                "CAMOUFLAGE PALETTE",
-                _hudLabelStyle
-            );
-            const float swatchWidth = 40f;
-            const float swatchGap = 8f;
-            float startX = panel.x + 16f;
-            for (int index = 0; index < CamouflagePalette.Length; index++)
-            {
-                Rect swatch = new Rect(
-                    startX + index * (swatchWidth + swatchGap),
-                    panel.y + 34f,
-                    swatchWidth,
-                    24f
-                );
-                if (_bodyPaletteIndex == index)
-                {
-                    DrawRect(
-                        new Rect(
-                            swatch.x - 3f,
-                            swatch.y - 3f,
-                            swatch.width + 6f,
-                            swatch.height + 6f
-                        ),
-                        Color.white
-                    );
-                }
-                if (GUI.Button(swatch, string.Empty, GUIStyle.none))
-                {
-                    SetCamouflageColor(index);
-                }
-                DrawRect(swatch, CamouflagePalette[index]);
             }
         }
 
@@ -2489,6 +2490,9 @@ namespace HiveChameleon.Presentation
             {
                 _lastRoundId = round.id;
                 ClearAvatars();
+                _localBodyColor = Color.white;
+                HumanoidPlayerFactory.PaintableBodyFor(_localHiderAvatar)
+                    ?.ResetPaint(PaintMaterialValues.NeutralWhite);
                 _scoreboardVisibleUntil = 0f;
                 _cameraMode = 0;
                 _spectatorCameraMode = 1;
@@ -2586,6 +2590,151 @@ namespace HiveChameleon.Presentation
                 ),
                 state.yaw,
                 false
+            );
+        }
+
+        private void HandlePaintStroke(PaintStrokeSnapshot stroke)
+        {
+            if (
+                stroke == null
+                || stroke.round_id != _connection?.CurrentRound?.id
+                || stroke.material == null
+                || stroke.points == null
+            )
+            {
+                return;
+            }
+            if (stroke.player_id == LocalPlayerId)
+            {
+                PaintableBody body = HumanoidPlayerFactory.PaintableBodyFor(
+                    _localHiderAvatar
+                );
+                if (body == null)
+                {
+                    QueuePendingPaintStroke(stroke);
+                    return;
+                }
+                bool shouldApply = _paintMode?.ReconcileAuthoritativeStroke(stroke) ?? true;
+                if (shouldApply)
+                {
+                    ApplyPaintSnapshot(body, stroke);
+                }
+                return;
+            }
+            if (
+                _avatars.TryGetValue(
+                    stroke.player_id,
+                    out CamouflagedPlayerAvatar avatar
+                )
+            )
+            {
+                avatar.ApplyPaintStroke(stroke);
+                return;
+            }
+            QueuePendingPaintStroke(stroke);
+        }
+
+        private void HandlePaintStrokeResult(PaintStrokeResult result)
+        {
+            _paintMode?.ReconcileAuthoritativeResult(result);
+        }
+
+        private void QueuePendingPaintStroke(PaintStrokeSnapshot stroke)
+        {
+            if (
+                !_pendingPaintStrokes.TryGetValue(
+                    stroke.player_id,
+                    out SortedDictionary<long, PaintStrokeSnapshot> pending
+                )
+            )
+            {
+                pending = new SortedDictionary<long, PaintStrokeSnapshot>();
+                _pendingPaintStrokes.Add(stroke.player_id, pending);
+            }
+            pending[stroke.sequence] = stroke;
+        }
+
+        private void ApplyPendingPaintStrokes(string playerId)
+        {
+            if (
+                string.IsNullOrWhiteSpace(playerId)
+                || !_pendingPaintStrokes.TryGetValue(
+                    playerId,
+                    out SortedDictionary<long, PaintStrokeSnapshot> pending
+                )
+            )
+            {
+                return;
+            }
+            if (playerId == LocalPlayerId)
+            {
+                PaintableBody body = HumanoidPlayerFactory.PaintableBodyFor(
+                    _localHiderAvatar
+                );
+                if (body == null)
+                {
+                    return;
+                }
+                foreach (PaintStrokeSnapshot stroke in pending.Values)
+                {
+                    if (_paintMode?.ReconcileAuthoritativeStroke(stroke) ?? true)
+                    {
+                        ApplyPaintSnapshot(body, stroke);
+                    }
+                }
+            }
+            else if (
+                _avatars.TryGetValue(playerId, out CamouflagedPlayerAvatar avatar)
+            )
+            {
+                foreach (PaintStrokeSnapshot stroke in pending.Values)
+                {
+                    avatar.ApplyPaintStroke(stroke);
+                }
+            }
+            _pendingPaintStrokes.Remove(playerId);
+        }
+
+        private static void ApplyPaintSnapshot(
+            PaintableBody body,
+            PaintStrokeSnapshot stroke
+        )
+        {
+            if (body == null || body.BodyId != stroke.body_id)
+            {
+                return;
+            }
+            var points = new List<Vector2>(stroke.points.Length);
+            for (int index = 0; index < stroke.points.Length; index++)
+            {
+                points.Add(new Vector2(stroke.points[index].u, stroke.points[index].v));
+            }
+            PaintMaterialSnapshot source = stroke.material;
+            body.ApplyStroke(
+                stroke.renderer_id,
+                points,
+                stroke.radius,
+                stroke.hardness,
+                stroke.opacity,
+                new PaintMaterialValues
+                {
+                    BaseColorLinear = new Color(
+                        source.base_r,
+                        source.base_g,
+                        source.base_b,
+                        1f
+                    ),
+                    Metallic = source.metallic,
+                    Roughness = source.roughness,
+                    EmissionColorLinear = new Color(
+                        source.emission_r,
+                        source.emission_g,
+                        source.emission_b,
+                        1f
+                    ),
+                    EmissionIntensity = source.emission_intensity,
+                },
+                (PaintChannels)stroke.channels
             );
         }
 
@@ -2710,6 +2859,8 @@ namespace HiveChameleon.Presentation
             _connection.RoundScoresChanged -= HandleScores;
             _connection.RoundReconnectChanged -= HandleReconnect;
             _connection.AvatarStateReceived -= HandleAvatarState;
+            _connection.PaintStrokeReceived -= HandlePaintStroke;
+            _connection.PaintStrokeResolved -= HandlePaintStrokeResult;
             _connection = null;
         }
 
@@ -2722,6 +2873,8 @@ namespace HiveChameleon.Presentation
 
         private void OnDestroy()
         {
+            _paintMode?.Dispose();
+            _paintMode = null;
             Unsubscribe();
             _leaveLobby = null;
             _lifetime?.Cancel();

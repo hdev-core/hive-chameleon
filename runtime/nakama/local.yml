@@ -15,6 +15,7 @@ runtime:
 socket:
   port: 7350
   max_message_size_bytes: 4096
+  outgoing_queue_size: 64
   read_timeout_ms: 10000
   write_timeout_ms: 10000
   idle_timeout_ms: 60000

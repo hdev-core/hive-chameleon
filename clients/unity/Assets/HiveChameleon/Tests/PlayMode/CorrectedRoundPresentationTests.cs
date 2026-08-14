@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using HiveChameleon.Painting;
 using HiveChameleon.Presentation;
 using HiveChameleon.Realtime;
 using NUnit.Framework;
@@ -75,6 +76,17 @@ namespace HiveChameleon.Tests
                 )
             )
             {
+                if (
+                    sourcePath.Contains(
+                        Path.DirectorySeparatorChar + "Painting" + Path.DirectorySeparatorChar,
+                        StringComparison.Ordinal
+                    )
+                )
+                {
+                    // Material previews are a real in-match editor feature. This guard targets
+                    // the retired offline/synthetic gameplay mode, not ordinary rendering terms.
+                    continue;
+                }
                 string source = File.ReadAllText(sourcePath);
                 foreach (string fragment in forbiddenIdentifierFragments)
                 {
@@ -100,15 +112,19 @@ namespace HiveChameleon.Tests
                         id = "0199abc1-2345-7abc-8def-0123456789ab",
                         map_version_id =
                             "0199abc1-2345-7abc-adef-0123456789ad",
-                        map_content_version = CityDistrictMap.ContentVersion,
+                map_slug = AuthoritativeArenaCatalog.NeonServiceArcadeSlug,
+                map_display_name =
+                    AuthoritativeArenaCatalog.NeonServiceArcadeDisplayName,
+                map_content_version =
+                    AuthoritativeArenaCatalog.NeonServiceArcadeContentVersion,
                         game_server_build_version =
                             LobbyMenuRules.SupportedGameServerBuildVersion,
                         protocol_version =
                             LobbyMenuRules.SupportedProtocolVersion,
                         authority_geometry_version =
-                            CityDistrictMap.AuthorityGeometryVersion,
-                        authority_geometry_digest =
-                            CityDistrictMap.AuthorityGeometryDigest,
+                    AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryVersion,
+                authority_geometry_digest =
+                    AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryDigest,
                         status = "hunting",
                     }
                 ),
@@ -557,15 +573,16 @@ namespace HiveChameleon.Tests
         }
 
         [Test]
-        public void HiderHudUsesOneCamouflagePaletteWithoutAccentControls()
+        public void HiderUsesDedicatedPaintEditorWithoutLegacyAccentControls()
         {
             string source = ReadRuntimeSource(
                 "Presentation",
                 "OfficialArenaExperience.cs"
             );
 
-            Assert.That(source, Does.Contain("CAMOUFLAGE PALETTE"));
-            Assert.That(source, Does.Contain("CamouflagePalette"));
+            Assert.That(source, Does.Contain("PlayerPaintMode"));
+            Assert.That(source, Does.Not.Contain("CAMOUFLAGE PALETTE"));
+            Assert.That(source, Does.Not.Contain("CamouflagePalette"));
             Assert.That(source, Does.Not.Contain("AccentPalette"));
             Assert.That(source, Does.Not.Contain("CycleAccentColor"));
             Assert.That(source, Does.Not.Contain("KeyCode.Z"));
@@ -637,6 +654,11 @@ namespace HiveChameleon.Tests
             CamouflagedPlayerAvatar avatar
         )
         {
+            PaintableBody paintable = avatar.GetComponentInChildren<PaintableBody>(true);
+            if (paintable != null && paintable.PresentationOverrideAmount > 0f)
+            {
+                return paintable.PresentationOverrideColor;
+            }
             Renderer[] renderers = avatar.GetComponentsInChildren<Renderer>(true);
             var block = new MaterialPropertyBlock();
             for (int rendererIndex = 0; rendererIndex < renderers.Length; rendererIndex++)

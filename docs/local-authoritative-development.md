@@ -20,28 +20,12 @@ Install the repository dependencies once:
 npm ci
 ```
 
-### Local testing map
+### Bundled arena
 
-The current Chroma District arena uses the free
-[Low Poly City Starter Pack by MiniWorld Studio](https://assetstore.unity.com/packages/3d/environments/urban/low-poly-city-starter-pack-mini-world-studio-380946)
-as a local testing dependency. The repository includes the project-authored
-`Assets/HiveChameleon/Resources/City/HC_CityArena.prefab`, but it does not redistribute the
-pack's source assets.
-
-Before opening the arena for the first time:
-
-1. Sign in to Unity with your own account and add the asset to **My Assets** from the page above.
-2. Open `clients/unity` with the pinned Unity editor.
-3. Open **Window > Package Management > Package Manager**, select **My Assets**, and locate
-   **Low Poly City Starter Pack - Mini World Studio**.
-4. Download and import version `1.0` using its default paths.
-5. Confirm that Unity created
-   `Assets/MiniWorld Studio/City – Starter Pack/Models/` and that the Console has no missing-asset
-   errors.
-
-The imported `Assets/MiniWorld Studio/` directory is intentionally ignored by Git and must not be
-staged. Contributors acquire it independently. This testing environment will be replaced by a
-separately tracked project-owned map in a future task.
+Neon Service Arcade is bundled in the Unity project and is the only selectable arena. A clean
+clone needs no Asset Store map download. The client and Nakama both pin content version `m2`,
+authority geometry version `neon-service-arcade-authority-2`, and the matching geometry digest;
+they fail closed if those identities disagree.
 
 ## Start the stack
 

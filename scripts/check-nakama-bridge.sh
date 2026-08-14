@@ -138,6 +138,36 @@ process.stdout.write(
 NODE
 }
 
+random_uuid_v7_for_spawn_index() {
+  node - "$1" "$2" <<'NODE'
+const { randomBytes } = require('node:crypto');
+
+const modulo = Number(process.argv[2]);
+const expectedIndex = Number(process.argv[3]);
+for (;;) {
+  const bytes = randomBytes(16);
+  let timestamp = BigInt(Date.now());
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = Number(timestamp & 0xffn);
+    timestamp >>= 8n;
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  let hash = 17;
+  for (const character of id) {
+    hash = (Math.imul(hash, 31) + character.codePointAt(0)) | 0;
+  }
+  hash = hash === -2147483648 ? 0 : Math.abs(hash);
+  if (hash % modulo === expectedIndex) {
+    process.stdout.write(id);
+    break;
+  }
+}
+NODE
+}
+
 free_port() {
   node <<'NODE'
 const net = require('node:net');
@@ -284,8 +314,11 @@ export NAKAMA_CONSOLE_PORT=0
 export NAKAMA_METRICS_PORT=0
 
 export NODE_ENV=development
-export SMOKE_PLAYER_ID="$(random_uuid_v7)"
-export SMOKE_PLAYER_TWO_ID="$(random_uuid_v7)"
+# Pin the two smoke identities to the first Hider and Hunter spawn slots. The
+# end-to-end shot check is deterministic, while the arena unit tests still
+# validate safety and escape clearance for every spawn.
+export SMOKE_PLAYER_ID="$(random_uuid_v7_for_spawn_index 6 0)"
+export SMOKE_PLAYER_TWO_ID="$(random_uuid_v7_for_spawn_index 2 0)"
 export SMOKE_AUTH_SESSION_ID="$(random_uuid_v7)"
 export SMOKE_AUTH_SESSION_TWO_ID="$(random_uuid_v7)"
 export AUTH_TOKEN_SECRET="$(random_base64url 32)"
@@ -298,41 +331,44 @@ export HC_NAKAMA_DATABASE_URL="postgres://postgres:postgres@host.docker.internal
 
 cd "${repository_root}"
 
+backend_map_slug="$(
+  sed -n 's/.*neonServiceArcadeMapSlug[^=]*= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/arena_catalog.go \
+    | head -n 1
+)"
+unity_map_slug="$(
+  sed -n 's/.*public const string NeonServiceArcadeSlug = "\([^"]*\)".*/\1/p' \
+    clients/unity/Assets/HiveChameleon/Runtime/Presentation/AuthoritativeArenaCatalog.cs \
+    | head -n 1
+)"
 backend_map_content_version="$(
-  sed -n 's/.*defaultOfficialMapContentVersion = "\([^"]*\)".*/\1/p' \
-    runtime/nakama/lobby_store.go \
+  sed -n 's/.*neonServiceArcadeContentVersion[^=]*= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/arena_catalog.go \
     | head -n 1
 )"
 unity_map_content_version="$(
-  sed -n 's/.*public const string ContentVersion = "\([^"]*\)".*/\1/p' \
-    clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
+  sed -n 's/.*public const string NeonServiceArcadeContentVersion = "\([^"]*\)".*/\1/p' \
+    clients/unity/Assets/HiveChameleon/Runtime/Presentation/AuthoritativeArenaCatalog.cs \
     | head -n 1
 )"
 backend_geometry_version="$(
-  sed -n 's/.*officialAuthorityGeometryVersion *= "\([^"]*\)".*/\1/p' \
-    runtime/nakama/authority_geometry.go \
+  sed -n 's/.*neonServiceArcadeAuthorityGeometryVersion[^=]*= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/arena_catalog.go \
     | head -n 1
 )"
 unity_geometry_version="$(
-  sed -n 's/.*public const string AuthorityGeometryVersion *= *//p' \
-    clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
+  sed -n '/public const string NeonServiceArcadeAuthorityGeometryVersion/{n;s/^[[:space:]]*"\([^"]*\)";.*/\1/p;}' \
+    clients/unity/Assets/HiveChameleon/Runtime/Presentation/AuthoritativeArenaCatalog.cs \
     | head -n 1
 )"
-if [[ -z "${unity_geometry_version}" ]]; then
-  unity_geometry_version="$(
-    sed -n '/public const string AuthorityGeometryVersion/{n;s/^[[:space:]]*"\([^"]*\)";.*/\1/p;}' \
-      clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
-      | head -n 1
-  )"
-fi
 backend_geometry_digest="$(
-  sed -n 's/.*officialAuthorityGeometryExpectedDigest *= "\([^"]*\)".*/\1/p' \
-    runtime/nakama/authority_geometry.go \
+  sed -n 's/.*neonServiceArcadeAuthorityGeometryDigest[^=]*= "\([^"]*\)".*/\1/p' \
+    runtime/nakama/arena_catalog.go \
     | head -n 1
 )"
 unity_geometry_digest="$(
-  sed -n '/public const string AuthorityGeometryDigest/{n;s/^[[:space:]]*"\([^"]*\)";.*/\1/p;}' \
-    clients/unity/Assets/HiveChameleon/Runtime/Presentation/CityDistrictMap.cs \
+  sed -n '/public const string NeonServiceArcadeAuthorityGeometryDigest/{n;s/^[[:space:]]*"\([^"]*\)";.*/\1/p;}' \
+    clients/unity/Assets/HiveChameleon/Runtime/Presentation/AuthoritativeArenaCatalog.cs \
     | head -n 1
 )"
 backend_build_version="$(
@@ -371,6 +407,10 @@ assert_runtime_contract() {
   fi
 }
 
+assert_runtime_contract \
+  "official map slug" \
+  "${backend_map_slug}" \
+  "${unity_map_slug}"
 assert_runtime_contract \
   "official map content version" \
   "${backend_map_content_version}" \

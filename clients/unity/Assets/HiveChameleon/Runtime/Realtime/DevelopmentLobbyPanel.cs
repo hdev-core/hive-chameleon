@@ -53,6 +53,10 @@ namespace HiveChameleon.Realtime
         private long _loadedConfigurationVersion = -1;
         private int _modeIndex;
         private string _mapVersionId = string.Empty;
+        private AvailableMapSnapshot[] _availableMaps =
+            Array.Empty<AvailableMapSnapshot>();
+        private string[] _mapOptions = Array.Empty<string>();
+        private int _mapIndex;
         private int _hunterCount = 1;
         private int _hidingSeconds = 60;
         private int _huntingSeconds = 180;
@@ -132,6 +136,7 @@ namespace HiveChameleon.Realtime
                 _page = MenuPage.Home;
             }
             SetStatus("You're online.", false);
+            LoadMapCatalog();
         }
 
         public void SetGameplayActive(bool active)
@@ -680,15 +685,46 @@ namespace HiveChameleon.Realtime
             GUILayout.Space(12f);
 
             DrawFieldLabel("MAP");
-            GUILayout.Label(
-                "CHROMA DISTRICT",
-                _choiceStyle,
-                GUILayout.Height(42f)
-            );
-            GUILayout.Label(
-                "Neon streets, tight alleys, and plenty of places to disappear.",
-                _mutedStyle
-            );
+            if (_availableMaps.Length == 0)
+            {
+                GUILayout.Label(
+                    "LOADING MAPS…",
+                    _choiceStyle,
+                    GUILayout.Height(42f)
+                );
+                GUILayout.Label(
+                    "Retrieving the authoritative arena catalog.",
+                    _mutedStyle
+                );
+            }
+            else
+            {
+                _mapIndex = Mathf.Clamp(
+                    _mapIndex,
+                    0,
+                    _availableMaps.Length - 1
+                );
+                int selectedMap = GUILayout.SelectionGrid(
+                    _mapIndex,
+                    _mapOptions,
+                    1,
+                    _choiceStyle,
+                    GUILayout.Height(42f * _availableMaps.Length)
+                );
+                if (selectedMap != _mapIndex)
+                {
+                    _mapIndex = selectedMap;
+                    _mapVersionId =
+                        _availableMaps[_mapIndex].map_version_id;
+                }
+                AvailableMapSnapshot map = _availableMaps[_mapIndex];
+                GUILayout.Label(map.description, _mutedStyle);
+                GUILayout.Label(
+                    $"RECOMMENDED  {map.recommended_minimum_players}–"
+                        + $"{map.recommended_maximum_players} PLAYERS",
+                    _captionStyle
+                );
+            }
             GUILayout.Space(12f);
 
             GUILayout.BeginHorizontal();
@@ -1098,6 +1134,7 @@ namespace HiveChameleon.Realtime
             _loadedConfigurationVersion = configuration.row_version;
             _modeIndex = configuration.mode == "infection" ? 1 : 0;
             _mapVersionId = configuration.map_version_id ?? string.Empty;
+            SynchronizeMapSelection();
             _hunterCount = Mathf.Clamp(configuration.hunter_count, 1, 2);
             _hidingSeconds = Mathf.Clamp(
                 configuration.hiding_duration_seconds,
@@ -1115,6 +1152,66 @@ namespace HiveChameleon.Realtime
                 100,
                 30000
             );
+        }
+
+        private async void LoadMapCatalog()
+        {
+            if (
+                _connection == null
+                || _connection.State != RealtimeConnectionState.Connected
+                || _lifetime == null
+            )
+            {
+                return;
+            }
+
+            try
+            {
+                AvailableMapSnapshot[] maps =
+                    await _connection.LoadAvailableMapsAsync(_lifetime.Token);
+                _availableMaps = maps ?? Array.Empty<AvailableMapSnapshot>();
+                _mapOptions = new string[_availableMaps.Length];
+                for (int index = 0; index < _availableMaps.Length; index++)
+                {
+                    _mapOptions[index] =
+                        _availableMaps[index].display_name.ToUpperInvariant();
+                }
+                SynchronizeMapSelection();
+            }
+            catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+            {
+            }
+            catch (Exception exception)
+            {
+                _availableMaps = Array.Empty<AvailableMapSnapshot>();
+                _mapOptions = Array.Empty<string>();
+                SetStatus(LobbyMenuRules.ProductErrorMessage(exception), true);
+            }
+        }
+
+        private void SynchronizeMapSelection()
+        {
+            if (_availableMaps.Length == 0)
+            {
+                _mapIndex = 0;
+                return;
+            }
+            for (int index = 0; index < _availableMaps.Length; index++)
+            {
+                if (
+                    string.Equals(
+                        _availableMaps[index].map_version_id,
+                        _mapVersionId,
+                        StringComparison.Ordinal
+                    )
+                )
+                {
+                    _mapIndex = index;
+                    return;
+                }
+            }
+            _mapIndex = 0;
+            _mapVersionId = _availableMaps[0].map_version_id;
         }
 
         private void SetStatus(string value, bool error)

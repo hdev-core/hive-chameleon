@@ -186,20 +186,20 @@ func TestOfficialRoundMapReturnsCurrentDistributionCompatibility(t *testing.T) {
 	defer database.Close()
 
 	mapVersionID := "019fab2b-c400-7000-8000-000000000002"
-	mock.ExpectQuery("SELECT version.version_number").
-		WithArgs(
-			mapVersionID,
-			defaultOfficialMapSlug,
-			defaultOfficialMapContentVersion,
-		).
+	mock.ExpectQuery("SELECT map_definition.slug").
+		WithArgs(mapVersionID).
 		WillReturnRows(
 			sqlmock.NewRows(
 				[]string{
+					"slug",
+					"title",
 					"version_number",
 					"required_game_build_version",
 					"required_protocol_version",
 				},
 			).AddRow(
+				defaultOfficialMapSlug,
+				"Neon Service Arcade",
 				defaultOfficialMapContentVersion,
 				gameServerBuildVersion,
 				matchProtocolVersion,
@@ -213,7 +213,9 @@ func TestOfficialRoundMapReturnsCurrentDistributionCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate current official map: %v", err)
 	}
-	if contract.ContentVersion != defaultOfficialMapContentVersion ||
+	if contract.MapSlug != defaultOfficialMapSlug ||
+		contract.DisplayName != "Neon Service Arcade" ||
+		contract.ContentVersion != defaultOfficialMapContentVersion ||
 		contract.GameServerBuildVersion != gameServerBuildVersion ||
 		contract.ProtocolVersion != matchProtocolVersion {
 		t.Fatalf("official compatibility contract = %#v", contract)
@@ -233,12 +235,8 @@ func TestOfficialRoundMapRejectsUnavailableVersion(t *testing.T) {
 	defer database.Close()
 
 	mapVersionID := "01900000-0000-7000-8000-000000000222"
-	mock.ExpectQuery("SELECT version.version_number").
-		WithArgs(
-			mapVersionID,
-			defaultOfficialMapSlug,
-			defaultOfficialMapContentVersion,
-		).
+	mock.ExpectQuery("SELECT map_definition.slug").
+		WithArgs(mapVersionID).
 		WillReturnError(sql.ErrNoRows)
 	if _, err := loadOfficialRoundMapContract(
 		context.Background(),
@@ -262,20 +260,20 @@ func TestOfficialRoundMapRejectsIncompatibleDistributionContract(t *testing.T) {
 	defer database.Close()
 
 	mapVersionID := "019fab2b-c400-7000-8000-000000000002"
-	mock.ExpectQuery("SELECT version.version_number").
-		WithArgs(
-			mapVersionID,
-			defaultOfficialMapSlug,
-			defaultOfficialMapContentVersion,
-		).
+	mock.ExpectQuery("SELECT map_definition.slug").
+		WithArgs(mapVersionID).
 		WillReturnRows(
 			sqlmock.NewRows(
 				[]string{
+					"slug",
+					"title",
 					"version_number",
 					"required_game_build_version",
 					"required_protocol_version",
 				},
 			).AddRow(
+				defaultOfficialMapSlug,
+				"Neon Service Arcade",
 				defaultOfficialMapContentVersion,
 				"hive-chameleon-m5",
 				"m5-v1",

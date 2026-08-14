@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	liveRoundCheckpointFormatVersion = 2
+	liveRoundCheckpointFormatVersion = 3
 	maximumLiveRoundCheckpointBytes  = 2 * 1024 * 1024
 	liveRoundCheckpointInterval      = 250 * time.Millisecond
 	liveRoundCheckpointHeartbeat     = time.Second
@@ -29,6 +29,7 @@ type liveRoundCheckpoint struct {
 	AuthorityGeometryDigest  string                               `json:"authority_geometry_digest"`
 	AuthoritativeRound       *authoritativeRoundState             `json:"authoritative_round"`
 	AvatarStates             map[string]roundAvatarStateSnapshot  `json:"avatar_states"`
+	PaintStates              map[string]*roundPlayerPaintState    `json:"paint_states"`
 	CachedScore              *roundScoreSnapshot                  `json:"cached_score,omitempty"`
 	NextScoreBatchAt         time.Time                            `json:"next_score_batch_at,omitempty"`
 	ScoreBatchSequence       uint64                               `json:"score_batch_sequence"`
@@ -45,13 +46,17 @@ func encodeLiveRoundCheckpoint(
 		return nil, errors.New("active authoritative round checkpoint is required")
 	}
 	synchronizeAvatarAuthority(state)
+	if state.PaintStates == nil {
+		state.PaintStates = initializeRoundPaintStates(state.AuthoritativeRound)
+	}
 	checkpoint := liveRoundCheckpoint{
 		Version:                  liveRoundCheckpointFormatVersion,
 		RoundID:                  state.Round.ID,
-		AuthorityGeometryVersion: officialAuthorityGeometryVersion,
-		AuthorityGeometryDigest:  officialAuthorityGeometryDigest,
+		AuthorityGeometryVersion: state.Round.AuthorityGeometryVersion,
+		AuthorityGeometryDigest:  state.Round.AuthorityGeometryDigest,
 		AuthoritativeRound:       state.AuthoritativeRound,
 		AvatarStates:             state.AvatarStates,
+		PaintStates:              state.PaintStates,
 		CachedScore:              state.CachedScore,
 		NextScoreBatchAt:         state.NextScoreBatchAt,
 		ScoreBatchSequence:       state.ScoreBatchSequence,
@@ -93,19 +98,17 @@ func validateLiveRoundCheckpoint(
 	checkpoint *liveRoundCheckpoint,
 	round *roundSnapshot,
 ) error {
+	arena, arenaError := officialArenaForRound(round)
 	if checkpoint == nil ||
 		checkpoint.Version != liveRoundCheckpointFormatVersion ||
 		round == nil ||
+		arenaError != nil ||
 		round.ID == "" ||
 		checkpoint.RoundID != round.ID ||
-		checkpoint.AuthorityGeometryVersion !=
-			officialAuthorityGeometryVersion ||
-		checkpoint.AuthorityGeometryDigest !=
-			officialAuthorityGeometryDigest ||
-		round.AuthorityGeometryVersion !=
-			officialAuthorityGeometryVersion ||
-		round.AuthorityGeometryDigest !=
-			officialAuthorityGeometryDigest ||
+		checkpoint.AuthorityGeometryVersion != arena.Geometry.Version ||
+		checkpoint.AuthorityGeometryDigest != arena.GeometryDigest ||
+		round.AuthorityGeometryVersion != arena.Geometry.Version ||
+		round.AuthorityGeometryDigest != arena.GeometryDigest ||
 		checkpoint.AuthoritativeRound == nil {
 		return errors.New("live round checkpoint identity is invalid")
 	}
@@ -308,10 +311,11 @@ func validateLiveRoundCheckpoint(
 				playerID,
 			)
 		}
-		if !validAvatarPosition(
+		if !validAvatarPositionForArena(
 			avatar.PositionX,
 			avatar.PositionY,
 			avatar.PositionZ,
+			arena,
 		) {
 			return fmt.Errorf(
 				"live round checkpoint avatar position %q is invalid",
@@ -344,12 +348,20 @@ func validateLiveRoundCheckpoint(
 				},
 				authorityPlayerHeight(avatar.Pose),
 			),
+			&arena.Geometry,
 		) {
 			return fmt.Errorf(
 				"live round checkpoint avatar geometry %q is invalid",
 				playerID,
 			)
 		}
+	}
+	if err := validateRoundPaintStates(
+		checkpoint.PaintStates,
+		round,
+		authoritative,
+	); err != nil {
+		return err
 	}
 	if checkpoint.CachedScore != nil {
 		if checkpoint.CachedScore.RoundID != round.ID ||
@@ -410,6 +422,10 @@ func applyLiveRoundCheckpoint(
 	state.AvatarStates = checkpoint.AvatarStates
 	if state.AvatarStates == nil {
 		state.AvatarStates = make(map[string]roundAvatarStateSnapshot)
+	}
+	state.PaintStates = checkpoint.PaintStates
+	if state.PaintStates == nil {
+		state.PaintStates = make(map[string]*roundPlayerPaintState)
 	}
 	state.CachedScore = checkpoint.CachedScore
 	state.NextScoreBatchAt = checkpoint.NextScoreBatchAt

@@ -28,7 +28,7 @@ func TestAvatarStateCommandIsFlatStrictAndBounded(t *testing.T) {
 	t.Parallel()
 
 	command, err := decodeAvatarStateCommand([]byte(`{
-		"position_x":12.5,
+		"position_x":8.5,
 		"position_y":1,
 		"position_z":-8.25,
 		"yaw":-30,
@@ -272,8 +272,8 @@ func TestFireTargetRequiresRecentHunterAndRetainsLastHiderState(t *testing.T) {
 			"hunter": {
 				RoundID:    round.ID,
 				PlayerID:   "hunter",
-				PositionX:  0,
-				PositionY:  1,
+				PositionX:  -7,
+				PositionY:  0.05,
 				PositionZ:  0,
 				Yaw:        90,
 				Sequence:   2,
@@ -282,8 +282,8 @@ func TestFireTargetRequiresRecentHunterAndRetainsLastHiderState(t *testing.T) {
 			"hider": {
 				RoundID:    round.ID,
 				PlayerID:   "hider",
-				PositionX:  25,
-				PositionY:  1,
+				PositionX:  -5,
+				PositionY:  0.05,
 				PositionZ:  0,
 				Sequence:   4,
 				OccurredAt: now,
@@ -306,7 +306,7 @@ func TestFireTargetRequiresRecentHunterAndRetainsLastHiderState(t *testing.T) {
 	}
 
 	stale := far
-	stale.PositionX = 25
+	stale.PositionX = -5
 	stale.OccurredAt = now.Add(-maximumFireAvatarAge)
 	state.AvatarStates["hider"] = stale
 	if authorized := state.authorizeFireTarget(
@@ -347,6 +347,7 @@ func TestFireTargetRequiresPitchAwareTargetIntersectionAndStaticLOS(t *testing.T
 	hunter := roundAvatarStateSnapshot{
 		RoundID:    round.ID,
 		PlayerID:   "hunter",
+		PositionX:  -6,
 		PositionY:  0.05,
 		Yaw:        0,
 		Pitch:      0,
@@ -357,8 +358,9 @@ func TestFireTargetRequiresPitchAwareTargetIntersectionAndStaticLOS(t *testing.T
 	elevatedTarget := roundAvatarStateSnapshot{
 		RoundID:    round.ID,
 		PlayerID:   "hider",
-		PositionY:  10,
-		PositionZ:  10,
+		PositionX:  -6,
+		PositionY:  5,
+		PositionZ:  4,
 		Pose:       "standing",
 		Sequence:   1,
 		OccurredAt: now,
@@ -398,15 +400,15 @@ func TestFireTargetRequiresPitchAwareTargetIntersectionAndStaticLOS(t *testing.T
 		t.Fatalf("pitch-aligned target was rejected: %#v", authorized)
 	}
 
-	hunter.PositionX = 16.1
+	hunter.PositionX = 0
 	hunter.PositionY = 0.05
-	hunter.PositionZ = -20
-	hunter.Yaw = 0
+	hunter.PositionZ = 0
+	hunter.Yaw = 90
 	hunter.Pitch = 0
 	blockedTarget := elevatedTarget
-	blockedTarget.PositionX = 16.1
+	blockedTarget.PositionX = 4
 	blockedTarget.PositionY = 0.05
-	blockedTarget.PositionZ = -3
+	blockedTarget.PositionZ = 0
 	state.AvatarStates["hunter"] = hunter
 	state.AvatarStates["hider"] = blockedTarget
 	blocked := state.authorizeFireTarget("hunter", command, now)

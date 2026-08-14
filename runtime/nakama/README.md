@@ -61,8 +61,8 @@ Nakama-authoritative match. Host commands lock and recheck both the current open
 `game.lobby_host_assignment` and the caller's expected lobby version. Disconnecting or leaving
 outside an active round closes the membership and migrates the host in one serializable
 transaction; the empty lobby closes without treating host ownership as a permanent role. New
-lobbies select only the published official `prism-foundry` content version `m4-5` when both desktop
-and web distributions declare the same supported game build and realtime protocol. Configuration
+lobbies select only the published official `neon-service-arcade` content version `m2` when both
+desktop and web distributions declare the same supported game build and realtime protocol. Configuration
 and round start reject every other map UUID, version, lifecycle, unavailable distribution, or
 incompatible build/protocol contract. Public round snapshots carry the immutable map-version UUID,
 content version, required game build, and required protocol loaded from that distribution contract
@@ -88,7 +88,7 @@ target records a deliberate miss. An accepted shot always consumes a shell and b
 reload interval. The match validates role, phase, shells, reload timing, idempotency, the aim delta
 from the last accepted avatar orientation, and whether the requested player is a still-active
 Hider. A named target is eligible only when the Hunter has a recent same-round avatar snapshot and
-the 80-metre ray hits the target's authoritative capsule before any building, tree, or arena
+the 80-metre ray hits the target's authoritative capsule before any wall, prop, or arena
 boundary in the pinned collision proxy. The last accepted Hider snapshot remains targetable even
 when that Hider stops publishing, preventing stale-state immunity. A stale or missing Hunter
 snapshot, missing target snapshot, out-of-range target, invalid aim, or blocked line of sight
@@ -102,10 +102,10 @@ conversion flag, initial role, and final role remain in the terminal result.
 
 Opcode `14` relays a participant's humanoid avatar state using flat position, yaw, pitch, color,
 and pose fields. The server seeds every participant at a deterministic role spawn, rejects
-coordinates outside Chroma District, rejects endpoints or swept player capsules that intersect the
-pinned analytic proxy (four rotated building boxes, nine tree capsules, and four arena boundary
-boxes), and rejects horizontal, vertical, yaw, or pitch deltas outside its server-time-based
-movement envelope. Ground, road, and sidewalk meshes remain traversal support rather than blocking
+coordinates outside Neon Service Arcade, rejects endpoints or swept player capsules that intersect
+the pinned analytic proxy (48 oriented boxes and two cylindrical proxies), and rejects horizontal,
+vertical, yaw, or pitch deltas outside its server-time-based movement envelope. Floor meshes remain
+traversal support rather than blocking
 geometry. It also rejects caller-supplied identity/role fields, supplies the round, stable player
 ID, optional Hive display name, current role/status, sequence, and timestamp, and publishes that
 snapshot on opcode `15`. A rejected avatar command receives a private reliable copy of the last
@@ -174,7 +174,7 @@ The remaining future RPCs stay registered as explicit `feature_not_ready` stubs 
 replace them with authoritative behavior.
 
 The repository smoke command starts disposable application and Nakama databases, seeds two
-short-lived real API sessions plus the official Chroma District release, and exercises the complete
+short-lived real API sessions plus the official Neon Service Arcade release, and exercises the complete
 bridge, host migration, nomination, server-only role assignment, round creation, same-assertion
 replay denial, non-bridge authentication denial, server-timed Casual phases, rejected forged
 outcomes, humanoid avatar relay, a mid-round Hider reconnect with state restoration, a mid-round

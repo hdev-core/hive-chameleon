@@ -35,15 +35,19 @@ namespace HiveChameleon.Tests
                     {
                         id = "0199abc1-2345-7abc-bdef-0123456789ae",
                         map_version_id = MapVersionId,
-                        map_content_version = CityDistrictMap.ContentVersion,
+                        map_slug = AuthoritativeArenaCatalog.NeonServiceArcadeSlug,
+                        map_display_name =
+                            AuthoritativeArenaCatalog.NeonServiceArcadeDisplayName,
+                        map_content_version =
+                            AuthoritativeArenaCatalog.NeonServiceArcadeContentVersion,
                         game_server_build_version =
                             LobbyMenuRules.SupportedGameServerBuildVersion,
                         protocol_version =
                             LobbyMenuRules.SupportedProtocolVersion,
                         authority_geometry_version =
-                            CityDistrictMap.AuthorityGeometryVersion,
+                            AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryVersion,
                         authority_geometry_digest =
-                            CityDistrictMap.AuthorityGeometryDigest,
+                            AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryDigest,
                         status = status,
                     }
                 ),
@@ -51,10 +55,10 @@ namespace HiveChameleon.Tests
             );
         }
 
-        [TestCase("", "m4-5")]
-        [TestCase("not-a-map-version", "m4-5")]
+        [TestCase("", "m2")]
+        [TestCase("not-a-map-version", "m2")]
         [TestCase(MapVersionId, "")]
-        [TestCase(MapVersionId, "m4-3")]
+        [TestCase(MapVersionId, "m1")]
         public void GameplayRejectsMissingOrIncompatibleMapMetadata(
             string mapVersionId,
             string mapContentVersion
@@ -72,9 +76,9 @@ namespace HiveChameleon.Tests
                         protocol_version =
                             LobbyMenuRules.SupportedProtocolVersion,
                         authority_geometry_version =
-                            CityDistrictMap.AuthorityGeometryVersion,
+                            AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryVersion,
                         authority_geometry_digest =
-                            CityDistrictMap.AuthorityGeometryDigest,
+                            AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryDigest,
                         status = "hunting",
                     }
                 ),
@@ -89,21 +93,33 @@ namespace HiveChameleon.Tests
                 "{\"id\":\"0199abc1-2345-7abc-bdef-0123456789ae\","
                 + "\"map_version_id\":\""
                 + MapVersionId
-                + "\",\"map_content_version\":\"m4-5\","
+                + "\",\"map_slug\":\""
+                + AuthoritativeArenaCatalog.NeonServiceArcadeSlug
+                + "\",\"map_display_name\":\""
+                + AuthoritativeArenaCatalog.NeonServiceArcadeDisplayName
+                + "\",\"map_content_version\":\"m2\","
                 + "\"game_server_build_version\":\"hive-chameleon-m4-dev\","
                 + "\"protocol_version\":\"m4-v2\","
                 + "\"authority_geometry_version\":\""
-                + CityDistrictMap.AuthorityGeometryVersion
+                + AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryVersion
                 + "\",\"authority_geometry_digest\":\""
-                + CityDistrictMap.AuthorityGeometryDigest
+                + AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryDigest
                 + "\",\"status\":\"hunting\"}";
 
             RoundSnapshot round = JsonUtility.FromJson<RoundSnapshot>(json);
 
             Assert.That(round.map_version_id, Is.EqualTo(MapVersionId));
             Assert.That(
+                round.map_slug,
+                Is.EqualTo(AuthoritativeArenaCatalog.NeonServiceArcadeSlug)
+            );
+            Assert.That(
+                round.map_display_name,
+                Is.EqualTo(AuthoritativeArenaCatalog.NeonServiceArcadeDisplayName)
+            );
+            Assert.That(
                 round.map_content_version,
-                Is.EqualTo(CityDistrictMap.ContentVersion)
+                Is.EqualTo(AuthoritativeArenaCatalog.NeonServiceArcadeContentVersion)
             );
             Assert.That(
                 round.game_server_build_version,
@@ -115,11 +131,15 @@ namespace HiveChameleon.Tests
             );
             Assert.That(
                 round.authority_geometry_version,
-                Is.EqualTo(CityDistrictMap.AuthorityGeometryVersion)
+                Is.EqualTo(
+                    AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryVersion
+                )
             );
             Assert.That(
                 round.authority_geometry_digest,
-                Is.EqualTo(CityDistrictMap.AuthorityGeometryDigest)
+                Is.EqualTo(
+                    AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryDigest
+                )
             );
             Assert.That(LobbyMenuRules.IsGameplayRound(round), Is.True);
         }
@@ -138,8 +158,14 @@ namespace HiveChameleon.Tests
             Assert.That(LobbyMenuRules.IsGameplayRound(round), Is.False);
         }
 
-        [TestCase("wrong-geometry", CityDistrictMap.AuthorityGeometryDigest)]
-        [TestCase(CityDistrictMap.AuthorityGeometryVersion, "sha256:wrong")]
+        [TestCase(
+            "wrong-geometry",
+            AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryDigest
+        )]
+        [TestCase(
+            AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryVersion,
+            "sha256:wrong"
+        )]
         public void GameplayRejectsIncompatibleAuthorityGeometry(
             string geometryVersion,
             string geometryDigest
@@ -320,7 +346,7 @@ namespace HiveChameleon.Tests
                 ),
                 Is.False
             );
-            Assert.That(mapReason, Does.Contain("Chroma District"));
+            Assert.That(mapReason, Does.Contain("available map"));
 
             LobbySnapshot missingHider = BuildLobby(2, 2, MapVersionId);
             Assert.That(
@@ -554,7 +580,7 @@ namespace HiveChameleon.Tests
         }
 
         [Test]
-        public void ReleaseBuildKeepsTheFailClosedOnlineEntryScreen()
+        public void ReleaseBuildAcceptsOnlyPageIssuedRuntimeCredentials()
         {
             string runtimeRoot = Path.Combine(
                 Application.dataPath,
@@ -604,13 +630,15 @@ namespace HiveChameleon.Tests
             );
             Assert.That(
                 developmentCredentials,
-                Does.Contain(
-                    "#else\n            credential = default;\n            return false;\n#endif"
-                )
+                Does.Contain("#if UNITY_EDITOR || DEVELOPMENT_BUILD")
             );
             Assert.That(
                 developmentCredentials,
-                Does.Contain("#if UNITY_EDITOR || DEVELOPMENT_BUILD")
+                Does.Contain("#if !UNITY_EDITOR")
+            );
+            Assert.That(
+                developmentCredentials,
+                Does.Contain("--hc-authoritative-runtime")
             );
             Assert.That(
                 realtime,
@@ -1241,15 +1269,19 @@ namespace HiveChameleon.Tests
                 sequence_number = sequenceNumber,
                 mode = "casual",
                 map_version_id = MapVersionId,
-                map_content_version = CityDistrictMap.ContentVersion,
+                map_slug = AuthoritativeArenaCatalog.NeonServiceArcadeSlug,
+                map_display_name =
+                    AuthoritativeArenaCatalog.NeonServiceArcadeDisplayName,
+                map_content_version =
+                    AuthoritativeArenaCatalog.NeonServiceArcadeContentVersion,
                 game_server_build_version =
                     LobbyMenuRules.SupportedGameServerBuildVersion,
                 protocol_version =
                     LobbyMenuRules.SupportedProtocolVersion,
                 authority_geometry_version =
-                    CityDistrictMap.AuthorityGeometryVersion,
+                    AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryVersion,
                 authority_geometry_digest =
-                    CityDistrictMap.AuthorityGeometryDigest,
+                    AuthoritativeArenaCatalog.NeonServiceArcadeAuthorityGeometryDigest,
                 status = status,
             };
         }

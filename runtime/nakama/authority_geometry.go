@@ -8,6 +8,8 @@ import (
 )
 
 const (
+	legacyOfficialMapSlug                   = "prism-foundry"
+	legacyOfficialMapContentVersion         = "m4-5"
 	officialAuthorityGeometryVersion        = "chroma-district-authority-proxy-1"
 	officialAuthorityGeometryExpectedDigest = "sha256:6f98a71c09aa8b66aaa6ae3d107e82d2fa09a666d71516221a3af6e07383fd72"
 
@@ -139,8 +141,8 @@ type authorityGeometryManifest struct {
 var officialAuthorityGeometry = authorityGeometryManifest{
 	SchemaVersion:  1,
 	Version:        officialAuthorityGeometryVersion,
-	MapSlug:        defaultOfficialMapSlug,
-	ContentVersion: defaultOfficialMapContentVersion,
+	MapSlug:        legacyOfficialMapSlug,
+	ContentVersion: legacyOfficialMapContentVersion,
 	Player: authorityPlayerGeometry{
 		Radius:          authorityPlayerRadius,
 		SkinWidth:       authorityPlayerSkinWidth,
@@ -361,9 +363,11 @@ func authorityTargetCapsule(
 
 func authorityCapsuleIntersectsStatic(
 	capsule authorityCapsuleProxy,
+	geometries ...*authorityGeometryManifest,
 ) bool {
+	geometry := selectedAuthorityGeometry(geometries)
 	lower, upper := capsule.axis()
-	for _, building := range officialAuthorityGeometry.Buildings {
+	for _, building := range geometry.Buildings {
 		localCenter := building.worldToLocal(capsule.Center)
 		if verticalCapsuleIntersectsBox(
 			localCenter,
@@ -375,12 +379,12 @@ func authorityCapsuleIntersectsStatic(
 			return true
 		}
 	}
-	for _, tree := range officialAuthorityGeometry.Trees {
+	for _, tree := range geometry.Trees {
 		if verticalCapsulesIntersect(capsule, tree) {
 			return true
 		}
 	}
-	for _, boundary := range officialAuthorityGeometry.Boundaries {
+	for _, boundary := range geometry.Boundaries {
 		center := boundary.Min.add(boundary.Max).scale(0.5)
 		half := boundary.Max.subtract(boundary.Min).scale(0.5)
 		if verticalCapsuleIntersectsBox(
@@ -452,7 +456,9 @@ func authorityMovementIntersectsStatic(
 	start authorityVector,
 	end authorityVector,
 	height float64,
+	geometries ...*authorityGeometryManifest,
 ) bool {
+	geometry := selectedAuthorityGeometry(geometries)
 	distance := end.subtract(start).length()
 	steps := int(math.Ceil(distance / authoritySweepStep))
 	if steps < 1 {
@@ -464,6 +470,7 @@ func authorityMovementIntersectsStatic(
 		)
 		if authorityCapsuleIntersectsStatic(
 			authorityPlayerCapsule(position, height),
+			geometry,
 		) {
 			return true
 		}
@@ -475,10 +482,12 @@ func firstAuthorityStaticRayHit(
 	origin authorityVector,
 	direction authorityVector,
 	maximumDistance float64,
+	geometries ...*authorityGeometryManifest,
 ) (float64, bool) {
+	geometry := selectedAuthorityGeometry(geometries)
 	nearest := maximumDistance
 	found := false
-	for _, building := range officialAuthorityGeometry.Buildings {
+	for _, building := range geometry.Buildings {
 		distance, hit := rayBoxIntersection(
 			building.worldToLocal(origin),
 			building.directionToLocal(direction),
@@ -491,7 +500,7 @@ func firstAuthorityStaticRayHit(
 			found = true
 		}
 	}
-	for _, tree := range officialAuthorityGeometry.Trees {
+	for _, tree := range geometry.Trees {
 		distance, hit := rayCapsuleIntersection(
 			origin,
 			direction,
@@ -503,7 +512,7 @@ func firstAuthorityStaticRayHit(
 			found = true
 		}
 	}
-	for _, boundary := range officialAuthorityGeometry.Boundaries {
+	for _, boundary := range geometry.Boundaries {
 		distance, hit := rayBoxIntersection(
 			origin,
 			direction,
@@ -517,6 +526,15 @@ func firstAuthorityStaticRayHit(
 		}
 	}
 	return nearest, found
+}
+
+func selectedAuthorityGeometry(
+	geometries []*authorityGeometryManifest,
+) *authorityGeometryManifest {
+	if len(geometries) > 0 && geometries[0] != nil {
+		return geometries[0]
+	}
+	return &officialAuthorityGeometry
 }
 
 func rayBoxIntersection(

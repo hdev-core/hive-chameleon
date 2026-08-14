@@ -130,13 +130,16 @@ func TestApplyLiveLobbyStateRehydratesDurableNominationsAfterRestart(t *testing.
 func TestPublicRoundSnapshotDoesNotExposeAssignments(t *testing.T) {
 	t.Parallel()
 
+	arena := defaultOfficialArenaTestDefinition()
 	round := roundSnapshot{
 		ID:                       "01900000-0000-7000-8000-000000000010",
 		SequenceNumber:           1,
 		GameServerBuildVersion:   gameServerBuildVersion,
 		ProtocolVersion:          matchProtocolVersion,
-		AuthorityGeometryVersion: officialAuthorityGeometryVersion,
-		AuthorityGeometryDigest:  officialAuthorityGeometryDigest,
+		MapSlug:                  arena.Slug,
+		MapContentVersion:        arena.ContentVersion,
+		AuthorityGeometryVersion: arena.Geometry.Version,
+		AuthorityGeometryDigest:  arena.GeometryDigest,
 		Status:                   "preparing",
 		StartedAt:                time.Unix(1_784_821_000, 0).UTC(),
 		RoleAssignments: []roundRoleAssignment{{
@@ -163,14 +166,14 @@ func TestPublicRoundSnapshotDoesNotExposeAssignments(t *testing.T) {
 			payload,
 			[]byte(
 				`"authority_geometry_version":"`+
-					officialAuthorityGeometryVersion+`"`,
+					arena.Geometry.Version+`"`,
 			),
 		) ||
 		!bytes.Contains(
 			payload,
 			[]byte(
 				`"authority_geometry_digest":"`+
-					officialAuthorityGeometryDigest+`"`,
+					arena.GeometryDigest+`"`,
 			),
 		) {
 		t.Fatalf("public round omitted its compatibility contract: %s", payload)

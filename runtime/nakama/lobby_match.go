@@ -49,6 +49,8 @@ type persistentLobbyState struct {
 	Round                 *roundSnapshot
 	AuthoritativeRound    *authoritativeRoundState
 	AvatarStates          map[string]roundAvatarStateSnapshot
+	PaintStates           map[string]*roundPlayerPaintState
+	PaintReplayQueues     map[string]*paintReplayQueue
 	CachedScore           *roundScoreSnapshot
 	NextScoreBatchAt      time.Time
 	ScoreBatchSequence    uint64
@@ -88,6 +90,8 @@ func (m *persistentLobbyMatch) MatchInit(
 		Nominations:           make(map[string]bool),
 		Round:                 round,
 		AvatarStates:          make(map[string]roundAvatarStateSnapshot),
+		PaintStates:           make(map[string]*roundPlayerPaintState),
+		PaintReplayQueues:     make(map[string]*paintReplayQueue),
 	}
 	applyLiveLobbyState(state, snapshot)
 	if round != nil {
@@ -216,6 +220,9 @@ func (m *persistentLobbyMatch) MatchJoin(
 	}
 	m.refreshAndBroadcast(ctx, logger, dispatcher, state)
 	m.broadcastRoundState(logger, dispatcher, state)
+	if len(scoreRecipients) > 0 {
+		m.queuePaintStateReplays(state, scoreRecipients)
+	}
 	if state.CachedScore != nil && len(scoreRecipients) > 0 {
 		m.broadcastScoreSnapshotTo(
 			logger,
@@ -250,6 +257,7 @@ func (m *persistentLobbyMatch) MatchLeave(
 		tracked, exists := state.Presences[sessionID]
 		delete(state.Presences, sessionID)
 		delete(state.PendingPlayerIDs, sessionID)
+		delete(state.PaintReplayQueues, sessionID)
 		if !exists {
 			continue
 		}
@@ -287,7 +295,7 @@ func (m *persistentLobbyMatch) MatchLoop(
 	_ *sql.DB,
 	_ runtime.NakamaModule,
 	dispatcher runtime.MatchDispatcher,
-	_ int64,
+	tick int64,
 	rawState interface{},
 	messages []runtime.MatchData,
 ) interface{} {
@@ -332,6 +340,8 @@ func (m *persistentLobbyMatch) MatchLoop(
 		state.AuthoritativeRound = nil
 		clear(state.ReconnectReservations)
 		clear(state.AvatarStates)
+		clear(state.PaintStates)
+		clear(state.PaintReplayQueues)
 		state.resetScoreCache()
 		state.LiveStateDirty = false
 		m.broadcastState(logger, dispatcher, state)
@@ -367,8 +377,13 @@ func (m *persistentLobbyMatch) MatchLoop(
 			}
 		}
 		m.broadcastRoundState(logger, dispatcher, state)
+		for _, phase := range phaseChanges {
+			if phase == "hunting" || phase == "answer_check" || phase == "completed" {
+				m.queuePaintStateReplays(state, nil)
+				break
+			}
+		}
 	}
-
 	for _, message := range messages {
 		tracked, exists := state.Presences[message.GetSessionId()]
 		if !exists {
@@ -432,6 +447,9 @@ func (m *persistentLobbyMatch) MatchLoop(
 				discovery.HiderPlayerID,
 			)
 			m.broadcastRoundState(logger, dispatcher, state)
+			// In Infection, the discovered hider has just become a hunter and is now
+			// authorized to reconstruct the other hiders' painted appearances.
+			m.queuePaintStateReplays(state, nil)
 		case answerCheckLikeOpcode:
 			command, err := decodeAnswerCheckLikeCommand(message.GetData())
 			if err != nil {
@@ -503,8 +521,56 @@ func (m *persistentLobbyMatch) MatchLoop(
 			}
 			state.markLiveRoundDirty()
 			m.broadcastAvatarState(logger, dispatcher, state, snapshot, false)
+		case paintStrokeCommandOpcode:
+			command, err := decodePaintStrokeCommand(message.GetData())
+			if err != nil {
+				logger.Warn(
+					"ignoring invalid paint stroke from player %s: %v",
+					tracked.PlayerID,
+					err,
+				)
+				if command.ClientSequence > 0 {
+					m.broadcastPaintResult(
+						logger,
+						dispatcher,
+						message,
+						paintStrokeResult{
+							RoundID:        state.Round.ID,
+							ClientSequence: command.ClientSequence,
+							Reason:         err.Error(),
+						},
+					)
+				}
+				continue
+			}
+			snapshot, err := state.applyPaintStroke(
+				tracked.PlayerID,
+				command,
+				now,
+			)
+			if err != nil {
+				logger.Warn(
+					"ignoring unauthorized paint stroke from player %s: %v",
+					tracked.PlayerID,
+					err,
+				)
+				m.broadcastPaintResult(
+					logger,
+					dispatcher,
+					message,
+					paintStrokeResult{
+						RoundID:        state.Round.ID,
+						ClientSequence: command.ClientSequence,
+						Reason:         err.Error(),
+					},
+				)
+				continue
+			}
+			state.markLiveRoundDirty()
+			m.broadcastPaintStroke(logger, dispatcher, state, snapshot, nil)
 		}
 	}
+	m.broadcastNextPaintReplays(logger, dispatcher, state, tick)
 	if state.scoreBatchDue(now) {
 		scores, err := state.refreshProvisionalScore(now)
 		if err != nil {
@@ -735,6 +801,8 @@ func (m *persistentLobbyMatch) MatchSignal(
 			state.Round = nil
 			state.AuthoritativeRound = nil
 			clear(state.AvatarStates)
+			clear(state.PaintStates)
+			clear(state.PaintReplayQueues)
 			clear(state.ReconnectReservations)
 			state.resetScoreCache()
 			if err := m.store.DeleteLiveRoundCheckpoint(
@@ -771,6 +839,8 @@ func (m *persistentLobbyMatch) MatchSignal(
 		state.Round = &round
 		state.AuthoritativeRound = authoritativeRound
 		state.AvatarStates = initializeRoundAvatarStates(&round, authoritativeRound)
+		state.PaintStates = initializeRoundPaintStates(authoritativeRound)
+		clear(state.PaintReplayQueues)
 		clear(state.ReconnectReservations)
 		if _, err := state.initializeScoreCache(round.StartedAt); err != nil {
 			logger.Error("initialize authoritative score cache: %v", err)
@@ -1312,6 +1382,7 @@ func kickPlayerPresences(
 		if tracked.PlayerID == playerID {
 			presences = append(presences, tracked.Presence)
 			delete(state.Presences, sessionID)
+			delete(state.PaintReplayQueues, sessionID)
 		}
 	}
 	if len(presences) > 0 {
@@ -1344,6 +1415,7 @@ func replacePlayerPresence(
 		}
 		replaced = append(replaced, tracked.Presence)
 		delete(state.Presences, sessionID)
+		delete(state.PaintReplayQueues, sessionID)
 	}
 	state.Presences[presence.GetSessionId()] = lobbyPresence{
 		PlayerID: playerID,

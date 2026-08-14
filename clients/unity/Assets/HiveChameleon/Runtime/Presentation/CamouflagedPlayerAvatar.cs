@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using HiveChameleon.Painting;
 using HiveChameleon.Realtime;
 using UnityEngine;
 
@@ -19,6 +21,8 @@ namespace HiveChameleon.Presentation
 
         private GameObject _hiderArt;
         private GameObject _hunterArt;
+        private HumanoidPresentationRig _hiderRig;
+        private HumanoidPresentationRig _hunterRig;
         private CapsuleCollider _hitbox;
         private TextMesh _nameplate;
         private Color _bodyColor;
@@ -31,9 +35,12 @@ namespace HiveChameleon.Presentation
         private bool _revealFound;
         private bool _nameplateRequested;
         private float _pulseUntil;
+        private Vector3 _previousFramePosition;
+        private Vector3 _presentationVelocity;
         private int _pose;
         private string _status = "active";
         private string _nameplateStatus = string.Empty;
+        private long _lastPaintSequence;
 
         public string PlayerId { get; private set; } = string.Empty;
 
@@ -50,6 +57,8 @@ namespace HiveChameleon.Presentation
         public Color BodyColor => _bodyColor;
 
         public Color AccentColor => _accentColor;
+
+        public long LastPaintSequence => _lastPaintSequence;
 
         public void Configure(
             string playerId,
@@ -76,6 +85,10 @@ namespace HiveChameleon.Presentation
                 bodyColor,
                 accentColor
             );
+            HumanoidPlayerFactory.SharePaintAppearance(_hiderArt, _hunterArt);
+            _hiderRig = HumanoidPlayerFactory.PresentationRigFor(_hiderArt);
+            _hunterRig = HumanoidPlayerFactory.PresentationRigFor(_hunterArt);
+            _previousFramePosition = transform.position;
 
             _hitbox = gameObject.AddComponent<CapsuleCollider>();
             _hitbox.center = new Vector3(0f, 0.95f, 0f);
@@ -196,6 +209,82 @@ namespace HiveChameleon.Presentation
             _pose = Mathf.Clamp(pose, 0, 5);
             ApplyPose(_hiderArt);
             ApplyPose(_hunterArt);
+            if (_hitbox != null)
+            {
+                _hitbox.height = _pose == 3 ? 1.25f : 1.9f;
+                _hitbox.center = new Vector3(0f, _hitbox.height * 0.5f, 0f);
+            }
+        }
+
+        public bool ApplyPaintStroke(PaintStrokeSnapshot stroke)
+        {
+            if (
+                stroke == null
+                || stroke.sequence <= _lastPaintSequence
+                || stroke.points == null
+                || stroke.material == null
+            )
+            {
+                return false;
+            }
+            PaintMaterialValues material = PaintMaterialFrom(stroke.material);
+            var points = new List<Vector2>(stroke.points.Length);
+            for (int index = 0; index < stroke.points.Length; index++)
+            {
+                points.Add(new Vector2(stroke.points[index].u, stroke.points[index].v));
+            }
+            bool hiderApplied = ApplyPaintStrokeTo(_hiderArt, stroke, points, material);
+            if (!hiderApplied)
+            {
+                return false;
+            }
+            _lastPaintSequence = stroke.sequence;
+            return true;
+        }
+
+        private static bool ApplyPaintStrokeTo(
+            GameObject art,
+            PaintStrokeSnapshot stroke,
+            IReadOnlyList<Vector2> points,
+            PaintMaterialValues material
+        )
+        {
+            PaintableBody body = HumanoidPlayerFactory.PaintableBodyFor(art);
+            return body != null
+                && body.BodyId == stroke.body_id
+                && body.ApplyStroke(
+                    stroke.renderer_id,
+                    points,
+                    stroke.radius,
+                    stroke.hardness,
+                    stroke.opacity,
+                    material,
+                    (PaintChannels)stroke.channels
+                );
+        }
+
+        private static PaintMaterialValues PaintMaterialFrom(
+            PaintMaterialSnapshot snapshot
+        )
+        {
+            return new PaintMaterialValues
+            {
+                BaseColorLinear = new Color(
+                    snapshot.base_r,
+                    snapshot.base_g,
+                    snapshot.base_b,
+                    1f
+                ),
+                Metallic = snapshot.metallic,
+                Roughness = snapshot.roughness,
+                EmissionColorLinear = new Color(
+                    snapshot.emission_r,
+                    snapshot.emission_g,
+                    snapshot.emission_b,
+                    1f
+                ),
+                EmissionIntensity = snapshot.emission_intensity,
+            }.Clamped();
         }
 
         private void Update()
@@ -213,6 +302,37 @@ namespace HiveChameleon.Presentation
                     Time.deltaTime * 14f
                 );
             }
+
+            float deltaTime = Mathf.Max(Time.deltaTime, 0.0001f);
+            Vector3 measuredVelocity =
+                (transform.position - _previousFramePosition) / deltaTime;
+            _presentationVelocity = Vector3.Lerp(
+                _presentationVelocity,
+                measuredVelocity,
+                1f - Mathf.Exp(-12f * deltaTime)
+            );
+            _previousFramePosition = transform.position;
+            bool crouching = _pose == 3;
+            bool aiming = _pose == 4 || Role == "hunter";
+            bool painting = _pose == 5;
+            _hiderRig?.SetMotion(
+                _presentationVelocity,
+                9.5f,
+                true,
+                crouching,
+                aiming,
+                painting,
+                0f
+            );
+            _hunterRig?.SetMotion(
+                _presentationVelocity,
+                9.5f,
+                true,
+                crouching,
+                true,
+                false,
+                0f
+            );
 
             float targetScale =
                 Time.unscaledTime < _pulseUntil
@@ -251,11 +371,21 @@ namespace HiveChameleon.Presentation
                 : _accentColor;
             HumanoidPlayerFactory.ApplyColors(_hiderArt, body, accent);
             HumanoidPlayerFactory.ApplyColors(_hunterArt, body, accent);
+            HumanoidPlayerFactory.SetPresentationOverride(
+                _hiderArt,
+                body,
+                _revealActive ? 1f : 0f
+            );
+            HumanoidPlayerFactory.SetPresentationOverride(
+                _hunterArt,
+                body,
+                _revealActive ? 1f : 0f
+            );
         }
 
         private void ApplyRevealFrame()
         {
-            float frequency = _revealFound ? 7f : 3.5f;
+            float frequency = _revealFound ? 7f : 8.5f;
             float pulse = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * frequency);
             Color outcome = _revealFound
                 ? FoundRevealColor
@@ -268,6 +398,8 @@ namespace HiveChameleon.Presentation
             );
             HumanoidPlayerFactory.ApplyColors(_hiderArt, body, accent);
             HumanoidPlayerFactory.ApplyColors(_hunterArt, body, accent);
+            HumanoidPlayerFactory.SetPresentationOverride(_hiderArt, body, 1f);
+            HumanoidPlayerFactory.SetPresentationOverride(_hunterArt, body, 1f);
             if (_nameplate != null)
             {
                 _nameplate.color = Color.Lerp(outcome, Color.white, pulse * 0.65f);
@@ -328,19 +460,6 @@ namespace HiveChameleon.Presentation
             art.transform.localPosition = Vector3.zero;
             art.transform.localRotation = Quaternion.identity;
             art.transform.localScale = Vector3.one;
-            switch (_pose)
-            {
-                case 3:
-                    art.transform.localPosition = new Vector3(0f, -0.24f, 0f);
-                    art.transform.localScale = new Vector3(1f, 0.84f, 1f);
-                    break;
-                case 4:
-                    art.transform.localRotation = Quaternion.Euler(0f, 0f, -4f);
-                    break;
-                case 5:
-                    art.transform.localRotation = Quaternion.Euler(0f, 0f, 7f);
-                    break;
-            }
         }
     }
 }

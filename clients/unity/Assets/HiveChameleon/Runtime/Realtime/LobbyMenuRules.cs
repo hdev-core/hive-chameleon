@@ -38,11 +38,6 @@ namespace HiveChameleon.Realtime
             return round != null
                 && IsUuidV7(round.map_version_id)
                 && string.Equals(
-                    round.map_content_version,
-                    CityDistrictMap.ContentVersion,
-                    StringComparison.Ordinal
-                )
-                && string.Equals(
                     round.game_server_build_version,
                     SupportedGameServerBuildVersion,
                     StringComparison.Ordinal
@@ -52,16 +47,7 @@ namespace HiveChameleon.Realtime
                     SupportedProtocolVersion,
                     StringComparison.Ordinal
                 )
-                && string.Equals(
-                    round.authority_geometry_version,
-                    CityDistrictMap.AuthorityGeometryVersion,
-                    StringComparison.Ordinal
-                )
-                && string.Equals(
-                    round.authority_geometry_digest,
-                    CityDistrictMap.AuthorityGeometryDigest,
-                    StringComparison.Ordinal
-                );
+                && AuthoritativeArenaCatalog.TryResolve(round, out _);
         }
 
         public static bool IsEligibleSpectator(
@@ -191,7 +177,7 @@ namespace HiveChameleon.Realtime
             }
             if (!IsUuidV7(lobby.configuration?.map_version_id))
             {
-                reason = "Chroma District is not available for this lobby.";
+                reason = "Select an available map before starting.";
                 return false;
             }
 

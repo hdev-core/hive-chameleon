@@ -641,7 +641,7 @@ The vertical slice contains one polished official map with multiple visually dis
 The map is static but supports traversal through walking, sprinting, crouching, jumping, and climbing. It should provide diverse colors, materials, lighting conditions, geometry, and silhouette opportunities without relying on interactive props.
 
 The implemented M4 content and interface baseline is documented in
-[Prism Foundry vertical slice](prism-foundry-vertical-slice.md).
+[Neon Service Arcade vertical slice](neon-service-arcade-vertical-slice.md).
 
 ### 28.2 Creator Tool Direction
 

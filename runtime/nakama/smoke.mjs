@@ -308,11 +308,13 @@ try {
     started.round.status !== 'preparing' ||
     started.round.sequence_number !== 1 ||
     started.round.map_version_id !== officialMapVersionId ||
-    !/^m\d+-\d+$/.test(started.round.map_content_version) ||
+    started.round.map_slug !== 'neon-service-arcade' ||
+    started.round.map_content_version !== 'm2' ||
     started.round.game_server_build_version !== 'hive-chameleon-m4-dev' ||
     started.round.protocol_version !== 'm4-v2' ||
-    started.round.authority_geometry_version !== 'chroma-district-authority-proxy-1' ||
-    !/^sha256:[0-9a-f]{64}$/.test(started.round.authority_geometry_digest)
+    started.round.authority_geometry_version !== 'neon-service-arcade-authority-2' ||
+    started.round.authority_geometry_digest !==
+      'sha256:630e96108db3af745cadc89f5bce8b16cef0024172dba2733d510c3576ede412'
   ) {
     throw new Error('lobby.start did not create a preparing round');
   }
@@ -389,6 +391,76 @@ try {
     throw new Error('scoreboard was not restricted to authoritative Hider entries');
   }
 
+  const paintableRendererIds = [
+    'body.abdomen',
+    'body.chest',
+    'body.head',
+    'body.left-ankle-band',
+    'body.left-boot',
+    'body.left-calf',
+    'body.left-elbow',
+    'body.left-forearm',
+    'body.left-hand',
+    'body.left-knee',
+    'body.left-shoulder-cap',
+    'body.left-thigh',
+    'body.left-upper-arm',
+    'body.left-wrist-band',
+    'body.neck-shell',
+    'body.pelvis',
+    'body.right-ankle-band',
+    'body.right-boot',
+    'body.right-calf',
+    'body.right-elbow',
+    'body.right-forearm',
+    'body.right-hand',
+    'body.right-knee',
+    'body.right-shoulder-cap',
+    'body.right-thigh',
+    'body.right-upper-arm',
+    'body.right-wrist-band',
+  ];
+  const paintStrokeCount = 40;
+  for (let sequence = 1; sequence <= paintStrokeCount; sequence += 1) {
+    const points = Array.from({ length: 40 }, (_, index) => ({
+      // Unity JsonUtility emits float round-trip decimals. Exercise those larger values so
+      // this catches Nakama's 4 KiB WebSocket read limit, not merely runtime validation.
+      u: 0.12345678359270096 + index * 0.000001,
+      v: 0.8765432238578796 - index * 0.000001,
+    }));
+    await returningHostSocket.sendMatchState(
+      created.match_id,
+      16,
+      JSON.stringify({
+        body_id: 'standard-humanoid-v1',
+        channels: 1,
+        client_sequence: sequence,
+        client_tick: sequence,
+        hardness: 1,
+        material: {
+          base_b: 0.4567891061306,
+          base_g: 0.8765432238578796,
+          base_r: 0.12345678359270096,
+          emission_b: 0.5678911805152893,
+          emission_g: 0.7654321193695068,
+          emission_intensity: 7.123456001281738,
+          emission_r: 0.2345678061246872,
+          metallic: 0.3456788957118988,
+          roughness: 0.6543219089508057,
+        },
+        opacity: 0.75,
+        points,
+        radius: 0.04,
+        renderer_id: paintableRendererIds[(sequence - 1) % paintableRendererIds.length],
+      }),
+    );
+    await returningHostStates.waitForPaintSnapshot(
+      (stroke) => stroke.round_id === started.round.id && stroke.client_sequence === sequence,
+      `paint acknowledgement ${sequence}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 110));
+  }
+
   let staleVersionRejected = false;
   try {
     await lobbyRpc(guestSocket, 'lobby.update_configuration', {
@@ -428,6 +500,27 @@ try {
     'target_slot_count' in hunting
   ) {
     throw new Error('public Casual hunting state is invalid');
+  }
+
+  await guestStates.waitForPaintBatch(
+    (batch) =>
+      Array.isArray(batch.strokes) &&
+      batch.strokes.some(
+        (stroke) => stroke.round_id === started.round.id && stroke.sequence === paintStrokeCount,
+      ),
+    'complete paced paint replay at hunting start',
+  );
+  const replayedPaintStrokes = guestStates
+    .history(19)
+    .flatMap((batch) => batch.strokes ?? [])
+    .filter((stroke) => stroke.round_id === started.round.id);
+  if (
+    replayedPaintStrokes.length !== paintStrokeCount ||
+    replayedPaintStrokes.some((stroke, index) => stroke.sequence !== index + 1) ||
+    new Set(replayedPaintStrokes.map((stroke) => stroke.renderer_id)).size !==
+      paintableRendererIds.length
+  ) {
+    throw new Error('paced paint replay was incomplete, out of order, or omitted body surfaces');
   }
 
   const smokeHiderAnchor = selectSmokeHiderAnchor(initialHiderAvatar);
@@ -912,23 +1005,14 @@ try {
 }
 
 function selectSmokeHiderAnchor(initialAvatar) {
-  const spawns = [
-    [-12.4, -7.4, -20, -9],
-    [5.7, -7.8, -20, 2],
-    [12.7, 11.6, -20, -9],
-    [-12.8, 9.8, -20, -10],
-    [19.2, 5.2, -20, -9],
-    [-19.1, 5.4, -20, -10],
-    [8.2, -18.7, -2, 20],
-    [-8.1, -18.4, -16, 9],
-  ];
+  const spawns = [[-8, -4.2, -8, -4.2]];
   const match = spawns.find(
     ([spawnX, spawnZ]) =>
       Math.abs(initialAvatar.position_x - spawnX) < 0.001 &&
       Math.abs(initialAvatar.position_z - spawnZ) < 0.001,
   );
   if (!match) {
-    throw new Error('authoritative Hider spawn has no geometry-safe smoke anchor');
+    throw new Error('authoritative Hider did not use the deterministic smoke spawn');
   }
   return { x: match[2], y: 0.05, z: match[3] };
 }
@@ -1063,6 +1147,9 @@ function trackMatchStates(socket) {
     [12, new Set()],
     [13, new Set()],
     [15, new Set()],
+    [17, new Set()],
+    [18, new Set()],
+    [19, new Set()],
   ]);
   socket.onmatchdata = (message) => {
     const opcode = Number(message.op_code);
@@ -1121,5 +1208,9 @@ function trackMatchStates(socket) {
     waitForLikeResult: (predicate, description) => waitFor(12, predicate, description),
     waitForReconnect: (predicate, description) => waitFor(13, predicate, description),
     waitForAvatar: (predicate, description) => waitFor(15, predicate, description),
+    waitForPaintSnapshot: (predicate, description) => waitFor(17, predicate, description),
+    waitForPaintResult: (predicate, description) => waitFor(18, predicate, description),
+    waitForPaintBatch: (predicate, description) => waitFor(19, predicate, description),
+    history: (opcode) => [...(historyByOpcode.get(opcode) ?? [])],
   };
 }

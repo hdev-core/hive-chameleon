@@ -12,9 +12,9 @@ func TestOfficialAuthorityGeometryIsVersionedAndDeterministic(t *testing.T) {
 	if officialAuthorityGeometry.SchemaVersion != 1 ||
 		officialAuthorityGeometry.Version !=
 			officialAuthorityGeometryVersion ||
-		officialAuthorityGeometry.MapSlug != defaultOfficialMapSlug ||
+		officialAuthorityGeometry.MapSlug != legacyOfficialMapSlug ||
 		officialAuthorityGeometry.ContentVersion !=
-			defaultOfficialMapContentVersion {
+			legacyOfficialMapContentVersion {
 		t.Fatalf(
 			"unexpected authority geometry identity: %#v",
 			officialAuthorityGeometry,

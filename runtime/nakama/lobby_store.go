@@ -17,8 +17,8 @@ import (
 const (
 	lobbyDatabaseURLEnv              = "HC_NAKAMA_DATABASE_URL"
 	lobbyPasswordCost                = 12
-	defaultOfficialMapSlug           = "prism-foundry"
-	defaultOfficialMapContentVersion = "m4-5"
+	defaultOfficialMapSlug           = neonServiceArcadeMapSlug
+	defaultOfficialMapContentVersion = neonServiceArcadeContentVersion
 )
 
 // abandonedRoundGraceDuration bounds how long a round may go without a live-match
@@ -231,6 +231,8 @@ type lobbyQueryer interface {
 }
 
 type officialRoundMapContract struct {
+	MapSlug                string
+	DisplayName            string
 	ContentVersion         string
 	GameServerBuildVersion string
 	ProtocolVersion        string
@@ -471,7 +473,9 @@ func loadOfficialRoundMapContract(
 	var contract officialRoundMapContract
 	if err := queryer.QueryRowContext(
 		ctx,
-		`SELECT version.version_number,
+		`SELECT map_definition.slug,
+		        map_definition.title,
+		        version.version_number,
 		        min(distribution.required_game_build_version),
 		        min(distribution.required_protocol_version)
 		   FROM content.map AS map_definition
@@ -480,17 +484,17 @@ func loadOfficialRoundMapContract(
 		   JOIN content.map_distribution AS distribution
 		     ON distribution.map_version_id = version.id
 		  WHERE version.id = $1
-		    AND map_definition.slug = $2
 		    AND map_definition.origin = 'official'
 		    AND map_definition.lifecycle = 'published'
 		    AND map_definition.creator_player_id IS NULL
-		    AND version.version_number = $3
 		    AND version.status = 'published'
 		    AND distribution.platform IN ('desktop', 'web')
 		    AND distribution.state = 'available'
 		    AND distribution.required_protocol_version IS NOT NULL
 		    AND distribution.published_at IS NOT NULL
-		  GROUP BY version.version_number
+		  GROUP BY map_definition.slug,
+		           map_definition.title,
+		           version.version_number
 		 HAVING count(*) = 2
 		    AND count(DISTINCT distribution.platform) = 2
 		    AND min(distribution.required_game_build_version)
@@ -498,9 +502,9 @@ func loadOfficialRoundMapContract(
 		    AND min(distribution.required_protocol_version)
 		        = max(distribution.required_protocol_version)`,
 		mapVersionID,
-		defaultOfficialMapSlug,
-		defaultOfficialMapContentVersion,
 	).Scan(
+		&contract.MapSlug,
+		&contract.DisplayName,
 		&contract.ContentVersion,
 		&contract.GameServerBuildVersion,
 		&contract.ProtocolVersion,
@@ -508,7 +512,7 @@ func loadOfficialRoundMapContract(
 		if errors.Is(err, sql.ErrNoRows) {
 			return officialRoundMapContract{}, newLobbyProblem(
 				grpcFailedPrecondition,
-				"the selected map is not one compatible official Chroma District release",
+				"the selected map is not an available official release",
 			)
 		}
 		return officialRoundMapContract{}, fmt.Errorf(
@@ -516,11 +520,20 @@ func loadOfficialRoundMapContract(
 			err,
 		)
 	}
+	if _, ok := officialArenaForContent(
+		contract.MapSlug,
+		contract.ContentVersion,
+	); !ok {
+		return officialRoundMapContract{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"the selected map is not bundled by this game server",
+		)
+	}
 	if contract.GameServerBuildVersion != gameServerBuildVersion ||
 		contract.ProtocolVersion != matchProtocolVersion {
 		return officialRoundMapContract{}, newLobbyProblem(
 			grpcFailedPrecondition,
-			"the official map distribution is incompatible with this game server",
+			"the selected map distribution is incompatible with this game server",
 		)
 	}
 	return contract, nil
@@ -739,7 +752,7 @@ func (s *postgresLobbyStore) UpdateConfiguration(
 	if next.MapVersionID == nil {
 		return lobbySnapshot{}, newLobbyProblem(
 			grpcFailedPrecondition,
-			"the official Chroma District map is required",
+			"the official arena is required",
 		)
 	}
 	if _, err := loadOfficialRoundMapContract(

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using HiveChameleon.Presentation;
 using Nakama;
 using UnityEngine;
 
@@ -25,6 +26,14 @@ namespace HiveChameleon.Realtime
         private const long RoundReconnectOpcode = 13;
         private const long AvatarStateCommandOpcode = 14;
         private const long AvatarStateSnapshotOpcode = 15;
+        private const long PaintStrokeCommandOpcode = 16;
+        private const long PaintStrokeSnapshotOpcode = 17;
+        private const long PaintStrokeResultOpcode = 18;
+        private const long PaintStrokeBatchOpcode = 19;
+        // Nakama's configured socket.max_message_size_bytes is 4096. The SDK base64-encodes
+        // match data and adds a JSON envelope, so reject an oversized raw payload locally before
+        // it can cause the server to close the entire WebSocket.
+        public const int MaximumPaintCommandJsonBytes = 2600;
         private const float MinimumAvatarPitch = -58f;
         private const float MaximumAvatarPitch = 62f;
 
@@ -36,6 +45,8 @@ namespace HiveChameleon.Realtime
         private string _expectedJoiningMatchId = string.Empty;
         private readonly Dictionary<string, int> _avatarSequenceByPlayer =
             new Dictionary<string, int>();
+        private readonly Dictionary<string, long> _paintSequenceByPlayer =
+            new Dictionary<string, long>();
 
         public NakamaRealtimeConnection(string serverKey)
         {
@@ -94,6 +105,10 @@ namespace HiveChameleon.Realtime
         public event Action<RoundReconnectSnapshot> RoundReconnectChanged;
 
         public event Action<AvatarStateSnapshot> AvatarStateReceived;
+
+        public event Action<PaintStrokeSnapshot> PaintStrokeReceived;
+
+        public event Action<PaintStrokeResult> PaintStrokeResolved;
 
         public async Task ConnectAsync(
             RealtimeSessionCredential credential,
@@ -312,6 +327,44 @@ namespace HiveChameleon.Realtime
             return response;
         }
 
+        public async Task<AvailableMapSnapshot[]> LoadAvailableMapsAsync(
+            CancellationToken cancellationToken
+        )
+        {
+            RequireConnected();
+            cancellationToken.ThrowIfCancellationRequested();
+            IApiRpc rpc = await _client.RpcAsync(
+                _session,
+                "lobby.maps",
+                "{}",
+                canceller: cancellationToken
+            );
+            cancellationToken.ThrowIfCancellationRequested();
+            AvailableMapResponse response =
+                JsonUtility.FromJson<AvailableMapResponse>(rpc.Payload);
+            if (response?.maps == null || response.maps.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "No compatible official maps are available."
+                );
+            }
+            for (int index = 0; index < response.maps.Length; index++)
+            {
+                AvailableMapSnapshot map = response.maps[index];
+                if (
+                    map == null
+                    || !LobbyMenuRules.IsUuidV7(map.map_version_id)
+                    || !AuthoritativeArenaCatalog.Supports(map)
+                )
+                {
+                    throw new InvalidOperationException(
+                        "The server returned an incompatible map catalog."
+                    );
+                }
+            }
+            return response.maps;
+        }
+
         public async Task<LobbyRpcResponse> JoinLobbyAsync(
             string lobbyId,
             string password,
@@ -489,6 +542,60 @@ namespace HiveChameleon.Realtime
                 _match.Id,
                 AvatarStateCommandOpcode,
                 JsonUtility.ToJson(command)
+            );
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        public async Task SendPaintStrokeAsync(
+            PaintStrokeCommand command,
+            CancellationToken cancellationToken
+        )
+        {
+            RequireConnected();
+            if (command == null)
+            {
+                throw new ArgumentNullException(nameof(command));
+            }
+            if (_match == null || string.IsNullOrWhiteSpace(_match.Id))
+            {
+                throw new InvalidOperationException(
+                    "Join an authoritative lobby match before painting."
+                );
+            }
+            if (
+                CurrentRound == null
+                || (
+                    CurrentRound.status != "preparing"
+                    && CurrentRound.status != "hiding"
+                )
+            )
+            {
+                throw new InvalidOperationException(
+                    "Painting is closed in the current round phase."
+                );
+            }
+            string currentRole = CurrentRoundPlayerState?.role
+                ?? CurrentRoleAssignment?.role;
+            if (currentRole != "hider")
+            {
+                throw new InvalidOperationException(
+                    "Only the server-assigned Hider may paint this body."
+                );
+            }
+            string payload = JsonUtility.ToJson(command);
+            int payloadBytes = Encoding.UTF8.GetByteCount(payload);
+            if (payloadBytes > MaximumPaintCommandJsonBytes)
+            {
+                throw new InvalidOperationException(
+                    $"Paint command is {payloadBytes} bytes; the safe limit is "
+                        + $"{MaximumPaintCommandJsonBytes}. Split the stroke before sending."
+                );
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            await _socket.SendMatchStateAsync(
+                _match.Id,
+                PaintStrokeCommandOpcode,
+                payload
             );
             cancellationToken.ThrowIfCancellationRequested();
         }
@@ -1104,12 +1211,82 @@ namespace HiveChameleon.Realtime
                             AvatarStateReceived?.Invoke(avatar);
                         }
                         break;
+                    case PaintStrokeSnapshotOpcode:
+                        PaintStrokeSnapshot paint =
+                            JsonUtility.FromJson<PaintStrokeSnapshot>(payload);
+                        PublishPaintStroke(paint);
+                        break;
+                    case PaintStrokeResultOpcode:
+                        PaintStrokeResult result =
+                            JsonUtility.FromJson<PaintStrokeResult>(payload);
+                        if (
+                            result == null
+                            || string.IsNullOrWhiteSpace(result.round_id)
+                            || result.client_sequence < 1
+                        )
+                        {
+                            throw new InvalidOperationException(
+                                "Paint-stroke result payload is invalid."
+                            );
+                        }
+                        if (IsCurrentRound(result.round_id))
+                        {
+                            PaintStrokeResolved?.Invoke(result);
+                        }
+                        break;
+                    case PaintStrokeBatchOpcode:
+                        PaintStrokeBatch batch =
+                            JsonUtility.FromJson<PaintStrokeBatch>(payload);
+                        if (batch?.strokes == null)
+                        {
+                            throw new InvalidOperationException(
+                                "Paint-stroke batch payload is invalid."
+                            );
+                        }
+                        for (int index = 0; index < batch.strokes.Length; index++)
+                        {
+                            PublishPaintStroke(batch.strokes[index]);
+                        }
+                        break;
                 }
             }
             catch (Exception exception)
             {
                 Debug.LogWarning($"Could not apply authoritative match state: {exception.Message}");
             }
+        }
+
+        private void PublishPaintStroke(PaintStrokeSnapshot paint)
+        {
+            if (
+                paint == null
+                || string.IsNullOrWhiteSpace(paint.round_id)
+                || string.IsNullOrWhiteSpace(paint.player_id)
+                || string.IsNullOrWhiteSpace(paint.body_id)
+                || string.IsNullOrWhiteSpace(paint.renderer_id)
+                || paint.points == null
+                || paint.points.Length == 0
+                || paint.sequence < 1
+            )
+            {
+                throw new InvalidOperationException("Paint-stroke payload is invalid.");
+            }
+            if (!IsCurrentRound(paint.round_id))
+            {
+                return;
+            }
+            if (
+                _paintSequenceByPlayer.TryGetValue(
+                    paint.player_id,
+                    out long lastPaintSequence
+                )
+                && paint.sequence <= lastPaintSequence
+            )
+            {
+                return;
+            }
+            _paintSequenceByPlayer[paint.player_id] = paint.sequence;
+            PaintStrokeReceived?.Invoke(paint);
         }
 
         private void PublishLobby(LobbySnapshot lobby)
@@ -1191,6 +1368,7 @@ namespace HiveChameleon.Realtime
             LastLikeResult = null;
             CurrentReconnectState = null;
             _avatarSequenceByPlayer.Clear();
+            _paintSequenceByPlayer.Clear();
         }
     }
 }
