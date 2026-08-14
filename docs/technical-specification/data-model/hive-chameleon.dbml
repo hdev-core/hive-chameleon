@@ -48,6 +48,7 @@ Enum identity.external_identity_status {
 Enum identity.authentication_method {
   direct_hive_challenge
   google_oidc
+  guest
 }
 
 Enum identity.hive_control_state {
@@ -511,13 +512,15 @@ Table identity.player {
   id uuid [pk, not null, note: 'Application-generated UUIDv7']
   hive_username varchar(16) [not null, unique]
   hive_control_state identity.hive_control_state [not null]
+  is_guest boolean [not null, default: false]
   ~created_record
 
   checks {
     `hive_username = lower(hive_username)` [name: 'chk_player_hive_username_lower']
+    `NOT is_guest OR (hive_username ~ '^guest-[0-9a-f]{10}$' AND hive_control_state = 'authority_claimed_recovery_pending')` [name: 'chk_player_guest_identity']
   }
 
-  Note: 'Playable identity. Direct-Hive login may create it after signature verification; Google provisioning creates it only when the real Hive account, expected authorities, and initial RC are verified ready. No guest/pending player is stored.'
+  Note: 'Playable identity. Direct-Hive and provisioned users represent verified Hive accounts. Public WebGL guests are explicitly marked, application-only, and ineligible for Hive signing or custody.'
 }
 
 Table identity.hive_login_challenge {

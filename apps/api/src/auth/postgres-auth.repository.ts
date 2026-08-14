@@ -14,6 +14,7 @@ interface PlayerRow {
   hive_control_state: PlayerIdentity['hiveControlState'];
   hive_username: string;
   id: string;
+  is_guest: boolean;
 }
 
 interface ChallengeRow {
@@ -34,6 +35,7 @@ interface ExternalIdentityRow {
   hive_control_state: PlayerIdentity['hiveControlState'] | null;
   hive_username: string | null;
   id: string | null;
+  is_guest: boolean | null;
   player_id: string | null;
   status: ExternalIdentityRecord['status'];
 }
@@ -91,8 +93,21 @@ export class PostgresAuthRepository implements AuthRepository {
        VALUES ($1, $2, 'external_self_custodial')
        ON CONFLICT (hive_username) DO UPDATE
          SET hive_username = EXCLUDED.hive_username
-       RETURNING id, hive_username, hive_control_state`,
+       RETURNING id, hive_username, hive_control_state, is_guest`,
       [createUuidV7(), hiveUsername],
+    );
+    return mapPlayer(requireRow(result.rows[0]));
+  }
+
+  public async createGuestPlayer(): Promise<PlayerIdentity> {
+    const id = createUuidV7();
+    const guestName = `guest-${id.replaceAll('-', '').slice(-10)}`;
+    const result = await this.requirePool().query<PlayerRow>(
+      `INSERT INTO identity.player (
+         id, hive_username, hive_control_state, is_guest
+       ) VALUES ($1, $2, 'authority_claimed_recovery_pending', true)
+       RETURNING id, hive_username, hive_control_state, is_guest`,
+      [id, guestName],
     );
     return mapPlayer(requireRow(result.rows[0]));
   }
@@ -136,7 +151,8 @@ export class PostgresAuthRepository implements AuthRepository {
   ): Promise<ActiveSessionRecord | null> {
     return withTransaction(this.requirePool(), async (client) => {
       const result = await client.query<SessionRow>(
-        `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username, p.hive_control_state
+        `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username,
+                p.hive_control_state, p.is_guest
            FROM identity.auth_session s
            JOIN identity.player p ON p.id = s.player_id
           WHERE s.refresh_token_hash = $1
@@ -161,7 +177,8 @@ export class PostgresAuthRepository implements AuthRepository {
 
   public async findActiveSession(sessionId: string, at: Date): Promise<ActiveSessionRecord | null> {
     const result = await this.requirePool().query<SessionRow>(
-      `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username, p.hive_control_state
+      `SELECT s.id AS session_id, s.expires_at, p.id, p.hive_username,
+              p.hive_control_state, p.is_guest
          FROM identity.auth_session s
          JOIN identity.player p ON p.id = s.player_id
         WHERE s.id = $1 AND s.revoked_at IS NULL AND s.expires_at > $2`,
@@ -198,7 +215,7 @@ export class PostgresAuthRepository implements AuthRepository {
          RETURNING id, player_id, status
        )
        SELECT e.id AS external_identity_id, e.player_id, e.status,
-              p.id, p.hive_username, p.hive_control_state
+              p.id, p.hive_username, p.hive_control_state, p.is_guest
          FROM upserted e
          LEFT JOIN identity.player p ON p.id = e.player_id`,
       [createUuidV7(), verifiedIssuer, subjectLookupHash, authenticatedAt],
@@ -213,6 +230,7 @@ export class PostgresAuthRepository implements AuthRepository {
               hive_control_state: requireValue(row.hive_control_state),
               hive_username: requireValue(row.hive_username),
               id: requireValue(row.id),
+              is_guest: requireValue(row.is_guest),
             }),
       status: row.status,
     };
@@ -246,6 +264,7 @@ function mapPlayer(row: PlayerRow): PlayerIdentity {
     hiveControlState: row.hive_control_state,
     hiveUsername: row.hive_username,
     id: row.id,
+    isGuest: row.is_guest,
   };
 }
 

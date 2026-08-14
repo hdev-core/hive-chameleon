@@ -54,6 +54,8 @@ namespace HiveChameleon.Realtime
     {
         private const string CommandLineMarker =
             "--hc-authoritative-development";
+        private const string RuntimeCommandLineMarker =
+            "--hc-authoritative-runtime";
         private const string ApiBaseUrlArgument = "--hc-api-base-url";
         private const string ServerKeyArgument = "--hc-nakama-server-key";
         private const string BearerTokenArgument = "--hc-bearer-token";
@@ -79,6 +81,14 @@ namespace HiveChameleon.Realtime
             out AuthoritativeDevelopmentCredential credential
         )
         {
+#if !UNITY_EDITOR
+            // A published WebGL page obtains one scoped bearer token per browser
+            // before starting Unity and supplies it through config.arguments.
+            if (TryFromCommandLine(Environment.GetCommandLineArgs(), out credential))
+            {
+                return true;
+            }
+#endif
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
 #if UNITY_EDITOR
             if (
@@ -87,11 +97,6 @@ namespace HiveChameleon.Realtime
                 )
                 && TryFromConfiguration(configuration, out credential)
             )
-            {
-                return true;
-            }
-#else
-            if (TryFromCommandLine(Environment.GetCommandLineArgs(), out credential))
             {
                 return true;
             }
@@ -118,12 +123,9 @@ namespace HiveChameleon.Realtime
             }
 #endif
 
-            credential = default;
-            return false;
-#else
-            credential = default;
-            return false;
 #endif
+            credential = default;
+            return false;
         }
 
         public static bool TryReadEditorConfiguration(
@@ -215,7 +217,10 @@ namespace HiveChameleon.Realtime
             credential = default;
             if (
                 arguments == null
-                || Array.IndexOf(arguments, CommandLineMarker) < 0
+                || (
+                    Array.IndexOf(arguments, CommandLineMarker) < 0
+                    && Array.IndexOf(arguments, RuntimeCommandLineMarker) < 0
+                )
             )
             {
                 return false;

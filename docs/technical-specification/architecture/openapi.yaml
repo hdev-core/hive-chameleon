@@ -19,7 +19,7 @@ servers:
     description: Relative client API base; deployment hostname is configuration.
 tags:
   - name: Authentication
-    description: Direct-Hive and Google game-session establishment.
+    description: Direct-Hive, Google, and environment-gated guest game-session establishment.
   - name: Onboarding
     description: Permanent username and real-Hive-account provisioning.
   - name: Sessions
@@ -103,6 +103,33 @@ paths:
           $ref: '#/components/responses/UnauthorizedProblem'
         '409':
           $ref: '#/components/responses/ConflictProblem'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableProblem'
+  /auth/guest:
+    post:
+      tags: [Authentication]
+      operationId: createGuestSession
+      summary: Establish an isolated guest session for the public WebGL client
+      description: |
+        Available only in explicitly enabled public-game environments. Guest identities
+        cannot sign Hive operations, use custody, or impersonate durable Hive players.
+      x-priority: P0
+      x-maturity: committed
+      security: []
+      responses:
+        '201':
+          description: Isolated guest session
+          headers:
+            Cache-Control:
+              description: Prevent storage of browser session credentials by HTTP caches
+              required: true
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokens'
         '503':
           $ref: '#/components/responses/ServiceUnavailableProblem'
   /auth/google/exchange:

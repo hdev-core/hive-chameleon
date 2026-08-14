@@ -51,7 +51,8 @@ unity_editor="$(find_unity_editor)" || {
   exit 1
 }
 
-echo "Building the credential-neutral authoritative Unity WebGL client..."
+build_configuration="${HIVE_CHAMELEON_BUILD_CONFIGURATION:-development}"
+echo "Building the credential-neutral ${build_configuration} Unity WebGL client..."
 env \
   UNITY_BUILD_TARGET=webgl \
   "${unity_editor}" \
@@ -64,9 +65,6 @@ env \
 required_files=(
   "index.html"
   "Build/WebGL.loader.js"
-  "Build/WebGL.framework.js"
-  "Build/WebGL.data"
-  "Build/WebGL.wasm"
 )
 
 for required_file in "${required_files[@]}"; do
@@ -76,6 +74,16 @@ for required_file in "${required_files[@]}"; do
   fi
 done
 
-echo "Credential-neutral WebGL development build ready at ${build_path}"
-echo "Use npm run authoritative:webgl to supply local per-client sessions."
-echo "This development build has no production login flow and must not be deployed."
+for payload in WebGL.framework.js WebGL.data WebGL.wasm; do
+  if ! compgen -G "${build_path}/Build/${payload}*" >/dev/null; then
+    echo "Unity build is incomplete: missing Build/${payload}." >&2
+    exit 1
+  fi
+done
+
+echo "Credential-neutral WebGL ${build_configuration} build ready at ${build_path}"
+if [[ "${build_configuration}" == "production" ]]; then
+  echo "Run scripts/prepare-public-webgl.mjs before deployment."
+else
+  echo "Use npm run authoritative:webgl to supply local per-client sessions."
+fi

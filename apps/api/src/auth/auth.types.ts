@@ -11,6 +11,7 @@ export interface PlayerIdentity {
     | 'authority_claimed_recovery_pending'
     | 'self_custody_complete';
   readonly hiveUsername: string;
+  readonly isGuest: boolean;
 }
 
 export interface HiveLoginChallengeRecord {
@@ -33,7 +34,7 @@ export interface ActiveSessionRecord extends BridgePrincipal {
 }
 
 export interface NewSession {
-  readonly authenticationMethod: 'direct_hive_challenge' | 'google_oidc';
+  readonly authenticationMethod: 'direct_hive_challenge' | 'google_oidc' | 'guest';
   readonly custodialSigningEligible: boolean;
   readonly expiresAt: Date;
   readonly externalIdentityId: string | null;
@@ -59,6 +60,7 @@ export interface AuthRepository {
     consumedAt: Date,
   ): Promise<HiveLoginChallengeRecord | null>;
   findOrCreateDirectHivePlayer(hiveUsername: string): Promise<PlayerIdentity>;
+  createGuestPlayer(): Promise<PlayerIdentity>;
   createSession(session: NewSession): Promise<void>;
   rotateSession(
     currentRefreshTokenHash: string,

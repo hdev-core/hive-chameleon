@@ -16,6 +16,13 @@ const player: PlayerIdentity = {
   hiveControlState: 'external_self_custodial',
   hiveUsername: 'alice',
   id: '01980abc-def0-7abc-8def-0123456789ab',
+  isGuest: false,
+};
+const guestPlayer: PlayerIdentity = {
+  hiveControlState: 'authority_claimed_recovery_pending',
+  hiveUsername: 'guest-0123456789',
+  id: '01980abc-def1-7abc-8def-0123456789ab',
+  isGuest: true,
 };
 
 describe('AuthService', () => {
@@ -27,6 +34,7 @@ describe('AuthService', () => {
     repository = {
       consumeHiveChallenge: vi.fn(),
       createHiveChallenge: vi.fn(),
+      createGuestPlayer: vi.fn().mockResolvedValue(guestPlayer),
       createSession: vi.fn(),
       findActiveSession: vi.fn(),
       findOrCreateDirectHivePlayer: vi.fn().mockResolvedValue(player),
@@ -45,6 +53,25 @@ describe('AuthService', () => {
     expect(result.challenge).toContain('Hive Chameleon login\naudience:test-client\naccount:alice');
     expect(result.expiresAt).toBe('2026-07-23T00:05:00.000Z');
     expect(repository.createHiveChallenge).toHaveBeenCalledOnce();
+  });
+
+  it('issues an isolated guest session only when the environment enables it', async () => {
+    const service = createService(repository, hive, google);
+    const result = await service.createGuestSession(now);
+
+    expect(result.player).toEqual({
+      hiveUsername: 'guest-0123456789',
+      id: guestPlayer.id,
+    });
+    expect(repository.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authenticationMethod: 'guest',
+        custodialSigningEligible: false,
+        externalIdentityId: null,
+        hiveSigningProvider: null,
+        platform: 'webgl',
+      }),
+    );
   });
 
   it('burns a challenge once and issues a revocable session only after posting verification', async () => {
@@ -157,6 +184,7 @@ function config(): AuthConfig {
     hiveRpcUrl: 'https://api.hive.blog/',
     identityLookupKey: Buffer.alloc(32, 2),
     issuer: 'test-api',
+    publicGuestSessionsEnabled: true,
     refreshTokenTtlSeconds: 3_600,
     tokenKey: Buffer.alloc(32, 1),
   };

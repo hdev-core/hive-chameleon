@@ -50,8 +50,15 @@ function loadNakamaBridgeConfig(
   const httpUrl = parseServiceUrl(raw.httpUrl!, ['http:', 'https:'], 'NAKAMA_HTTP_URL');
   const socketUrl = parseServiceUrl(raw.socketUrl!, ['ws:', 'wss:'], 'NAKAMA_SOCKET_URL', true);
   if (nodeEnvironment === 'production') {
-    if (httpUrl.protocol !== 'https:' || socketUrl.protocol !== 'wss:') {
-      throw new Error('Production Nakama HTTP and socket URLs must use TLS.');
+    const privateNetworkHttp =
+      environment.NAKAMA_ALLOW_PRIVATE_NETWORK_HTTP?.trim().toLowerCase() === 'true' &&
+      httpUrl.protocol === 'http:' &&
+      httpUrl.hostname === 'nakama' &&
+      httpUrl.port === '7350';
+    if ((!privateNetworkHttp && httpUrl.protocol !== 'https:') || socketUrl.protocol !== 'wss:') {
+      throw new Error(
+        'Production Nakama endpoints must use TLS unless the HTTP endpoint is the explicitly enabled private Compose service.',
+      );
     }
   }
 

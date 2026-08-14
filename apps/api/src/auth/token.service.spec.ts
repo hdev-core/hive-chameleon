@@ -47,6 +47,7 @@ function config(): AuthConfig {
     hiveRpcUrl: 'https://api.hive.blog/',
     identityLookupKey: Buffer.alloc(32, 2),
     issuer: 'test-api',
+    publicGuestSessionsEnabled: false,
     refreshTokenTtlSeconds: 3_600,
     tokenKey: Buffer.alloc(32, 1),
   };

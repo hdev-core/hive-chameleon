@@ -20,7 +20,7 @@ namespace HiveChameleon.Realtime
             }
             if (string.IsNullOrWhiteSpace(bearerToken))
             {
-                throw new ArgumentException("A development bearer token is required.", nameof(bearerToken));
+                throw new ArgumentException("A bearer token is required.", nameof(bearerToken));
             }
 
             _sessionEndpoint = new Uri(baseUri, "api/v1/realtime/session");

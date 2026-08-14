@@ -1,7 +1,13 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import { createUuidV7 } from '@hive-chameleon/database';
-import { ConflictException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 
 import type { AuthConfig } from './auth.config';
 import {
@@ -122,6 +128,19 @@ export class AuthService {
       false,
       now,
     );
+  }
+
+  public async createGuestSession(now = new Date()): Promise<AuthTokensResponse> {
+    if (!this.config.publicGuestSessionsEnabled) {
+      throw new ServiceUnavailableException({
+        code: 'guest_sessions_unavailable',
+        detail: 'Public guest sessions are not enabled in this environment.',
+        status: 503,
+        title: 'Guest sessions unavailable',
+      });
+    }
+    const player = await this.repository.createGuestPlayer();
+    return this.createSession(player, 'webgl', 'guest', null, null, false, now);
   }
 
   public async exchangeGoogle(

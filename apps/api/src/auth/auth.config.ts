@@ -15,6 +15,7 @@ export interface AuthConfig {
   readonly hiveRpcUrl: string;
   readonly identityLookupKey: Buffer;
   readonly issuer: string;
+  readonly publicGuestSessionsEnabled: boolean;
   readonly refreshTokenTtlSeconds: number;
   readonly tokenKey: Buffer;
 }
@@ -44,6 +45,8 @@ export function loadAuthConfig(environment: NodeJS.ProcessEnv = process.env): Au
     hiveRpcUrl,
     identityLookupKey,
     issuer: environment.AUTH_TOKEN_ISSUER?.trim() || 'hive-chameleon-api',
+    publicGuestSessionsEnabled:
+      environment.PUBLIC_GUEST_SESSIONS_ENABLED?.trim().toLowerCase() === 'true',
     refreshTokenTtlSeconds: readInteger(
       environment.AUTH_REFRESH_TTL_SECONDS,
       30 * 24 * 60 * 60,
