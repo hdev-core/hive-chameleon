@@ -48,9 +48,11 @@ npm run authoritative:webgl -- --clients 2
 ```
 
 The generated artifact contains no embedded credential. The localhost launcher supplies a
-different short-lived session at each client URL. It never falls back to a simulated round and
-must not be deployed because production player-login/session delivery is not implemented. The
-API, Nakama, workers, PostgreSQL, and signer are always-on Hetzner workloads.
+different short-lived session at each client URL. It never falls back to a simulated round. The
+live Hetzner deployment serves a release build at
+[`https://hive-signer.cloverapis.xyz/game/`](https://hive-signer.cloverapis.xyz/game/); every
+browser obtains an isolated, revocable guest session before Unity starts. See the
+[Hetzner live-game runbook](infra/hetzner/README.md).
 
 ## Repository layout
 

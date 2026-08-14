@@ -1,0 +1,169 @@
+name: hive-chameleon-live
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-file: '5'
+    max-size: 10m
+
+services:
+  application-postgres:
+    image: postgres:17.7-bookworm@sha256:86e0b703649d7a792bd9243ee28afc9d8f7c6b2b5638077c9d6882d4d472bbfd
+    environment:
+      POSTGRES_DB: hive_chameleon
+      POSTGRES_PASSWORD: ${HC_DATABASE_OWNER_PASSWORD:?set HC_DATABASE_OWNER_PASSWORD}
+      POSTGRES_USER: postgres
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d hive_chameleon]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *default-logging
+    restart: unless-stopped
+    volumes:
+      - application-postgres-data:/var/lib/postgresql/data
+
+  application-migrations:
+    image: ghcr.io/amacneil/dbmate:2.34.1
+    depends_on:
+      application-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:${HC_DATABASE_OWNER_PASSWORD}@application-postgres:5432/hive_chameleon?sslmode=disable
+    command: [--migrations-dir, /db/migrations, --no-dump-schema, --wait, up]
+    logging: *default-logging
+    restart: no
+    volumes:
+      - ../postgres/migrations:/db/migrations:ro
+
+  application-runtime-roles:
+    image: postgres:17.7-bookworm@sha256:86e0b703649d7a792bd9243ee28afc9d8f7c6b2b5638077c9d6882d4d472bbfd
+    depends_on:
+      application-migrations:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://postgres:${HC_DATABASE_OWNER_PASSWORD}@application-postgres:5432/hive_chameleon?sslmode=disable
+      HC_API_DB_PASSWORD: ${HC_API_DB_PASSWORD:?set HC_API_DB_PASSWORD}
+      HC_NAKAMA_DB_PASSWORD: ${HC_NAKAMA_DB_PASSWORD:?set HC_NAKAMA_DB_PASSWORD}
+    entrypoint: [/bin/bash, /deployment/configure-runtime-roles.sh]
+    logging: *default-logging
+    restart: no
+    volumes:
+      - ./configure-runtime-roles.sh:/deployment/configure-runtime-roles.sh:ro
+      - ./runtime-roles.sql:/deployment/runtime-roles.sql:ro
+
+  nakama-postgres:
+    image: postgres:17.7-bookworm@sha256:86e0b703649d7a792bd9243ee28afc9d8f7c6b2b5638077c9d6882d4d472bbfd
+    environment:
+      POSTGRES_DB: nakama
+      POSTGRES_PASSWORD: ${NAKAMA_DATABASE_PASSWORD:?set NAKAMA_DATABASE_PASSWORD}
+      POSTGRES_USER: nakama
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U nakama -d nakama]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *default-logging
+    restart: unless-stopped
+    volumes:
+      - nakama-postgres-data:/var/lib/postgresql/data
+
+  nakama-migrate:
+    build:
+      context: ../../runtime/nakama
+    entrypoint: [/nakama/nakama]
+    command:
+      - migrate
+      - up
+      - --database.address
+      - nakama:${NAKAMA_DATABASE_PASSWORD}@nakama-postgres:5432/nakama
+    depends_on:
+      nakama-postgres:
+        condition: service_healthy
+    logging: *default-logging
+    restart: no
+
+  nakama:
+    build:
+      context: ../../runtime/nakama
+    command:
+      - --config
+      - /nakama/data/local.yml
+      - --database.address
+      - nakama:${NAKAMA_DATABASE_PASSWORD}@nakama-postgres:5432/nakama
+      - --socket.server_key
+      - ${NAKAMA_SERVER_KEY:?set NAKAMA_SERVER_KEY}
+      - --runtime.http_key
+      - ${NAKAMA_RUNTIME_HTTP_KEY:?set NAKAMA_RUNTIME_HTTP_KEY}
+      - --runtime.env
+      - NAKAMA_BRIDGE_HMAC_KEY=${NAKAMA_BRIDGE_HMAC_KEY:?set NAKAMA_BRIDGE_HMAC_KEY}
+      - --runtime.env
+      - HC_NAKAMA_DATABASE_URL=postgres://hc_nakama_runtime:${HC_NAKAMA_DB_PASSWORD}@application-postgres:5432/hive_chameleon?sslmode=disable
+      - --session.encryption_key
+      - ${NAKAMA_SESSION_ENCRYPTION_KEY:?set NAKAMA_SESSION_ENCRYPTION_KEY}
+      - --session.refresh_encryption_key
+      - ${NAKAMA_REFRESH_ENCRYPTION_KEY:?set NAKAMA_REFRESH_ENCRYPTION_KEY}
+      - --console.username
+      - ${NAKAMA_CONSOLE_USERNAME:?set NAKAMA_CONSOLE_USERNAME}
+      - --console.password
+      - ${NAKAMA_CONSOLE_PASSWORD:?set NAKAMA_CONSOLE_PASSWORD}
+      - --console.signing_key
+      - ${NAKAMA_CONSOLE_SIGNING_KEY:?set NAKAMA_CONSOLE_SIGNING_KEY}
+    depends_on:
+      application-runtime-roles:
+        condition: service_completed_successfully
+      nakama-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, /nakama/nakama, healthcheck]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    ports:
+      - 127.0.0.1:${HC_NAKAMA_BIND_PORT:-7350}:7350
+    logging: *default-logging
+    restart: unless-stopped
+    volumes:
+      - ./nakama.yml:/nakama/data/local.yml:ro
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/hetzner/api.Dockerfile
+    depends_on:
+      application-runtime-roles:
+        condition: service_completed_successfully
+      nakama:
+        condition: service_healthy
+    environment:
+      AUTH_ACCESS_TTL_SECONDS: 3600
+      AUTH_IDENTITY_LOOKUP_KEY: ${AUTH_IDENTITY_LOOKUP_KEY:?set AUTH_IDENTITY_LOOKUP_KEY}
+      AUTH_REFRESH_TTL_SECONDS: 2592000
+      AUTH_TOKEN_SECRET: ${AUTH_TOKEN_SECRET:?set AUTH_TOKEN_SECRET}
+      DATABASE_URL: postgres://hc_api_runtime:${HC_API_DB_PASSWORD}@application-postgres:5432/hive_chameleon?sslmode=disable
+      HTTP_CORS_ALLOWED_ORIGINS: ${HC_PUBLIC_ORIGIN:?set HC_PUBLIC_ORIGIN}
+      NAKAMA_ALLOW_PRIVATE_NETWORK_HTTP: 'true'
+      NAKAMA_BRIDGE_HMAC_KEY: ${NAKAMA_BRIDGE_HMAC_KEY:?set NAKAMA_BRIDGE_HMAC_KEY}
+      NAKAMA_HTTP_URL: http://nakama:7350
+      NAKAMA_SERVER_KEY: ${NAKAMA_SERVER_KEY:?set NAKAMA_SERVER_KEY}
+      NAKAMA_SOCKET_URL: ${HC_PUBLIC_WEBSOCKET_URL:?set HC_PUBLIC_WEBSOCKET_URL}
+      NODE_ENV: production
+      PORT: 3000
+      PUBLIC_GUEST_SESSIONS_ENABLED: 'true'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/v1/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    ports:
+      - 127.0.0.1:${HC_API_BIND_PORT:-3000}:3000
+    logging: *default-logging
+    restart: unless-stopped
+
+volumes:
+  application-postgres-data:
+  nakama-postgres-data:

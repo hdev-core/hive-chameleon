@@ -13,15 +13,15 @@ a **Unity game client** (WebGL + desktop) backed by a TypeScript (NestJS) + **Go
 
 ## 1. Your stack
 
-| Layer             | What you use                                                              | Where it runs                                                                                                                          |
-| ----------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Game client       | **Unity** — WebGL (browser) + desktop (Win/macOS/Linux)                   | Local WebGL test builds; production WebGL/assets → Hetzner Object Storage after secure session delivery; desktop → downloadable builds |
-| API               | NestJS (TypeScript)                                                       | **always-on** → local now, **Hetzner** later                                                                                           |
-| Realtime          | Nakama (Go)                                                               | **always-on** → local now, **Hetzner** later                                                                                           |
-| Workers / runtime | Hive gateway, HAF projector, provisioning/collectible/treasury/RC workers | **always-on** → local now, **Hetzner** later                                                                                           |
-| Database          | Postgres (heavy PL/pgSQL and ordered SQL migrations)                      | **Hetzner**, isolated per environment                                                                                                  |
-| Signing           | secp256k1 via managed KMS/HSM                                             | isolated custody boundary — see note below                                                                                             |
-| Auth              | Keychain (WebGL) + HiveAuth (desktop) + custodial Google provisioner      | Hive-native, **not** Supabase Auth                                                                                                     |
+| Layer             | What you use                                                              | Where it runs                                                                      |
+| ----------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Game client       | **Unity** — WebGL (browser) + desktop (Win/macOS/Linux)                   | Local test builds; release WebGL → Hetzner `/game/`; desktop → downloadable builds |
+| API               | NestJS (TypeScript)                                                       | **always-on** → local now, **Hetzner** later                                       |
+| Realtime          | Nakama (Go)                                                               | **always-on** → local now, **Hetzner** later                                       |
+| Workers / runtime | Hive gateway, HAF projector, provisioning/collectible/treasury/RC workers | **always-on** → local now, **Hetzner** later                                       |
+| Database          | Postgres (heavy PL/pgSQL and ordered SQL migrations)                      | **Hetzner**, isolated per environment                                              |
+| Signing           | secp256k1 via managed KMS/HSM                                             | isolated custody boundary — see note below                                         |
+| Auth              | Keychain (WebGL) + HiveAuth (desktop) + custodial Google provisioner      | Hive-native, **not** Supabase Auth                                                 |
 
 Two things make you different from the other cohort projects:
 
@@ -34,10 +34,9 @@ Two things make you different from the other cohort projects:
 
 ## 2. "I can't deploy / connect X" — how access works
 
-Connecting an external static host to a repo in the **`hdev-core`** org needs an **org owner
-(Dr. Mohammad)** to authorize that service's GitHub app. The Unity game currently has no public
-static deployment. Its credential-neutral local WebGL build receives short-lived sessions from a
-localhost-only launcher and is intentionally blocked from deployment.
+The Unity game uses a credential-neutral release build on Hetzner. The public page obtains one
+isolated guest identity and revocable session per browser before starting Unity; neither access nor
+refresh credentials are embedded in the static artifact.
 
 ---
 
@@ -47,8 +46,8 @@ Your Unity client is **not** a React/Vercel app, so the cohort `deploy.yml`/`pre
 Vite/React) don't apply. Instead:
 
 - **WebGL (browser):** Unity exports static files (`Build/` + `index.html`). Local multiplayer
-  builds connect to the development stack. Production delivery will use **Hetzner Object Storage**
-  after secure player login/session delivery is implemented.
+  builds connect to the development stack. The live release is served by Nginx at `/game/` on the
+  Hetzner host and reaches the TLS-proxied API and Nakama services on the same origin.
 - **Desktop (Win/macOS/Linux):** ship as **downloadable builds** (e.g. GitHub Releases + a download
   page) — these are distributed binaries, not web-hosted.
 - **Builds/CI:** Unity WebGL + desktop builds need a **licensed Unity CI runner** (e.g. game-ci) — set
@@ -67,8 +66,10 @@ npm run authoritative:webgl -- --clients 2
 
 The client has no offline, preview, synthetic-player, or simulated-round mode. The build script
 creates one credential-neutral artifact; the localhost launcher supplies a distinct short-lived
-session to each client URL. The deploy script intentionally fails until production-safe session
-delivery is implemented. See [`docs/local-authoritative-development.md`](docs/local-authoritative-development.md).
+session to each local client URL. For the public artifact, the page requests one environment-gated
+guest session per browser before Unity launches. See
+[`docs/local-authoritative-development.md`](docs/local-authoritative-development.md) and
+[`infra/hetzner/README.md`](infra/hetzner/README.md).
 
 ## 3b. Database → Postgres
 
@@ -102,9 +103,9 @@ path must pass the security decision gate before production. No AWS runtime depe
 `feature/* → PR → develop → PR → main`. Never push straight to `main` or `develop`. Open a PR;
 **Dr. Mohammad reviews and merges**. Comment on the Trello card with the PR link when moving it to
 Code Review. CI runs for every PR and again after merges to `develop` and `main`. Until a licensed
-Unity CI runner is configured, Unity builds remain a local verification gate. There is no Vercel
-showcase-promotion path: production WebGL publishing remains blocked until safe player
-login/session delivery exists, after which approved build artifacts go to Hetzner Object Storage.
+Unity CI runner is configured, Unity release builds and deployment remain a manually verified
+promotion gate. There is no Vercel showcase-promotion path; approved WebGL artifacts are served by
+the Hetzner Nginx deployment.
 
 ## 6. Secrets hygiene
 
