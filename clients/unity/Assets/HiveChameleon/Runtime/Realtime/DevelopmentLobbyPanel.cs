@@ -544,8 +544,11 @@ namespace HiveChameleon.Realtime
                 )
             )
             {
-                GUIUtility.systemCopyBuffer = lobby.id;
-                SetStatus("Lobby code copied.", false);
+                bool copied = ClipboardBridge.TryCopy(lobby.id);
+                SetStatus(
+                    copied ? "Lobby code copied." : $"Copy blocked. Lobby code: {lobby.id}",
+                    !copied
+                );
             }
             GUILayout.Space(10f);
             if (

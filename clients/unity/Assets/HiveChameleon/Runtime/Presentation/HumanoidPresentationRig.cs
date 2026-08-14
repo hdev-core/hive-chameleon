@@ -14,6 +14,9 @@ namespace HiveChameleon.Presentation
     {
         private const float MotionResponse = 13f;
 
+        /// <summary>Peak vertical pelvis travel either side of the bind pose, in metres.</summary>
+        private const float HipBobAmplitude = 0.022f;
+
         [Serializable]
         private sealed class BoneOverride
         {
@@ -403,7 +406,12 @@ namespace HiveChameleon.Presentation
             );
             if (_hips != null)
             {
-                float bob = Mathf.Abs(Mathf.Sin(_gait)) * 0.035f * gaitStrength;
+                // The pelvis peaks at midstance, when the legs pass each other, and
+                // troughs at double support, when they are furthest apart: twice per
+                // stride, centred on the bind pose. Abs(Sin(gait)) inverts that phase
+                // and never falls below bind height, so the body repeatedly pops
+                // upward and the walk reads as a hop.
+                float bob = Mathf.Cos(2f * _gait) * HipBobAmplitude * gaitStrength;
                 Vector3 target = _hipsBindPosition + new Vector3(0f, -0.18f * crouch + bob, 0f);
                 _hips.localPosition = Vector3.Lerp(_hips.localPosition, target, response);
             }
