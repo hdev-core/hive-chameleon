@@ -1005,7 +1005,10 @@ try {
 }
 
 function selectSmokeHiderAnchor(initialAvatar) {
-  const spawns = [[-8, -4.2, -8, -4.2]];
+  // Mirrors the first Hider spawn in runtime/nakama/arena_catalog.go. Spawns move
+  // whenever the authority geometry changes, because they have to stand on floor
+  // the server considers clear.
+  const spawns = [[-9, -1, -9, -1]];
   const match = spawns.find(
     ([spawnX, spawnZ]) =>
       Math.abs(initialAvatar.position_x - spawnX) < 0.001 &&
