@@ -116,11 +116,11 @@ namespace HiveChameleon.Presentation
     {
         public const string NeonServiceArcadeSlug = "neon-service-arcade";
         public const string NeonServiceArcadeDisplayName = "Neon Service Arcade";
-        public const string NeonServiceArcadeContentVersion = "m2";
+        public const string NeonServiceArcadeContentVersion = "m3";
         public const string NeonServiceArcadeAuthorityGeometryVersion =
             "neon-service-arcade-authority-5";
         public const string NeonServiceArcadeAuthorityGeometryDigest =
-            "sha256:5f7cb5f35e15ba004da1fb37229c75c07d8cc3f81eabe2eed4f8ab42051ad1aa";
+            "sha256:0582228533b58772c3496385d088e068f903193dc386aa78af6e9e37b52eccb6";
 
         public static readonly AuthoritativeArenaDefinition[] All =
         {

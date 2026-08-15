@@ -2,7 +2,7 @@
  "schema_version": 1,
  "version": "neon-service-arcade-authority-5",
  "map_slug": "neon-service-arcade",
- "content_version": "m2",
+ "content_version": "m3",
  "player": {
   "radius": 0.38,
   "skin_width": 0.08,

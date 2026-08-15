@@ -9,9 +9,9 @@ import (
 
 const (
 	neonServiceArcadeMapSlug                  = "neon-service-arcade"
-	neonServiceArcadeContentVersion           = "m2"
+	neonServiceArcadeContentVersion           = "m3"
 	neonServiceArcadeAuthorityGeometryVersion = "neon-service-arcade-authority-5"
-	neonServiceArcadeAuthorityGeometryDigest  = "sha256:5f7cb5f35e15ba004da1fb37229c75c07d8cc3f81eabe2eed4f8ab42051ad1aa"
+	neonServiceArcadeAuthorityGeometryDigest  = "sha256:0582228533b58772c3496385d088e068f903193dc386aa78af6e9e37b52eccb6"
 )
 
 //go:embed maps/neon-service-arcade-authority.json

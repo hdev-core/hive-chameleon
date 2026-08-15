@@ -91,14 +91,14 @@ SELECT pg_temp.assert_true(
       FROM content.map_version version
       JOIN content.map map_definition ON map_definition.id = version.map_id
      WHERE map_definition.slug = 'neon-service-arcade'
-       AND version.version_number = 'm2'
+       AND version.version_number = 'm3'
        AND version.status = 'published'
        AND version.license_declaration_version = 'user-supplied-bundled-1'
        AND version.manifest ->> 'delivery' = 'bundled_in_game_client'
        AND version.manifest #>> '{asset_provenance,environment,source}'
            = 'user-supplied Blender arena build'
   ),
-  'the official Neon Service Arcade m2 catalog record declares its bundled provenance'
+  'the official Neon Service Arcade m3 catalog record declares its bundled provenance'
 );
 
 SELECT pg_temp.assert_true(
@@ -108,14 +108,14 @@ SELECT pg_temp.assert_true(
       JOIN content.map_version version ON version.id = distribution.map_version_id
       JOIN content.map map_definition ON map_definition.id = version.map_id
      WHERE map_definition.slug = 'neon-service-arcade'
-       AND version.version_number = 'm2'
+       AND version.version_number = 'm3'
        AND distribution.platform IN ('desktop', 'web')
        AND distribution.state = 'available'
        AND distribution.required_game_build_version = 'hive-chameleon-m4-dev'
        AND distribution.required_protocol_version = 'm4-v2'
        AND distribution.published_at IS NOT NULL
   ),
-  'Neon Service Arcade m2 is available for both bundled desktop and web clients'
+  'Neon Service Arcade m3 is available for both bundled desktop and web clients'
 );
 
 SELECT pg_temp.assert_true(
