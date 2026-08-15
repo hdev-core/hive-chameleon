@@ -10,7 +10,7 @@ The package intentionally has no public HTTP endpoint and no private-key impleme
 calling job remains responsible for proving that a purchase/reward/revocation is authorized and
 for retaining its stable event data. Each uncertain retry increments the signing attempt while
 keeping the same logical event ID and payload. The signer independently permits only the
-`collectible_issuer` role/account/key-reference policy; a match-publisher credential is rejected.
+`collectible_issuer` role/account/key-reference policy; unrelated service credentials are rejected.
 
 `PostgresCollectibleIssuerJournal` records only this service's rows in
 `hive_projection.transaction_intent` and establishes `SET ROLE hc_collectible_issuer` on every

@@ -1,0 +1,29 @@
+SELECT format(
+  'CREATE ROLE hc_api_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
+  :'api_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hc_api_runtime')
+\gexec
+
+SELECT format(
+  'ALTER ROLE hc_api_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
+  :'api_password'
+)
+\gexec
+
+SELECT format(
+  'CREATE ROLE hc_nakama_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
+  :'nakama_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hc_nakama_runtime')
+\gexec
+
+SELECT format(
+  'ALTER ROLE hc_nakama_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
+  :'nakama_password'
+)
+\gexec
+
+GRANT hc_api TO hc_api_runtime;
+GRANT hc_nakama TO hc_nakama_runtime;
+

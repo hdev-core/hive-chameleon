@@ -15,8 +15,8 @@ Unity login shell
 → scoped Nakama connection
 → one persistent lobby
 → one authoritative round result
-→ PostgreSQL terminal commit/outbox
-→ one irreversible Hive summary
+→ PostgreSQL exact terminal result and revision
+→ one irreversible collectible event round trip
 ```
 
 Every milestone must leave the repository buildable and the preceding path working. P0 proves the
@@ -69,8 +69,8 @@ directories. #25 and #26 integrate those tracks afterward.
 | M2B — Realtime base | #23: Nakama server/plugin, scoped NestJS session bridge, lobby RPC skeletons, Unity socket adapter, integration test | M1 | 8–12 pd |
 | M2C — Hive base | #24: WAX gateway, provider-neutral signer boundary, fork-aware HAF cursor/projector, operation validation and tests | M1 | 8–12 pd |
 | M3A — Identity end to end | #25: Keychain/HiveAuth challenge login, Google OIDC, sponsor-backed provisioning, custody references/intents, claim states | M2A + M2C + external gates | 12–18 pd |
-| M3B — Public-event pipeline | #26: [terminal commit/outbox, canonical match batching, publisher policy, and collectible issue/revoke foundation](./technical-specification/publication-pipeline.md) | M2A + M2C | 8–12 pd |
-| M4 — Playable P0 loop | Lobby lifecycle, host migration, nomination, Casual/Infection authoritative round, reconnect, result/Answer Check, one map | M2B + identity session | 35–50 pd |
+| M3B — Results and collectibles | #26: [exact terminal-result commit plus collectible issue/revoke foundation](./technical-specification/publication-pipeline.md) | M2A + M2C | 8–12 pd |
+| M4 — Playable P0 loop | Lobby lifecycle, host migration, nomination, moving humanoid Hiders who paint/pose their own character, Hunters who shoot actual Hider characters, Casual/Infection authoritative round, reconnect, result/Answer Check, one static map without interactive disguise props | M2B + identity session | 35–50 pd |
 | M5 — P0 integration and hardening | Cross-platform end-to-end path, Hive outage/degradation, load/restore/security tests, WebGL/desktop builds, demo polish | M3–M4 | 15–25 pd |
 | M6 — P1 product layer | Friends/invites/Streamer Mode, controller, cosmetics/shop, controlled tournament, map attribution/showcase | P0 accepted | 40–60 pd |
 
@@ -111,10 +111,13 @@ person-day ranges should be replanned after the first end-to-end session and pro
 
 ### Sprints 3–5 — Authoritative vertical slice
 
-- Build persistent lobby, host migration, nomination, one official map, role assignment, Casual,
-  Infection, spectator/Answer Check, score, and 60-second reconnect in thin vertical increments.
-- Commit the terminal result and publication request in one database transaction.
-- Publish and re-read one canonical match batch through the isolated service path.
+- Build persistent lobby, host migration, nomination, one official static map, humanoid
+  character painting/posing, character-targeted Hunter fire, role assignment, Casual, Infection,
+  spectator/Answer Check, score, and 60-second reconnect in thin vertical increments. Environment
+  props provide cover and camouflage context only; do not model them as clickable targets, hiding
+  slots, or containers.
+- Commit the exact canonical terminal result, detailed evidence, and initial revision in one
+  database transaction.
 - Maintain desktop and WebGL builds throughout; avoid a late platform port.
 
 ### Sprint 6 — P0 release candidate
@@ -134,7 +137,7 @@ person-day ranges should be replanned after the first end-to-end session and pro
 | Player/session identity | NestJS identity module | Nakama session bridge, Hive intents |
 | Realtime RPC/event names | Architecture doc plus Nakama package | Unity and integration tests |
 | Hive operation serialization | WAX gateway | Player signers, custody adapter, official workers |
-| Fork/finality state | HAF projection package | Provisioning, match publication, ownership/payments |
+| Fork/finality state | HAF projection package | Provisioning, ownership, payments, collectibles |
 | Authorization | Roles document plus current resource state | NestJS, Nakama, workers |
 | Runtime configuration | Validated environment schema | All deployables and CI |
 
@@ -150,7 +153,7 @@ must not be required to make the completed foundation compile or start.
 
 P0 is complete only when desktop and Chrome clients can authenticate, join the same authoritative
 session, finish the approved gameplay loop, recover under the normal reconnect policy, commit the
-result durably, and retrieve its irreversible Hive summary while meeting the NFR baseline.
+result durably with its exact hash-bound revision while meeting the NFR baseline.
 
 ## 8. Decision gates and risks
 

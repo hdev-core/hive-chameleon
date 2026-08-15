@@ -1,0 +1,6 @@
+{
+  "name": "HiveChameleon.PlayModeTests",
+  "rootNamespace": "HiveChameleon.Tests",
+  "references": ["HiveChameleon.Runtime"],
+  "optionalUnityReferences": ["TestAssemblies"]
+}

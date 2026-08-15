@@ -2,7 +2,6 @@ import {
   Controller,
   Header,
   HttpCode,
-  HttpException,
   HttpStatus,
   Inject,
   Post,
@@ -31,17 +30,6 @@ export class RealtimeController {
         status: 401,
         title: 'Unauthorized',
       });
-    }
-    if (!request.authPrincipal.disclosureAcknowledged) {
-      throw new HttpException(
-        {
-          code: 'public_record_disclosure_required',
-          detail: 'Acknowledge the current permanent-public-record disclosure before playing.',
-          status: 428,
-          title: 'Disclosure acknowledgment required',
-        },
-        428,
-      );
     }
     return this.realtimeService.createSession({
       authSessionId: request.authPrincipal.authSessionId,

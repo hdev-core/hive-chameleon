@@ -20,6 +20,17 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION pg_temp.assert_true(condition boolean, message text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF condition IS NOT TRUE THEN
+    RAISE EXCEPTION 'assertion failed: %', message;
+  END IF;
+END;
+$$;
+
 BEGIN;
 
 INSERT INTO identity.player (id, hive_username, hive_control_state)
@@ -139,7 +150,7 @@ VALUES (
   'answer_check',
   'match-result-1',
   'scoring-1',
-  repeat('a', 64),
+  encode(digest(convert_to('{"round":"01900000-0000-7000-8000-000000000530","revision":1}', 'UTF8'), 'sha256'), 'hex'),
   '2026-07-16T13:00:00Z'
 );
 
@@ -164,7 +175,7 @@ VALUES
 INSERT INTO game.round_result_revision (
   id, round_id, revision_number, revision_type, result_schema_version,
   scoring_rule_version, canonical_complete_result_sha256,
-  canonical_result_object_key
+  canonical_complete_result
 )
 VALUES (
   '01900000-0000-7000-8000-000000000533',
@@ -173,19 +184,18 @@ VALUES (
   'initial',
   'match-result-1',
   'scoring-1',
-  repeat('a', 64),
-  'round-results/initial.json'
+  encode(digest(convert_to('{"round":"01900000-0000-7000-8000-000000000530","revision":1}', 'UTF8'), 'sha256'), 'hex'),
+  convert_to('{"round":"01900000-0000-7000-8000-000000000530","revision":1}', 'UTF8')
 );
 
 INSERT INTO game.match_publication_request (
-  id, round_id, result_revision_id, request_type, state
+  id, round_id, result_revision_id, request_type
 )
 VALUES (
   '01900000-0000-7000-8000-000000000534',
   '01900000-0000-7000-8000-000000000530',
   '01900000-0000-7000-8000-000000000533',
-  'initial',
-  'queued'
+  'initial'
 );
 
 UPDATE game.game_round
@@ -195,6 +205,18 @@ UPDATE game.game_round
  WHERE id = '01900000-0000-7000-8000-000000000530';
 
 COMMIT;
+
+SELECT pg_temp.assert_true(
+  (
+    SELECT convert_from(canonical_complete_result, 'UTF8') =
+             '{"round":"01900000-0000-7000-8000-000000000530","revision":1}'
+       AND canonical_complete_result_sha256 =
+             encode(digest(canonical_complete_result, 'sha256'), 'hex')
+      FROM game.round_result_revision
+     WHERE id = '01900000-0000-7000-8000-000000000533'
+  ),
+  'the exact canonical terminal result bytes are durable and hash-bound'
+);
 
 INSERT INTO game.lobby (
   id, name, current_host_player_id, visibility, max_players,
@@ -231,7 +253,7 @@ SELECT pg_temp.expect_sqlstate(
 INSERT INTO game.round_result_revision (
   id, round_id, revision_number, revision_type, previous_revision_id,
   result_schema_version, scoring_rule_version, canonical_complete_result_sha256,
-  canonical_result_object_key, reason_code
+  canonical_complete_result, reason_code
 )
 VALUES (
   '01900000-0000-7000-8000-000000000535',
@@ -241,100 +263,41 @@ VALUES (
   '01900000-0000-7000-8000-000000000533',
   'match-result-1',
   'scoring-1',
-  repeat('b', 64),
-  'round-results/correction-2.json',
+  encode(digest(convert_to('{"round":"01900000-0000-7000-8000-000000000530","revision":2}', 'UTF8'), 'sha256'), 'hex'),
+  convert_to('{"round":"01900000-0000-7000-8000-000000000530","revision":2}', 'UTF8'),
   'authoritative_result_correction'
-);
-
-BEGIN;
-
-INSERT INTO game.match_publication_request (
-  id, round_id, result_revision_id, request_type, state
-)
-VALUES (
-  '01900000-0000-7000-8000-000000000537',
-  '01900000-0000-7000-8000-000000000530',
-  '01900000-0000-7000-8000-000000000535',
-  'correction',
-  'queued'
-);
-
-INSERT INTO game.match_publication_outbox (
-  id, event_uuid, event_type, schema_version, event_contract_version,
-  publisher_hive_account, result_count, canonical_payload, parsed_payload,
-  payload_sha256, payload_byte_count
-)
-VALUES (
-  '01900000-0000-7000-8000-000000000538',
-  '01900000-0000-7000-8000-000000000539',
-  'match_result_corrected',
-  1,
-  'match-event-1',
-  'publisher',
-  1,
-  '{}',
-  '{}',
-  '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
-  2
-);
-
-INSERT INTO game.match_publication_item (
-  id, outbox_id, publication_request_id, round_id, result_revision_id, result_position
-)
-VALUES (
-  '01900000-0000-7000-8000-000000000542',
-  '01900000-0000-7000-8000-000000000538',
-  '01900000-0000-7000-8000-000000000537',
-  '01900000-0000-7000-8000-000000000530',
-  '01900000-0000-7000-8000-000000000535',
-  0
-);
-
-COMMIT;
-
-SELECT pg_temp.expect_sqlstate(
-  $$UPDATE game.match_publication_outbox
-       SET state = 'broadcast',
-           attempt_count = 1,
-           last_attempt_at = '2026-07-16T16:00:00Z',
-           canonical_payload = '[]',
-           parsed_payload = '[]',
-           payload_sha256 = repeat('e', 64)
-     WHERE id = '01900000-0000-7000-8000-000000000538'$$,
-  '55000'
-);
-
-UPDATE game.match_publication_outbox
-   SET state = 'broadcast',
-       attempt_count = 1,
-       last_attempt_at = '2026-07-16T16:00:00Z'
- WHERE id = '01900000-0000-7000-8000-000000000538';
-
-SELECT pg_temp.expect_sqlstate(
-  $$UPDATE game.match_publication_outbox
-       SET state = 'queued', attempt_count = 0
-     WHERE id = '01900000-0000-7000-8000-000000000538'$$,
-  '55000'
-);
-
-SELECT pg_temp.expect_sqlstate(
-  $$DELETE FROM game.match_publication_item
-     WHERE id = '01900000-0000-7000-8000-000000000542'$$,
-  '55000'
 );
 
 SELECT pg_temp.expect_sqlstate(
   $$INSERT INTO game.round_result_revision (
       id, round_id, revision_number, revision_type, previous_revision_id,
       result_schema_version, scoring_rule_version, canonical_complete_result_sha256,
-      canonical_result_object_key, reason_code
+      canonical_complete_result, reason_code
+    ) VALUES (
+      '01900000-0000-7000-8000-000000000543',
+      '01900000-0000-7000-8000-000000000530',
+      3, 'correction',
+      '01900000-0000-7000-8000-000000000535',
+      'match-result-1', 'scoring-1', repeat('0', 64),
+      convert_to('{"round":"01900000-0000-7000-8000-000000000530","revision":3}', 'UTF8'),
+      'invalid_hash'
+    )$$,
+  '23514'
+);
+
+SELECT pg_temp.expect_sqlstate(
+  $$INSERT INTO game.round_result_revision (
+      id, round_id, revision_number, revision_type, previous_revision_id,
+      result_schema_version, scoring_rule_version, canonical_complete_result_sha256,
+      canonical_complete_result, reason_code
     ) VALUES (
       '01900000-0000-7000-8000-000000000536',
       '01900000-0000-7000-8000-000000000530',
       2, 'correction',
       '01900000-0000-7000-8000-000000000533',
-      'match-result-1', 'scoring-1', repeat('c', 64),
-      'round-results/branch.json', 'invalid_branch'
+      'match-result-1', 'scoring-1',
+      encode(digest(convert_to('{"branch":true}', 'UTF8'), 'sha256'), 'hex'),
+      convert_to('{"branch":true}', 'UTF8'), 'invalid_branch'
     )$$,
   '23505'
 );
@@ -342,13 +305,6 @@ SELECT pg_temp.expect_sqlstate(
 UPDATE content.map_version
    SET status = 'submitted', submitted_at = '2026-07-16T15:00:00Z'
  WHERE id = '01900000-0000-7000-8000-000000000511';
-
-SELECT pg_temp.expect_sqlstate(
-  $$UPDATE game.match_publication_request
-       SET state = 'cancelled'
-     WHERE id = '01900000-0000-7000-8000-000000000534'$$,
-  '55000'
-);
 
 SELECT pg_temp.expect_sqlstate(
   $$UPDATE content.map_version

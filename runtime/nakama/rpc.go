@@ -15,6 +15,7 @@ const (
 )
 
 var realtimeRPCNames = []string{
+	"lobby.maps",
 	"lobby.quick_play",
 	"lobby.create",
 	"lobby.join",
@@ -125,12 +126,14 @@ func registerRealtime(
 		runtime.NakamaModule,
 		string,
 	) (string, error){
+		"lobby.maps":                 lobbies.mapsRPC,
 		"lobby.create":               lobbies.createRPC,
 		"lobby.join":                 lobbies.joinRPC,
 		"lobby.leave":                lobbies.leaveRPC,
 		"lobby.nominate_hunter":      lobbies.nominateHunterRPC,
 		"lobby.update_configuration": lobbies.updateConfigurationRPC,
 		"lobby.start":                lobbies.startRPC,
+		"match.reconnect":            lobbies.reconnectRPC,
 	}
 	for _, name := range realtimeRPCNames {
 		handler := featureNotReadyRPC

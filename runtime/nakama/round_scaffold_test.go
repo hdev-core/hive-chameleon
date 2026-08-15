@@ -130,11 +130,18 @@ func TestApplyLiveLobbyStateRehydratesDurableNominationsAfterRestart(t *testing.
 func TestPublicRoundSnapshotDoesNotExposeAssignments(t *testing.T) {
 	t.Parallel()
 
+	arena := defaultOfficialArenaTestDefinition()
 	round := roundSnapshot{
-		ID:             "01900000-0000-7000-8000-000000000010",
-		SequenceNumber: 1,
-		Status:         "preparing",
-		StartedAt:      time.Unix(1_784_821_000, 0).UTC(),
+		ID:                       "01900000-0000-7000-8000-000000000010",
+		SequenceNumber:           1,
+		GameServerBuildVersion:   gameServerBuildVersion,
+		ProtocolVersion:          matchProtocolVersion,
+		MapSlug:                  arena.Slug,
+		MapContentVersion:        arena.ContentVersion,
+		AuthorityGeometryVersion: arena.Geometry.Version,
+		AuthorityGeometryDigest:  arena.GeometryDigest,
+		Status:                   "preparing",
+		StartedAt:                time.Unix(1_784_821_000, 0).UTC(),
 		RoleAssignments: []roundRoleAssignment{{
 			PlayerID: "01900000-0000-7000-8000-000000000001",
 			Role:     "hunter",
@@ -146,8 +153,30 @@ func TestPublicRoundSnapshotDoesNotExposeAssignments(t *testing.T) {
 	}
 	if bytes.Contains(payload, []byte(`"role"`)) ||
 		bytes.Contains(payload, []byte(`"hiding_slot"`)) ||
+		bytes.Contains(payload, []byte(`"target_slot_count"`)) ||
 		bytes.Contains(payload, []byte("01900000-0000-7000-8000-000000000001")) {
 		t.Fatalf("public round leaked a private role assignment: %s", payload)
+	}
+	if !bytes.Contains(
+		payload,
+		[]byte(`"game_server_build_version":"hive-chameleon-m4-dev"`),
+	) ||
+		!bytes.Contains(payload, []byte(`"protocol_version":"m4-v2"`)) ||
+		!bytes.Contains(
+			payload,
+			[]byte(
+				`"authority_geometry_version":"`+
+					arena.Geometry.Version+`"`,
+			),
+		) ||
+		!bytes.Contains(
+			payload,
+			[]byte(
+				`"authority_geometry_digest":"`+
+					arena.GeometryDigest+`"`,
+			),
+		) {
+		t.Fatalf("public round omitted its compatibility contract: %s", payload)
 	}
 }
 

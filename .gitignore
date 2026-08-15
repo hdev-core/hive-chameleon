@@ -139,3 +139,7 @@ clients/unity/[Bb]uild/
 clients/unity/[Bb]uilds/
 clients/unity/[Ll]ogs/
 clients/unity/[Uu]ser[Ss]ettings/
+clients/unity/[Cc]aptures/
+
+/clients/unity/Assets/MiniWorld Studio/
+/clients/unity/Assets/MiniWorld Studio.meta

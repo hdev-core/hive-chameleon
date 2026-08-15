@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,13 +15,227 @@ import (
 )
 
 const (
-	lobbyDatabaseURLEnv = "HC_NAKAMA_DATABASE_URL"
-	lobbyPasswordCost   = 12
+	lobbyDatabaseURLEnv              = "HC_NAKAMA_DATABASE_URL"
+	lobbyPasswordCost                = 12
+	defaultOfficialMapSlug           = neonServiceArcadeMapSlug
+	defaultOfficialMapContentVersion = neonServiceArcadeContentVersion
 )
+
+// abandonedRoundGraceDuration bounds how long a round may go without a live-match
+// checkpoint before its presence is treated as unrecoverable. The persisted
+// checkpoint heartbeats every second, so two extra heartbeat periods protect the
+// reconnect boundary without adding another full minute of avoidable lockout.
+const abandonedRoundGraceDuration = reconnectReservationDuration +
+	2*liveRoundCheckpointHeartbeat
+
+// releaseAbandonedRoundPresence clears a player's stale lobby membership when the
+// lobby's active round has gone silent past its reconnect window, e.g. because
+// the Nakama process that owned its authoritative match loop restarted and nothing
+// since has revived it. Without this, a player (and everyone else left in that
+// lobby) can never create or join another lobby: the round's live match is gone,
+// so nothing will ever call expireReconnectReservations/flushPendingLeaves for it.
+// It is a no-op whenever the player has no open membership, that lobby has no
+// in-progress round, or the round's last known activity is still within the grace
+// window. If the round has already progressed past what is safe to auto-abort
+// (terminal evidence rows exist), it is left untouched for manual resolution.
+func releaseAbandonedRoundPresence(
+	ctx context.Context,
+	tx *sql.Tx,
+	playerID string,
+	now time.Time,
+) error {
+	var roundID, lobbyID string
+	var lastActivity time.Time
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT round.id::text, membership.lobby_id::text,
+		        COALESCE(checkpoint.updated_at, round.started_at)
+		   FROM game.lobby_membership AS membership
+		   JOIN game.game_round AS round ON round.lobby_id = membership.lobby_id
+		   LEFT JOIN game.round_live_checkpoint AS checkpoint
+		     ON checkpoint.round_id = round.id
+		  WHERE membership.player_id = $1
+		    AND membership.left_at IS NULL
+		    AND round.status NOT IN ('completed', 'aborted')
+		  ORDER BY round.started_at DESC
+		  LIMIT 1`,
+		playerID,
+	).Scan(&roundID, &lobbyID, &lastActivity)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check active round for abandonment: %w", err)
+	}
+	staleBefore := now.Add(-abandonedRoundGraceDuration)
+	if lastActivity.After(staleBefore) {
+		return nil
+	}
+
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.game_round AS round
+		    SET status = 'aborted',
+		        ended_at = $2,
+		        abort_reason = $4
+		  WHERE round.id = $1
+		    AND round.status NOT IN ('completed', 'aborted')
+		    AND COALESCE(
+		          (
+		            SELECT checkpoint.updated_at
+		              FROM game.round_live_checkpoint AS checkpoint
+		             WHERE checkpoint.round_id = round.id
+		          ),
+		          round.started_at
+		        ) <= $3
+		    AND NOT EXISTS (SELECT 1 FROM game.round_participant WHERE round_id = $1)
+		    AND NOT EXISTS (SELECT 1 FROM game.round_result_revision WHERE round_id = $1)
+		    AND NOT EXISTS (
+		          SELECT 1 FROM game.match_publication_request WHERE round_id = $1
+		        )`,
+		roundID,
+		now,
+		staleBefore,
+		reconnectWindowExpiredRoundAbortReason,
+	)
+	if err != nil {
+		return fmt.Errorf("abort abandoned round: %w", err)
+	}
+	aborted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check abandoned round abort result: %w", err)
+	}
+	if aborted == 0 {
+		return nil
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM game.round_live_checkpoint WHERE round_id = $1`,
+		roundID,
+	); err != nil {
+		return fmt.Errorf("clear abandoned round checkpoint: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.lobby_host_assignment
+		    SET ended_at = $2
+		  WHERE lobby_id = $1
+		    AND ended_at IS NULL`,
+		lobbyID,
+		now,
+	); err != nil {
+		return fmt.Errorf("close abandoned lobby host assignment: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.lobby_membership
+		    SET left_at = $2
+		  WHERE lobby_id = $1
+		    AND left_at IS NULL`,
+		lobbyID,
+		now,
+	); err != nil {
+		return fmt.Errorf("release abandoned lobby memberships: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.lobby
+		    SET closed_at = $2,
+		        row_version = row_version + 1
+		  WHERE id = $1
+		    AND closed_at IS NULL`,
+		lobbyID,
+		now,
+	); err != nil {
+		return fmt.Errorf("close abandoned lobby: %w", err)
+	}
+	return nil
+}
+
+func (s *postgresLobbyStore) AbortRound(
+	ctx context.Context,
+	lobbyID string,
+	roundID string,
+	reason string,
+	endedAt time.Time,
+) error {
+	if reason != reconnectWindowExpiredRoundAbortReason {
+		return errors.New("invalid authoritative round abort reason")
+	}
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE game.game_round
+		    SET status = 'aborted',
+		        ended_at = $4,
+		        abort_reason = $3
+		  WHERE id = $1
+		    AND lobby_id = $2
+		    AND status NOT IN ('completed', 'aborted')
+		    AND NOT EXISTS (SELECT 1 FROM game.round_participant WHERE round_id = $1)
+		    AND NOT EXISTS (SELECT 1 FROM game.round_result_revision WHERE round_id = $1)
+		    AND NOT EXISTS (
+		          SELECT 1 FROM game.match_publication_request WHERE round_id = $1
+		        )`,
+		roundID,
+		lobbyID,
+		reason,
+		endedAt.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("abort unreachable active round: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check active round abort result: %w", err)
+	}
+	if updated != 1 {
+		var status string
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT status::text
+			   FROM game.game_round
+			  WHERE id = $1
+			    AND lobby_id = $2`,
+			roundID,
+			lobbyID,
+		).Scan(&status); err != nil {
+			return errors.New("active round is unavailable for abort")
+		}
+		if status != "aborted" {
+			return fmt.Errorf("round cannot be aborted from status %q", status)
+		}
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM game.round_live_checkpoint WHERE round_id = $1`,
+		roundID,
+	); err != nil {
+		return fmt.Errorf("delete aborted round live checkpoint: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit active round abort: %w", err)
+	}
+	return nil
+}
 
 type lobbyQueryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type officialRoundMapContract struct {
+	MapSlug                string
+	DisplayName            string
+	ContentVersion         string
+	GameServerBuildVersion string
+	ProtocolVersion        string
 }
 
 type postgresLobbyStore struct {
@@ -84,30 +299,36 @@ func (s *postgresLobbyStore) Create(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := releaseAbandonedRoundPresence(ctx, tx, playerID, s.now().UTC()); err != nil {
+		return lobbySnapshot{}, err
+	}
+
+	now := s.now().UTC()
 	var existingLobbyID string
 	err = tx.QueryRowContext(
 		ctx,
 		`SELECT lobby_id::text
 		   FROM game.lobby_membership
 		  WHERE player_id = $1
-		    AND left_at IS NULL`,
+		    AND left_at IS NULL
+		  FOR UPDATE`,
 		playerID,
 	).Scan(&existingLobbyID)
 	if err == nil {
-		snapshot, loadErr := loadLobbySnapshot(ctx, tx, existingLobbyID)
-		if loadErr != nil {
-			return lobbySnapshot{}, loadErr
+		if _, err := leaveLobbyMembershipsInTransaction(
+			ctx,
+			tx,
+			existingLobbyID,
+			[]string{playerID},
+			"host_left",
+			now,
+		); err != nil {
+			return lobbySnapshot{}, fmt.Errorf("leave previous lobby before create: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
-			return lobbySnapshot{}, fmt.Errorf("commit existing lobby lookup: %w", err)
-		}
-		return snapshot, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return lobbySnapshot{}, fmt.Errorf("check current lobby membership: %w", err)
 	}
 
-	now := s.now().UTC()
 	lobbyID, err := newUUIDV7(now)
 	if err != nil {
 		return lobbySnapshot{}, err
@@ -117,6 +338,10 @@ func (s *postgresLobbyStore) Create(
 		return lobbySnapshot{}, err
 	}
 	assignmentID, err := newUUIDV7(now)
+	if err != nil {
+		return lobbySnapshot{}, err
+	}
+	defaultMapVersionID, err := loadDefaultOfficialMapVersionID(ctx, tx)
 	if err != nil {
 		return lobbySnapshot{}, err
 	}
@@ -176,11 +401,12 @@ func (s *postgresLobbyStore) Create(
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO game.lobby_configuration
-		  (lobby_id, mode, hunter_count, hiding_duration_seconds, hunting_duration_seconds,
-		   taunt_enabled, taunt_interval_seconds, shell_limit, reload_duration_ms,
-		   auto_start_enabled, auto_start_threshold, updated_at)
-		 VALUES ($1, 'casual', 1, 60, 180, true, 30, 6, 2000, true, $2, $3)`,
+		  (lobby_id, mode, map_version_id, hunter_count, hiding_duration_seconds,
+		   hunting_duration_seconds, taunt_enabled, taunt_interval_seconds, shell_limit,
+		   reload_duration_ms, auto_start_enabled, auto_start_threshold, updated_at)
+		 VALUES ($1, 'casual', $2, 1, 60, 180, true, 30, 6, 2000, true, $3, $4)`,
 		lobbyID,
+		nullableString(defaultMapVersionID),
 		autoStartThreshold,
 		now,
 	); err != nil {
@@ -191,10 +417,126 @@ func (s *postgresLobbyStore) Create(
 	if err != nil {
 		return lobbySnapshot{}, err
 	}
+	snapshot.DepartedLobbyID = existingLobbyID
 	if err := tx.Commit(); err != nil {
 		return lobbySnapshot{}, fmt.Errorf("commit lobby creation: %w", err)
 	}
 	return snapshot, nil
+}
+
+func loadDefaultOfficialMapVersionID(
+	ctx context.Context,
+	queryer lobbyQueryer,
+) (*string, error) {
+	var mapVersionID string
+	if err := queryer.QueryRowContext(
+		ctx,
+		`SELECT version.id::text
+		   FROM content.map AS map_definition
+		   JOIN content.map_version AS version
+		     ON version.map_id = map_definition.id
+		  WHERE map_definition.slug = $1
+		    AND map_definition.origin = 'official'
+		    AND map_definition.lifecycle = 'published'
+		    AND map_definition.creator_player_id IS NULL
+		    AND version.version_number = $2
+		    AND version.status = 'published'
+		    AND (
+		          SELECT count(*)
+		            FROM content.map_distribution AS distribution
+		           WHERE distribution.map_version_id = version.id
+		             AND distribution.platform IN ('desktop', 'web')
+		             AND distribution.state = 'available'
+		             AND distribution.required_game_build_version = $3
+		             AND distribution.required_protocol_version = $4
+		             AND distribution.published_at IS NOT NULL
+		        ) = 2
+		  LIMIT 1`,
+		defaultOfficialMapSlug,
+		defaultOfficialMapContentVersion,
+		gameServerBuildVersion,
+		matchProtocolVersion,
+	).Scan(&mapVersionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load default official map version: %w", err)
+	}
+	return &mapVersionID, nil
+}
+
+func loadOfficialRoundMapContract(
+	ctx context.Context,
+	queryer lobbyQueryer,
+	mapVersionID string,
+) (officialRoundMapContract, error) {
+	var contract officialRoundMapContract
+	if err := queryer.QueryRowContext(
+		ctx,
+		`SELECT map_definition.slug,
+		        map_definition.title,
+		        version.version_number,
+		        min(distribution.required_game_build_version),
+		        min(distribution.required_protocol_version)
+		   FROM content.map AS map_definition
+		   JOIN content.map_version AS version
+		     ON version.map_id = map_definition.id
+		   JOIN content.map_distribution AS distribution
+		     ON distribution.map_version_id = version.id
+		  WHERE version.id = $1
+		    AND map_definition.origin = 'official'
+		    AND map_definition.lifecycle = 'published'
+		    AND map_definition.creator_player_id IS NULL
+		    AND version.status = 'published'
+		    AND distribution.platform IN ('desktop', 'web')
+		    AND distribution.state = 'available'
+		    AND distribution.required_protocol_version IS NOT NULL
+		    AND distribution.published_at IS NOT NULL
+		  GROUP BY map_definition.slug,
+		           map_definition.title,
+		           version.version_number
+		 HAVING count(*) = 2
+		    AND count(DISTINCT distribution.platform) = 2
+		    AND min(distribution.required_game_build_version)
+		        = max(distribution.required_game_build_version)
+		    AND min(distribution.required_protocol_version)
+		        = max(distribution.required_protocol_version)`,
+		mapVersionID,
+	).Scan(
+		&contract.MapSlug,
+		&contract.DisplayName,
+		&contract.ContentVersion,
+		&contract.GameServerBuildVersion,
+		&contract.ProtocolVersion,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return officialRoundMapContract{}, newLobbyProblem(
+				grpcFailedPrecondition,
+				"the selected map is not an available official release",
+			)
+		}
+		return officialRoundMapContract{}, fmt.Errorf(
+			"validate official round map version: %w",
+			err,
+		)
+	}
+	if _, ok := officialArenaForContent(
+		contract.MapSlug,
+		contract.ContentVersion,
+	); !ok {
+		return officialRoundMapContract{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"the selected map is not bundled by this game server",
+		)
+	}
+	if contract.GameServerBuildVersion != gameServerBuildVersion ||
+		contract.ProtocolVersion != matchProtocolVersion {
+		return officialRoundMapContract{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"the selected map distribution is incompatible with this game server",
+		)
+	}
+	return contract, nil
 }
 
 func (s *postgresLobbyStore) Join(
@@ -208,6 +550,38 @@ func (s *postgresLobbyStore) Join(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := releaseAbandonedRoundPresence(ctx, tx, playerID, s.now().UTC()); err != nil {
+		return lobbySnapshot{}, err
+	}
+
+	var currentLobbyID string
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT lobby_id::text
+		   FROM game.lobby_membership
+		  WHERE player_id = $1
+		    AND left_at IS NULL
+		  FOR UPDATE`,
+		playerID,
+	).Scan(&currentLobbyID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return lobbySnapshot{}, fmt.Errorf("check current player membership: %w", err)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		currentLobbyID = ""
+	}
+	lockedLobbies, err := lockLobbyRowsInOrder(
+		ctx,
+		tx,
+		[]string{currentLobbyID, request.LobbyID},
+	)
+	if err != nil {
+		return lobbySnapshot{}, err
+	}
+	if _, targetExists := lockedLobbies[request.LobbyID]; !targetExists {
+		return lobbySnapshot{}, newLobbyProblem(grpcNotFound, "lobby not found")
+	}
+
 	var visibility string
 	var passwordHash sql.NullString
 	var maxPlayers int16
@@ -216,8 +590,7 @@ func (s *postgresLobbyStore) Join(
 		ctx,
 		`SELECT visibility::text, password_hash, max_players, closed_at
 		   FROM game.lobby
-		  WHERE id = $1
-		  FOR UPDATE`,
+		  WHERE id = $1`,
 		request.LobbyID,
 	).Scan(&visibility, &passwordHash, &maxPlayers, &closedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -235,22 +608,7 @@ func (s *postgresLobbyStore) Join(
 		}
 	}
 
-	var currentLobbyID string
-	err = tx.QueryRowContext(
-		ctx,
-		`SELECT lobby_id::text
-		   FROM game.lobby_membership
-		  WHERE player_id = $1
-		    AND left_at IS NULL`,
-		playerID,
-	).Scan(&currentLobbyID)
-	if err == nil {
-		if currentLobbyID != request.LobbyID {
-			return lobbySnapshot{}, newLobbyProblem(
-				grpcFailedPrecondition,
-				"player already belongs to another open lobby",
-			)
-		}
+	if currentLobbyID == request.LobbyID {
 		snapshot, loadErr := loadLobbySnapshot(ctx, tx, request.LobbyID)
 		if loadErr != nil {
 			return lobbySnapshot{}, loadErr
@@ -259,9 +617,6 @@ func (s *postgresLobbyStore) Join(
 			return lobbySnapshot{}, fmt.Errorf("commit existing membership lookup: %w", err)
 		}
 		return snapshot, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return lobbySnapshot{}, fmt.Errorf("check current player membership: %w", err)
 	}
 
 	var activeMembers int
@@ -278,16 +633,20 @@ func (s *postgresLobbyStore) Join(
 	if activeMembers >= int(maxPlayers) {
 		return lobbySnapshot{}, newLobbyProblem(grpcFailedPrecondition, "lobby is full")
 	}
-	if active, err := activeRoundExists(ctx, tx, request.LobbyID); err != nil {
-		return lobbySnapshot{}, err
-	} else if active {
-		return lobbySnapshot{}, newLobbyProblem(
-			grpcFailedPrecondition,
-			"cannot join while a round is active",
-		)
+	now := s.now().UTC()
+	if currentLobbyID != "" {
+		if _, err := leaveLobbyMembershipsInTransaction(
+			ctx,
+			tx,
+			currentLobbyID,
+			[]string{playerID},
+			"host_left",
+			now,
+		); err != nil {
+			return lobbySnapshot{}, fmt.Errorf("leave previous lobby before join: %w", err)
+		}
 	}
-
-	membershipID, err := newUUIDV7(s.now().UTC())
+	membershipID, err := newUUIDV7(now)
 	if err != nil {
 		return lobbySnapshot{}, err
 	}
@@ -317,6 +676,7 @@ func (s *postgresLobbyStore) Join(
 	if err != nil {
 		return lobbySnapshot{}, err
 	}
+	snapshot.DepartedLobbyID = currentLobbyID
 	if err := tx.Commit(); err != nil {
 		return lobbySnapshot{}, fmt.Errorf("commit lobby join: %w", err)
 	}
@@ -389,6 +749,19 @@ func (s *postgresLobbyStore) UpdateConfiguration(
 	if err != nil {
 		return lobbySnapshot{}, err
 	}
+	if next.MapVersionID == nil {
+		return lobbySnapshot{}, newLobbyProblem(
+			grpcFailedPrecondition,
+			"the official arena is required",
+		)
+	}
+	if _, err := loadOfficialRoundMapContract(
+		ctx,
+		tx,
+		*next.MapVersionID,
+	); err != nil {
+		return lobbySnapshot{}, err
+	}
 	now := s.now().UTC()
 	if _, err := tx.ExecContext(
 		ctx,
@@ -455,6 +828,36 @@ func (s *postgresLobbyStore) Leave(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	closed, err := leaveLobbyMembershipsInTransaction(
+		ctx,
+		tx,
+		lobbyID,
+		playerIDs,
+		hostReason,
+		s.now().UTC(),
+	)
+	if err != nil {
+		return lobbySnapshot{}, false, err
+	}
+	snapshot, err := loadLobbySnapshot(ctx, tx, lobbyID)
+	if err != nil {
+		return lobbySnapshot{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return lobbySnapshot{}, false, fmt.Errorf("commit lobby leave: %w", err)
+	}
+	return snapshot, closed, nil
+}
+
+func leaveLobbyMembershipsInTransaction(
+	ctx context.Context,
+	tx *sql.Tx,
+	lobbyID string,
+	playerIDs []string,
+	hostReason string,
+	now time.Time,
+) (bool, error) {
+
 	var currentHostID string
 	var closedAt sql.NullTime
 	if err := tx.QueryRowContext(
@@ -466,20 +869,17 @@ func (s *postgresLobbyStore) Leave(
 		lobbyID,
 	).Scan(&currentHostID, &closedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return lobbySnapshot{}, false, newLobbyProblem(grpcNotFound, "lobby not found")
+			return false, newLobbyProblem(grpcNotFound, "lobby not found")
 		}
-		return lobbySnapshot{}, false, fmt.Errorf("lock lobby for leave: %w", err)
+		return false, fmt.Errorf("lock lobby for leave: %w", err)
 	}
 	if closedAt.Valid {
-		snapshot, loadErr := loadLobbySnapshot(ctx, tx, lobbyID)
-		return snapshot, true, loadErr
+		return true, nil
 	}
 	if len(playerIDs) == 0 {
-		snapshot, loadErr := loadLobbySnapshot(ctx, tx, lobbyID)
-		return snapshot, false, loadErr
+		return false, nil
 	}
 
-	now := s.now().UTC()
 	rows, err := tx.QueryContext(
 		ctx,
 		`UPDATE game.lobby_membership
@@ -493,36 +893,29 @@ func (s *postgresLobbyStore) Leave(
 		now,
 	)
 	if err != nil {
-		return lobbySnapshot{}, false, fmt.Errorf("close lobby memberships: %w", err)
+		return false, fmt.Errorf("close lobby memberships: %w", err)
 	}
 	affected := make(map[string]struct{}, len(playerIDs))
 	for rows.Next() {
 		var playerID string
 		if err := rows.Scan(&playerID); err != nil {
 			_ = rows.Close()
-			return lobbySnapshot{}, false, fmt.Errorf("read closed lobby membership: %w", err)
+			return false, fmt.Errorf("read closed lobby membership: %w", err)
 		}
 		affected[playerID] = struct{}{}
 	}
 	if err := rows.Close(); err != nil {
-		return lobbySnapshot{}, false, fmt.Errorf("close membership result: %w", err)
+		return false, fmt.Errorf("close membership result: %w", err)
 	}
 	if len(affected) == 0 {
-		snapshot, loadErr := loadLobbySnapshot(ctx, tx, lobbyID)
-		if loadErr != nil {
-			return lobbySnapshot{}, false, loadErr
-		}
-		if err := tx.Commit(); err != nil {
-			return lobbySnapshot{}, false, fmt.Errorf("commit idempotent lobby leave: %w", err)
-		}
-		return snapshot, snapshot.Closed, nil
+		return false, nil
 	}
 
 	_, hostDeparted := affected[currentHostID]
 	closed := false
 	if hostDeparted {
 		if hostReason != "host_left" && hostReason != "host_disconnected" {
-			return lobbySnapshot{}, false, errors.New("invalid host departure reason")
+			return false, errors.New("invalid host departure reason")
 		}
 		if _, err := tx.ExecContext(
 			ctx,
@@ -533,7 +926,7 @@ func (s *postgresLobbyStore) Leave(
 			lobbyID,
 			now,
 		); err != nil {
-			return lobbySnapshot{}, false, fmt.Errorf("close current host assignment: %w", err)
+			return false, fmt.Errorf("close current host assignment: %w", err)
 		}
 
 		var replacementHostID string
@@ -559,14 +952,14 @@ func (s *postgresLobbyStore) Leave(
 				lobbyID,
 				now,
 			); err != nil {
-				return lobbySnapshot{}, false, fmt.Errorf("close empty lobby: %w", err)
+				return false, fmt.Errorf("close empty lobby: %w", err)
 			}
 		case err != nil:
-			return lobbySnapshot{}, false, fmt.Errorf("select replacement lobby host: %w", err)
+			return false, fmt.Errorf("select replacement lobby host: %w", err)
 		default:
 			assignmentID, idErr := newUUIDV7(now)
 			if idErr != nil {
-				return lobbySnapshot{}, false, idErr
+				return false, idErr
 			}
 			if _, err := tx.ExecContext(
 				ctx,
@@ -579,7 +972,7 @@ func (s *postgresLobbyStore) Leave(
 				hostReason,
 				now,
 			); err != nil {
-				return lobbySnapshot{}, false, fmt.Errorf("insert replacement host assignment: %w", err)
+				return false, fmt.Errorf("insert replacement host assignment: %w", err)
 			}
 			if _, err := tx.ExecContext(
 				ctx,
@@ -590,7 +983,7 @@ func (s *postgresLobbyStore) Leave(
 				lobbyID,
 				replacementHostID,
 			); err != nil {
-				return lobbySnapshot{}, false, fmt.Errorf("assign replacement lobby host: %w", err)
+				return false, fmt.Errorf("assign replacement lobby host: %w", err)
 			}
 		}
 	} else {
@@ -601,7 +994,7 @@ func (s *postgresLobbyStore) Leave(
 			  WHERE id = $1`,
 			lobbyID,
 		); err != nil {
-			return lobbySnapshot{}, false, fmt.Errorf("advance lobby version after leave: %w", err)
+			return false, fmt.Errorf("advance lobby version after leave: %w", err)
 		}
 	}
 	if closed {
@@ -616,18 +1009,74 @@ func (s *postgresLobbyStore) Leave(
 			lobbyID,
 			now,
 		); err != nil {
-			return lobbySnapshot{}, false, fmt.Errorf("abort active round with empty lobby: %w", err)
+			return false, fmt.Errorf("abort active round with empty lobby: %w", err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`DELETE FROM game.round_live_checkpoint
+			  WHERE round_id IN (
+			        SELECT id
+			          FROM game.game_round
+			         WHERE lobby_id = $1
+			           AND status = 'aborted'
+			      )`,
+			lobbyID,
+		); err != nil {
+			return false, fmt.Errorf(
+				"delete aborted round live checkpoint: %w",
+				err,
+			)
 		}
 	}
+	return closed, nil
+}
 
-	snapshot, err := loadLobbySnapshot(ctx, tx, lobbyID)
+func lockLobbyRowsInOrder(
+	ctx context.Context,
+	tx *sql.Tx,
+	lobbyIDs []string,
+) (map[string]struct{}, error) {
+	unique := make(map[string]struct{}, len(lobbyIDs))
+	ordered := make([]string, 0, len(lobbyIDs))
+	for _, lobbyID := range lobbyIDs {
+		if lobbyID == "" {
+			continue
+		}
+		if _, exists := unique[lobbyID]; exists {
+			continue
+		}
+		unique[lobbyID] = struct{}{}
+		ordered = append(ordered, lobbyID)
+	}
+	sort.Strings(ordered)
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT id::text
+		   FROM game.lobby
+		  WHERE id = ANY($1::uuid[])
+		  ORDER BY id
+		  FOR UPDATE`,
+		pq.Array(ordered),
+	)
 	if err != nil {
-		return lobbySnapshot{}, false, err
+		return nil, fmt.Errorf("lock lobby transition rows: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return lobbySnapshot{}, false, fmt.Errorf("commit lobby leave: %w", err)
+	locked := make(map[string]struct{}, len(ordered))
+	for rows.Next() {
+		var lobbyID string
+		if err := rows.Scan(&lobbyID); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("read locked lobby transition row: %w", err)
+		}
+		locked[lobbyID] = struct{}{}
 	}
-	return snapshot, closed, nil
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close lobby transition lock rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read lobby transition locks: %w", err)
+	}
+	return locked, nil
 }
 
 func (s *postgresLobbyStore) begin(ctx context.Context) (*sql.Tx, error) {
@@ -813,11 +1262,16 @@ func loadLobbySnapshot(
 	snapshot.Members = make([]lobbyMemberSnapshot, 0, snapshot.MaxPlayers)
 	rows, err := queryer.QueryContext(
 		ctx,
-		`SELECT player_id::text, joined_at, hunter_nominated
-		   FROM game.lobby_membership
-		  WHERE lobby_id = $1
-		    AND left_at IS NULL
-		  ORDER BY joined_at, id`,
+		`SELECT membership.player_id::text,
+		        player.hive_username,
+		        membership.joined_at,
+		        membership.hunter_nominated
+		   FROM game.lobby_membership AS membership
+		   JOIN identity.player AS player
+		     ON player.id = membership.player_id
+		  WHERE membership.lobby_id = $1
+		    AND membership.left_at IS NULL
+		  ORDER BY membership.joined_at, membership.id`,
 		lobbyID,
 	)
 	if err != nil {
@@ -829,6 +1283,7 @@ func loadLobbySnapshot(
 		var hunterNominated bool
 		if err := rows.Scan(
 			&member.PlayerID,
+			&member.DisplayName,
 			&member.JoinedAt,
 			&hunterNominated,
 		); err != nil {

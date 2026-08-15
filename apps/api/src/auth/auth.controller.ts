@@ -56,6 +56,13 @@ export class AuthController {
     return this.auth.createHiveSession(parse(hiveSessionSchema, body));
   }
 
+  @Post('guest')
+  @HttpCode(HttpStatus.CREATED)
+  @Header('Cache-Control', 'no-store')
+  public async createGuestSession() {
+    return this.auth.createGuestSession();
+  }
+
   @Post('google/exchange')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')

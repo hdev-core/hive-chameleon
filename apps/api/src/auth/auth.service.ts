@@ -1,7 +1,13 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import { createUuidV7 } from '@hive-chameleon/database';
-import { ConflictException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 
 import type { AuthConfig } from './auth.config';
 import {
@@ -37,7 +43,7 @@ export type GoogleExchangeResponse =
       readonly expiresAt: string;
       readonly externalIdentityId: string;
       readonly kind: 'onboarding';
-      readonly nextStep: 'acknowledge_disclosure' | 'choose_username';
+      readonly nextStep: 'choose_username';
       readonly onboardingToken: string;
     };
 
@@ -124,6 +130,19 @@ export class AuthService {
     );
   }
 
+  public async createGuestSession(now = new Date()): Promise<AuthTokensResponse> {
+    if (!this.config.publicGuestSessionsEnabled) {
+      throw new ServiceUnavailableException({
+        code: 'guest_sessions_unavailable',
+        detail: 'Public guest sessions are not enabled in this environment.',
+        status: 503,
+        title: 'Guest sessions unavailable',
+      });
+    }
+    const player = await this.repository.createGuestPlayer();
+    return this.createSession(player, 'webgl', 'guest', null, null, false, now);
+  }
+
   public async exchangeGoogle(
     input: {
       readonly authorizationCode: string;
@@ -168,9 +187,7 @@ export class AuthService {
       expiresAt: onboarding.expiresAt.toISOString(),
       externalIdentityId: externalIdentity.id,
       kind: 'onboarding',
-      nextStep: externalIdentity.disclosureAcknowledged
-        ? 'choose_username'
-        : 'acknowledge_disclosure',
+      nextStep: 'choose_username',
       onboardingToken: onboarding.token,
     };
   }

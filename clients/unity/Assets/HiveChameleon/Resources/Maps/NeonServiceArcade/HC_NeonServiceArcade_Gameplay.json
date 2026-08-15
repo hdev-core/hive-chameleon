@@ -1,0 +1,124 @@
+{
+  "markers": [
+    {
+      "name": "SPAWN_Hider_01",
+      "position_blender_xyz": [
+        -8.0,
+        4.2,
+        0.05
+      ],
+      "position_unity_xyz": [
+        -8.0,
+        0.05,
+        -4.2
+      ],
+      "rotation_blender_z_degrees": -25.0,
+      "rotation_unity_y_degrees": -25.0
+    },
+    {
+      "name": "SPAWN_Hider_02",
+      "position_blender_xyz": [
+        -0.2,
+        5.8,
+        0.05
+      ],
+      "position_unity_xyz": [
+        -0.2,
+        0.05,
+        -5.8
+      ],
+      "rotation_blender_z_degrees": 150.0,
+      "rotation_unity_y_degrees": 150.0
+    },
+    {
+      "name": "SPAWN_Hider_03",
+      "position_blender_xyz": [
+        4.8,
+        3.2,
+        0.05
+      ],
+      "position_unity_xyz": [
+        4.8,
+        0.05,
+        -3.2
+      ],
+      "rotation_blender_z_degrees": -70.0,
+      "rotation_unity_y_degrees": -70.0
+    },
+    {
+      "name": "SPAWN_Hider_04",
+      "position_blender_xyz": [
+        8.5,
+        1.2,
+        0.05
+      ],
+      "position_unity_xyz": [
+        8.5,
+        0.05,
+        -1.2
+      ],
+      "rotation_blender_z_degrees": 110.0,
+      "rotation_unity_y_degrees": 110.0
+    },
+    {
+      "name": "SPAWN_Hider_05",
+      "position_blender_xyz": [
+        7.6,
+        -6.2,
+        0.05
+      ],
+      "position_unity_xyz": [
+        7.6,
+        0.05,
+        6.2
+      ],
+      "rotation_blender_z_degrees": 135.0,
+      "rotation_unity_y_degrees": 135.0
+    },
+    {
+      "name": "SPAWN_Hider_06",
+      "position_blender_xyz": [
+        4.8,
+        -6.7,
+        0.05
+      ],
+      "position_unity_xyz": [
+        4.8,
+        0.05,
+        6.7
+      ],
+      "rotation_blender_z_degrees": 35.0,
+      "rotation_unity_y_degrees": 35.0
+    },
+    {
+      "name": "SPAWN_Hunter_01",
+      "position_blender_xyz": [
+        -8.2,
+        -6.5,
+        0.05
+      ],
+      "position_unity_xyz": [
+        -8.2,
+        0.05,
+        6.5
+      ],
+      "rotation_blender_z_degrees": 35.0,
+      "rotation_unity_y_degrees": 35.0
+    },
+    {
+      "name": "SPAWN_Hunter_02",
+      "position_blender_xyz": [
+        -8.7,
+        -4.1,
+        0.05
+      ],
+      "position_unity_xyz": [
+        -8.7,
+        0.05,
+        4.1
+      ],
+      "rotation_blender_z_degrees": 25.0,
+      "rotation_unity_y_degrees": 25.0
+    }
+  ]
+}

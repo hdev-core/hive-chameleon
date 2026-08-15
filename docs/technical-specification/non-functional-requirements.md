@@ -24,10 +24,9 @@ network layout, and the production custody provider remain separate deployment d
 3. Runtime secrets are injected through an approved secret boundary with least-privilege access,
    rotation, and an owner. They are not committed to Git, built into Unity/WebGL artifacts, stored
    in PostgreSQL domain rows, printed in logs, or made available to ordinary CI jobs.
-   The only build-time exception is an ignored, disposable local WebGL development build, which
-   may contain a local-only bearer credential so a browser client can exercise the development
-   stack. That credential is never a production secret, must be replaceable without data loss,
-   and the resulting build must never be committed, published, or promoted.
+   The local WebGL development build is credential-neutral. A localhost-only launcher supplies
+   replaceable, short-lived client credentials to the served page at runtime; neither the launcher
+   output nor the resulting development build may be committed, published, or promoted.
 4. Hive player keys, service-account keys, raw signup codes, and custody-provider credentials stay
    within their isolated boundaries. The general API, Unity client, Nakama runtime, and CI system
    receive no raw signing key. Production custody must pass the provider gate in the
@@ -46,13 +45,13 @@ network layout, and the production custody provider remain separate deployment d
    dependency review, secret scanning, static analysis, and an SBOM/container vulnerability scan;
    unresolved critical vulnerabilities block production promotion.
 
-## 3. Privacy and immutable-record compliance
+## 3. Privacy and immutable-Hive-record compliance
 
 ### 3.1 No personal or doxxing data on-chain
 
-On-chain payloads contain only the fields approved by the product and Hive-layer protocols: the
-public Hive username plus bounded gameplay facts (such as participation, role, score, outcome, and
-likes) or the ownership, payment, and creator facts required by that protocol. They must not
+On-chain payloads contain only the fields approved by the product and Hive-layer protocols, such as
+the public Hive username and the ownership, payment, account, or creator facts required by that
+protocol. They must not
 contain email addresses, Google issuer/subject values, IP addresses, device or browser
 fingerprints, KYC or identity-verification attributes/documents, access tokens, session
 identifiers, private lobby data, free-form support text, or other personal/doxxing material.
@@ -60,12 +59,11 @@ identifiers, private lobby data, free-form support text, or other personal/doxxi
 Every new or changed on-chain schema requires a field-level privacy review before deployment.
 Logging or hashing a prohibited value does not make it acceptable for publication.
 
-### 3.2 Permanent public-record notice
+### 3.2 Permanent Hive-record notice
 
-Before Google-backed account creation and before a direct-Hive player's first match, the current
-Terms of Service and product disclosure must state plainly that approved Hive records are public,
-permanent, immutable, and not erasable by an off-chain deletion request. The player must
-affirmatively accept the versioned text, and the backend records the version and content hash.
+Terms of Service and the relevant confirmation flow must state plainly that a player-authorized
+Hive action creates a public, permanent record that is not erasable by an off-chain deletion
+request. The confirmation is shown in the context of the action being authorized.
 
 An off-chain deletion or account-support workflow may remove or restrict data that the platform
 controls, subject to the approved retention policy, but it must never claim to delete, rewrite, or
@@ -165,4 +163,4 @@ age, and deployment version. Alerts must identify an owner and a user-visible im
 
 This baseline is satisfied when the production-shaped stack passes the stated load profile,
 backup restore meets RPO/RTO, environment isolation is demonstrated, CI enforces the release
-gates, and the privacy/immutability disclosures are present in the approved product flow.
+gates, and privacy plus irreversible-action confirmations are present in the approved product flow.

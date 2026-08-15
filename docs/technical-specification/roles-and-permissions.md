@@ -25,7 +25,7 @@ by default.
 
 | Role/capability | Scope | How it is obtained | Primary permissions |
 | --- | --- | --- | --- |
-| Pending identity | One onboarding job | Successful Google OIDC before provisioning is ready | Complete disclosure, reserve/confirm a username, inspect the same provisioning operation; no gameplay or ordinary player API |
+| Pending identity | One onboarding job | Successful Google OIDC before provisioning is ready | Reserve/confirm a username, inspect the same provisioning operation; no gameplay or ordinary player API |
 | Player | Own account | Verified direct-Hive login or completed Google-to-Hive provisioning | Play, manage own profile/settings/appearance, initiate own Hive actions, view permitted product data |
 | Lobby host | One active lobby | Server assignment, transfer, or host migration | Configure/start the lobby, kick eligible members, transfer host, set supported round options |
 | Map creator | Own maps/versions | Authenticated player creates a map record | Draft, upload, submit, revise, view review feedback, publish an approved showcase through own Hive authority |
@@ -99,10 +99,9 @@ Service identities are not assignable human roles and are never accepted from a 
 | Service identity | Allowed responsibility | Explicitly excluded |
 | --- | --- | --- |
 | NestJS application | Product HTTP authorization and durable orchestration | Raw Hive/service keys, authoritative frame simulation |
-| Nakama runtime | Lobby/match authority, presence, reconnect, terminal result production | Official Hive publication, treasury, account provisioning |
-| Provisioning worker | Sponsor/custody orchestration and on-chain verification | Sponsor Hive key, match publication, treasury work |
+| Nakama runtime | Lobby/match authority, presence, reconnect, terminal result production | Hive signing, treasury, account provisioning |
+| Provisioning worker | Sponsor/custody orchestration and on-chain verification | Sponsor Hive key, collectible issuance, treasury work |
 | HAF projection worker | Fork-aware reads, validation, projection, irreversibility | Broadcasting or inventing chain effects |
-| Match publisher | Approved match batch/correction/invalidation operations | Player, issuer, treasury, or sponsor actions |
 | Collectible issuer | Approved issue/revoke events | Payments, player actions, match results |
 | Treasury | Approved bounded payouts | Player debits, arbitrary recipients/assets/amounts |
 | RC support | Approved later RC assistance/reclaim | Initial sponsored provisioning or unrelated Hive actions |
@@ -121,7 +120,7 @@ independent protected-environment approval:
 - grant or extend `platform_administrator`, `security_auditor`, or treasury-policy authority;
 - change a production signer account, custody policy, sponsor policy, or allowed Hive operation;
 - approve a manual treasury payout or raise payout/recipient/asset limits;
-- publish a match correction/invalidation outside a pre-approved automated reconciliation; and
+- rewrite or delete an authoritative completed result or revision; and
 - disable audit/security controls or perform a destructive production restore.
 
 The initiating actor cannot approve the same change. Break-glass access is time-limited,

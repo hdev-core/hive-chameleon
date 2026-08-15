@@ -36,6 +36,31 @@ describe('loadRealtimeConfig', () => {
       }),
     ).toThrow(/at least 32 bytes/);
   });
+
+  it('allows only the explicitly opted-in Compose HTTP service in production', () => {
+    const production = {
+      ...developmentEnvironment(),
+      NAKAMA_SOCKET_URL: 'wss://game.example.test/ws',
+      NODE_ENV: 'production',
+    };
+    expect(() =>
+      loadRealtimeConfig({ ...production, NAKAMA_HTTP_URL: 'http://nakama:7350' }),
+    ).toThrow(/must use TLS/);
+    expect(
+      loadRealtimeConfig({
+        ...production,
+        NAKAMA_ALLOW_PRIVATE_NETWORK_HTTP: 'true',
+        NAKAMA_HTTP_URL: 'http://nakama:7350',
+      }).nakama?.httpUrl,
+    ).toBe('http://nakama:7350/');
+    expect(() =>
+      loadRealtimeConfig({
+        ...production,
+        NAKAMA_ALLOW_PRIVATE_NETWORK_HTTP: 'true',
+        NAKAMA_HTTP_URL: 'http://untrusted.example:7350',
+      }),
+    ).toThrow(/must use TLS/);
+  });
 });
 
 function developmentEnvironment(): NodeJS.ProcessEnv {

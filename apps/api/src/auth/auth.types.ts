@@ -11,6 +11,7 @@ export interface PlayerIdentity {
     | 'authority_claimed_recovery_pending'
     | 'self_custody_complete';
   readonly hiveUsername: string;
+  readonly isGuest: boolean;
 }
 
 export interface HiveLoginChallengeRecord {
@@ -22,20 +23,18 @@ export interface HiveLoginChallengeRecord {
 }
 
 export interface ExternalIdentityRecord {
-  readonly disclosureAcknowledged: boolean;
   readonly id: string;
   readonly player: PlayerIdentity | null;
   readonly status: 'provisioning' | 'linked' | 'disabled';
 }
 
 export interface ActiveSessionRecord extends BridgePrincipal {
-  readonly disclosureAcknowledged: boolean;
   readonly expiresAt: Date;
   readonly player: PlayerIdentity;
 }
 
 export interface NewSession {
-  readonly authenticationMethod: 'direct_hive_challenge' | 'google_oidc';
+  readonly authenticationMethod: 'direct_hive_challenge' | 'google_oidc' | 'guest';
   readonly custodialSigningEligible: boolean;
   readonly expiresAt: Date;
   readonly externalIdentityId: string | null;
@@ -61,6 +60,7 @@ export interface AuthRepository {
     consumedAt: Date,
   ): Promise<HiveLoginChallengeRecord | null>;
   findOrCreateDirectHivePlayer(hiveUsername: string): Promise<PlayerIdentity>;
+  createGuestPlayer(): Promise<PlayerIdentity>;
   createSession(session: NewSession): Promise<void>;
   rotateSession(
     currentRefreshTokenHash: string,
@@ -74,26 +74,6 @@ export interface AuthRepository {
     subjectLookupHash: string,
     authenticatedAt: Date,
   ): Promise<ExternalIdentityRecord>;
-  getCurrentDisclosure(at: Date): Promise<PublicRecordDisclosure | null>;
-  acknowledgeCurrentDisclosure(input: {
-    readonly acknowledgedAt: Date;
-    readonly contentSha256: string;
-    readonly disclosureVersion: string;
-    readonly externalIdentityId: string | null;
-    readonly playerId: string | null;
-  }): Promise<DisclosureAcknowledgment | null>;
-}
-
-export interface PublicRecordDisclosure {
-  readonly contentSha256: string;
-  readonly effectiveAt: Date;
-  readonly version: string;
-}
-
-export interface DisclosureAcknowledgment {
-  readonly acknowledgedAt: Date;
-  readonly disclosureVersion: string;
-  readonly id: string;
 }
 
 export interface HivePostingAuthorityVerifier {
@@ -130,8 +110,6 @@ export interface OnboardingPrincipal {
 export interface OnboardingHttpRequest extends AuthHttpRequest {
   onboardingPrincipal?: OnboardingPrincipal;
 }
-
-export type DisclosureHttpRequest = OnboardingHttpRequest;
 
 export const AUTH_CONFIG = Symbol('AUTH_CONFIG');
 export const AUTH_REPOSITORY = Symbol('AUTH_REPOSITORY');

@@ -25,13 +25,26 @@ func TestCommitTerminalResultCommitsBundleAndCompletesRoundLast(t *testing.T) {
 		  WHERE id = $1
 		  FOR UPDATE`)).WithArgs(input.RoundID).
 		WillReturnRows(sqlmock.NewRows([]string{"status", "canonical_result_sha256"}).AddRow("answer_check", nil))
+	mock.ExpectExec("UPDATE game.game_round").
+		WithArgs(
+			input.RoundID,
+			sqlmock.AnyArg(),
+			input.ResultSchemaVersion,
+			input.ScoringRuleVersion,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO game.round_participant").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO game.round_participant").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO game.round_discovery").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO game.round_like").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO game.round_result_revision").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO game.match_publication_request").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO game.match_publication_request").
+		WithArgs(input.PublicationRequestID, input.RoundID, input.RevisionID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE game.game_round").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM game.round_live_checkpoint").
+		WithArgs(input.RoundID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	outcome, err := commitTerminalResult(context.Background(), database, input)
@@ -62,11 +75,13 @@ func TestCommitTerminalResultReplaysSameCanonicalBundle(t *testing.T) {
 	mock.ExpectQuery("SELECT revision.canonical_complete_result_sha256").WithArgs(input.RoundID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"canonical_complete_result_sha256",
-			"canonical_result_object_key",
+			"canonical_complete_result",
 			"result_schema_version",
 			"scoring_rule_version",
-			"request_count",
-		}).AddRow(hashString, input.CanonicalResultObjectKey, input.ResultSchemaVersion, input.ScoringRuleVersion, 1))
+		}).AddRow(hashString, input.CanonicalCompleteResult, input.ResultSchemaVersion, input.ScoringRuleVersion))
+	mock.ExpectExec("DELETE FROM game.round_live_checkpoint").
+		WithArgs(input.RoundID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
 	outcome, err := commitTerminalResult(context.Background(), database, input)
@@ -75,6 +90,9 @@ func TestCommitTerminalResultReplaysSameCanonicalBundle(t *testing.T) {
 	}
 	if outcome != terminalResultReplayed {
 		t.Fatalf("expected replayed, got %q", outcome)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("replay must not insert a duplicate publication request: %v", err)
 	}
 }
 
@@ -90,15 +108,14 @@ func terminalResultFixture() terminalResultCommit {
 	endedAt := time.Date(2026, time.July, 23, 12, 5, 0, 0, time.UTC)
 	foundAt := endedAt.Add(-time.Minute)
 	return terminalResultCommit{
-		RoundID:                  "01900000-0000-7000-8000-000000000001",
-		RevisionID:               "01900000-0000-7000-8000-000000000002",
-		PublicationRequestID:     "01900000-0000-7000-8000-000000000003",
-		EndedAt:                  endedAt,
-		WinningSide:              "hunters",
-		ResultSchemaVersion:      "match-result-1",
-		ScoringRuleVersion:       "scoring-1",
-		CanonicalCompleteResult:  []byte(`{"v":1,"round_id":"01900000-0000-7000-8000-000000000001"}`),
-		CanonicalResultObjectKey: "round-results/01900000-0000-7000-8000-000000000001/1.json",
+		RoundID:                 "01900000-0000-7000-8000-000000000001",
+		RevisionID:              "01900000-0000-7000-8000-000000000002",
+		PublicationRequestID:    "01900000-0000-7000-8000-000000000003",
+		EndedAt:                 endedAt,
+		WinningSide:             "hunters",
+		ResultSchemaVersion:     "match-result-1",
+		ScoringRuleVersion:      "scoring-1",
+		CanonicalCompleteResult: []byte(`{"v":1,"round_id":"01900000-0000-7000-8000-000000000001"}`),
 		Participants: []terminalParticipant{
 			{
 				ID: "01900000-0000-7000-8000-000000000010", PlayerID: "01900000-0000-7000-8000-000000000011",

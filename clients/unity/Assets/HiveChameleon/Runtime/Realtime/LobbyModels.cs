@@ -3,9 +3,30 @@ using System;
 namespace HiveChameleon.Realtime
 {
     [Serializable]
+    public sealed class AvailableMapSnapshot
+    {
+        public string map_version_id = string.Empty;
+        public string map_slug = string.Empty;
+        public string display_name = string.Empty;
+        public string description = string.Empty;
+        public string content_version = string.Empty;
+        public string authority_geometry_version = string.Empty;
+        public string authority_geometry_digest = string.Empty;
+        public int recommended_minimum_players;
+        public int recommended_maximum_players;
+    }
+
+    [Serializable]
+    public sealed class AvailableMapResponse
+    {
+        public AvailableMapSnapshot[] maps = Array.Empty<AvailableMapSnapshot>();
+    }
+
+    [Serializable]
     public sealed class LobbyMemberSnapshot
     {
         public string player_id = string.Empty;
+        public string display_name = string.Empty;
         public string joined_at = string.Empty;
     }
 
@@ -48,15 +69,23 @@ namespace HiveChameleon.Realtime
         public string id = string.Empty;
         public int sequence_number;
         public string mode = string.Empty;
+        public string map_version_id = string.Empty;
+        public string map_slug = string.Empty;
+        public string map_display_name = string.Empty;
+        public string map_content_version = string.Empty;
+        public string game_server_build_version = string.Empty;
+        public string protocol_version = string.Empty;
+        public string authority_geometry_version = string.Empty;
+        public string authority_geometry_digest = string.Empty;
         public string status = string.Empty;
         public string started_at = string.Empty;
         public string phase_deadline = string.Empty;
-        public int target_slot_count;
         public int hiders_total;
         public int hiders_remaining;
         public string[] discovered_hider_player_ids = Array.Empty<string>();
         public string winning_side = string.Empty;
         public string completion_reason = string.Empty;
+        public string result_revision_id = string.Empty;
     }
 
     [Serializable]
@@ -64,9 +93,9 @@ namespace HiveChameleon.Realtime
     {
         public string round_id = string.Empty;
         public string player_id = string.Empty;
+        public string initial_role = string.Empty;
         public string role = string.Empty;
         public bool hunter_volunteer;
-        public int hiding_slot;
     }
 
     [Serializable]
@@ -74,9 +103,9 @@ namespace HiveChameleon.Realtime
     {
         public string round_id = string.Empty;
         public string player_id = string.Empty;
+        public string initial_role = string.Empty;
         public string role = string.Empty;
         public string status = string.Empty;
-        public int hiding_slot;
         public int shells_remaining;
         public string reload_until = string.Empty;
     }
@@ -88,8 +117,8 @@ namespace HiveChameleon.Realtime
         public string hunter_player_id = string.Empty;
         public string hider_player_id = string.Empty;
         public int sequence;
-        public int aim_slot;
         public string occurred_at = string.Empty;
+        public bool caused_infection_conversion;
     }
 
     [Serializable]
@@ -99,12 +128,131 @@ namespace HiveChameleon.Realtime
         public string command_id = string.Empty;
         public bool accepted;
         public string reason = string.Empty;
-        public int aim_slot;
+        public string target_player_id = string.Empty;
         public bool hit;
         public string hider_player_id = string.Empty;
         public int shells_remaining;
         public string reload_until = string.Empty;
         public bool round_is_terminal;
+    }
+
+    [Serializable]
+    public sealed class SpectatorStateSnapshot
+    {
+        public string round_id = string.Empty;
+        public string phase = string.Empty;
+        public bool eligible;
+        public string reason = string.Empty;
+        public string[] camera_modes = Array.Empty<string>();
+        public string[] visible_hider_player_ids = Array.Empty<string>();
+        public string[] visible_player_name_ids = Array.Empty<string>();
+        public SpectatorPlayerSnapshot[] players =
+            Array.Empty<SpectatorPlayerSnapshot>();
+    }
+
+    [Serializable]
+    public sealed class SpectatorPlayerSnapshot
+    {
+        public string player_id = string.Empty;
+        public string display_name = string.Empty;
+        public string role = string.Empty;
+        public string status = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class AnswerCheckReveal
+    {
+        public string player_id = string.Empty;
+        public string display_name = string.Empty;
+        public string cue = string.Empty;
+        public bool found;
+        public string role = "hider";
+        public string status = "active";
+        public bool avatar_state_available;
+        public float position_x;
+        public float position_y;
+        public float position_z;
+        public float yaw;
+        public float body_r;
+        public float body_g;
+        public float body_b;
+        public float accent_r;
+        public float accent_g;
+        public float accent_b;
+        public string pose = "standing";
+        public int avatar_sequence;
+        public string avatar_occurred_at = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class AnswerCheckSnapshot
+    {
+        public string round_id = string.Empty;
+        public string mode = string.Empty;
+        public string winning_side = string.Empty;
+        public string deadline = string.Empty;
+        public AnswerCheckReveal[] reveals = Array.Empty<AnswerCheckReveal>();
+        public int like_count;
+        public string scoring_rules = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class RoundScoreBreakdown
+    {
+        public string rule = string.Empty;
+        public int survival;
+        public int survived_timeout;
+        public int infection_final_survivor;
+        public int discoveries;
+        public int discovery_speed;
+        public int hunter_win;
+        public int disguise_likes;
+        public int total;
+    }
+
+    [Serializable]
+    public sealed class RoundScoreEntry
+    {
+        public string player_id = string.Empty;
+        public string display_name = string.Empty;
+        public int rank;
+        public string total = string.Empty;
+        public string outcome = string.Empty;
+        public RoundScoreBreakdown breakdown = new RoundScoreBreakdown();
+    }
+
+    [Serializable]
+    public sealed class RoundScoreSnapshot
+    {
+        public string round_id = string.Empty;
+        public string phase = string.Empty;
+        public bool final;
+        public long batch_sequence;
+        public string scoring_rule_version = string.Empty;
+        public string computed_at = string.Empty;
+        public RoundScoreEntry[] entries = Array.Empty<RoundScoreEntry>();
+    }
+
+    [Serializable]
+    public sealed class AnswerCheckLikeResult
+    {
+        public string round_id = string.Empty;
+        public string command_id = string.Empty;
+        public bool accepted;
+        public string reason = string.Empty;
+        public string target_hider_player_id = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class RoundReconnectSnapshot
+    {
+        public string round_id = string.Empty;
+        public string player_id = string.Empty;
+        public string status = string.Empty;
+        public string expires_at = string.Empty;
+        public string role = string.Empty;
+        public string player_status = string.Empty;
+        public bool outcome_preserved;
     }
 
     [Serializable]
@@ -114,6 +262,7 @@ namespace HiveChameleon.Realtime
         public LobbySnapshot lobby = new LobbySnapshot();
         public bool start_accepted;
         public RoundSnapshot round;
+        public RoundReconnectSnapshot reconnect;
     }
 
     public sealed class LobbyConfigurationDraft
@@ -170,11 +319,17 @@ namespace HiveChameleon.Realtime
     {
         public string lobby_id = string.Empty;
         public string password = string.Empty;
-        public string join_source = "server_browser";
+        public string join_source = "access_code";
     }
 
     [Serializable]
     internal sealed class LeaveLobbyCommand
+    {
+        public string lobby_id = string.Empty;
+    }
+
+    [Serializable]
+    internal sealed class MatchReconnectCommand
     {
         public string lobby_id = string.Empty;
     }
@@ -198,7 +353,136 @@ namespace HiveChameleon.Realtime
     internal sealed class HunterFireCommand
     {
         public string command_id = string.Empty;
-        public int aim_slot;
+        public string target_player_id = string.Empty;
+        public float aim_yaw;
+        public float aim_pitch;
+    }
+
+    [Serializable]
+    public sealed class AvatarStateCommand
+    {
+        public float position_x;
+        public float position_y;
+        public float position_z;
+        public float yaw;
+        public float pitch;
+        public float body_r;
+        public float body_g;
+        public float body_b;
+        public float accent_r;
+        public float accent_g;
+        public float accent_b;
+        public string pose = "standing";
+    }
+
+    [Serializable]
+    public sealed class AvatarStateSnapshot
+    {
+        public string round_id = string.Empty;
+        public string player_id = string.Empty;
+        public string display_name = string.Empty;
+        public string role = string.Empty;
+        public string status = string.Empty;
+        public float position_x;
+        public float position_y;
+        public float position_z;
+        public float yaw;
+        public float pitch;
+        public float body_r;
+        public float body_g;
+        public float body_b;
+        public float accent_r;
+        public float accent_g;
+        public float accent_b;
+        public string pose = "standing";
+        public int sequence;
+        public string occurred_at = string.Empty;
+        public bool correction;
+    }
+
+    [Serializable]
+    public sealed class PaintPoint
+    {
+        public float u;
+        public float v;
+
+        public PaintPoint() { }
+
+        public PaintPoint(float horizontal, float vertical)
+        {
+            u = horizontal;
+            v = vertical;
+        }
+    }
+
+    [Serializable]
+    public sealed class PaintMaterialSnapshot
+    {
+        public float base_r = 1f;
+        public float base_g = 1f;
+        public float base_b = 1f;
+        public float metallic;
+        public float roughness = 0.82f;
+        public float emission_r;
+        public float emission_g;
+        public float emission_b;
+        public float emission_intensity;
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeCommand
+    {
+        public string body_id = string.Empty;
+        public string renderer_id = string.Empty;
+        public PaintPoint[] points = Array.Empty<PaintPoint>();
+        public float radius = 0.04f;
+        public float hardness = 1f;
+        public float opacity = 1f;
+        public PaintMaterialSnapshot material = new PaintMaterialSnapshot();
+        public int channels = 1;
+        public long client_sequence;
+        public long client_tick;
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeSnapshot
+    {
+        public string round_id = string.Empty;
+        public string player_id = string.Empty;
+        public string body_id = string.Empty;
+        public string renderer_id = string.Empty;
+        public PaintPoint[] points = Array.Empty<PaintPoint>();
+        public float radius;
+        public float hardness;
+        public float opacity;
+        public PaintMaterialSnapshot material = new PaintMaterialSnapshot();
+        public int channels;
+        public long sequence;
+        public long client_sequence;
+        public long client_tick;
+        public string occurred_at = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeBatch
+    {
+        public PaintStrokeSnapshot[] strokes = Array.Empty<PaintStrokeSnapshot>();
+    }
+
+    [Serializable]
+    public sealed class PaintStrokeResult
+    {
+        public string round_id = string.Empty;
+        public long client_sequence;
+        public bool accepted;
+        public string reason = string.Empty;
+    }
+
+    [Serializable]
+    internal sealed class AnswerCheckLikeCommand
+    {
+        public string command_id = string.Empty;
+        public string target_hider_player_id = string.Empty;
     }
 
     [Serializable]

@@ -10,12 +10,32 @@ export interface TransactionOptions {
 }
 
 export function createDatabasePool(config: PoolConfig): Pool {
-  return new Pool({
+  const pool = new Pool({
     max: 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
     ...config,
   });
+
+  // `pg` emits 'error' on the Pool when an *idle* backend connection fails
+  // (e.g. Postgres restarts and sends "terminating connection due to
+  // administrator command"). With no listener, Node treats it as an unhandled
+  // 'error' event and crashes the whole process — which silently stranded the
+  // publication workers whenever the database bounced. A default listener keeps
+  // the drop non-fatal: pg evicts the broken client and the next `connect()`
+  // dials a fresh one. Callers may still attach their own 'error' listeners for
+  // richer handling; pg supports multiple.
+  pool.on('error', (error: Error) => {
+    process.stderr.write(
+      `${JSON.stringify({
+        level: 'warn',
+        event: 'database_pool_idle_client_error',
+        message: error.message,
+      })}\n`,
+    );
+  });
+
+  return pool;
 }
 
 export async function checkDatabaseConnection(pool: Pool): Promise<void> {

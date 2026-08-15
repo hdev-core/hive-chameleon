@@ -48,8 +48,9 @@ services:
         -f /tests/001_schema.sql
         -f /tests/002_constraints.sql
         -f /tests/003_terminal_round.sql
-        -f /tests/004_projection_corrections.sql
+        -f /tests/004_result_revisions.sql
         -f /tests/005_database_roles.sql
+        -f /tests/006_reconnect_descriptor.sql
 
 volumes:
   postgres-data:

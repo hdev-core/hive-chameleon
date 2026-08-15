@@ -90,7 +90,7 @@ describe('CollectibleIssuerService', () => {
     expect(chain.broadcasts).toHaveLength(2);
   });
 
-  it('rejects a match-publisher authorization at construction', () => {
+  it('rejects a treasury authorization at construction', () => {
     const chain = new FixtureHiveChain(
       MANAGED_SIGNING_FIXTURE.publicKey,
       MANAGED_SIGNING_FIXTURE.digest,
@@ -102,7 +102,7 @@ describe('CollectibleIssuerService', () => {
           { sign: async () => ({ signature: '', publicKey: '' }) },
           new FixtureJournal(),
           {
-            authorization: { ...authorization, role: 'match_publisher' },
+            authorization: { ...authorization, role: 'treasury' },
             nextUuidV7: () => '01910000-0000-7000-8000-000000000020',
           },
         ),

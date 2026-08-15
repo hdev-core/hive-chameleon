@@ -24,14 +24,14 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(*) = 75
+    SELECT count(*) = 74
       FROM information_schema.tables
      WHERE table_schema IN (
        'identity', 'social', 'game', 'content', 'commerce', 'tournament', 'hive_projection'
      )
        AND table_type = 'BASE TABLE'
   ),
-  'all 75 modeled tables exist'
+  'all 74 modeled tables exist'
 );
 
 SELECT pg_temp.assert_true(
@@ -56,7 +56,83 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(DISTINCT type.oid) = 77
+    SELECT count(*) = 5
+      FROM information_schema.columns
+     WHERE table_schema = 'game'
+       AND table_name = 'round_live_checkpoint'
+       AND column_name IN (
+         'round_id',
+         'format_version',
+         'private_state',
+         'created_at',
+         'updated_at'
+       )
+       AND is_nullable = 'NO'
+  ),
+  'private live round checkpoints have a versioned object contract'
+);
+
+SELECT pg_temp.assert_true(
+  (
+    SELECT count(*) = 1
+      FROM content.map
+     WHERE slug = 'neon-service-arcade'
+       AND title = 'Neon Service Arcade'
+       AND origin = 'official'
+       AND creator_player_id IS NULL
+       AND lifecycle = 'published'
+  ),
+  'the clean migrated database contains the published Neon Service Arcade official map'
+);
+
+SELECT pg_temp.assert_true(
+  (
+    SELECT count(*) = 1
+      FROM content.map_version version
+      JOIN content.map map_definition ON map_definition.id = version.map_id
+     WHERE map_definition.slug = 'neon-service-arcade'
+       AND version.version_number = 'm3'
+       AND version.status = 'published'
+       AND version.license_declaration_version = 'user-supplied-bundled-1'
+       AND version.manifest ->> 'delivery' = 'bundled_in_game_client'
+       AND version.manifest #>> '{asset_provenance,environment,source}'
+           = 'user-supplied Blender arena build'
+  ),
+  'the official Neon Service Arcade m3 catalog record declares its bundled provenance'
+);
+
+SELECT pg_temp.assert_true(
+  (
+    SELECT count(*) = 2
+      FROM content.map_distribution distribution
+      JOIN content.map_version version ON version.id = distribution.map_version_id
+      JOIN content.map map_definition ON map_definition.id = version.map_id
+     WHERE map_definition.slug = 'neon-service-arcade'
+       AND version.version_number = 'm3'
+       AND distribution.platform IN ('desktop', 'web')
+       AND distribution.state = 'available'
+       AND distribution.required_game_build_version = 'hive-chameleon-m4-dev'
+       AND distribution.required_protocol_version = 'm4-v2'
+       AND distribution.published_at IS NOT NULL
+  ),
+  'Neon Service Arcade m3 is available for both bundled desktop and web clients'
+);
+
+SELECT pg_temp.assert_true(
+  (
+    SELECT is_nullable = 'NO'
+       AND column_default = 'false'
+      FROM information_schema.columns
+     WHERE table_schema = 'identity'
+       AND table_name = 'player'
+       AND column_name = 'is_guest'
+  ),
+  'guest identity state is explicit and non-null'
+);
+
+SELECT pg_temp.assert_true(
+  (
+    SELECT count(DISTINCT type.oid) = 76
       FROM pg_type type
       JOIN pg_namespace namespace ON namespace.oid = type.typnamespace
       JOIN pg_enum enum_value ON enum_value.enumtypid = type.oid
@@ -69,7 +145,7 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT count(*) = 154
+    SELECT count(*) = 152
       FROM pg_constraint foreign_key
       JOIN pg_class table_class ON table_class.oid = foreign_key.conrelid
       JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
@@ -78,7 +154,7 @@ SELECT pg_temp.assert_true(
          'identity', 'social', 'game', 'content', 'commerce', 'tournament', 'hive_projection'
        )
   ),
-  'all modeled foreign keys exist'
+  'all modeled foreign keys, including the private live-round checkpoint, exist'
 );
 
 SELECT pg_temp.assert_true(
@@ -135,13 +211,29 @@ SELECT pg_temp.assert_true(
 
 SELECT pg_temp.assert_true(
   (
-    SELECT is_nullable = 'YES'
+    SELECT count(*) = 6
+      FROM information_schema.tables
+     WHERE (table_schema = 'game' AND table_name LIKE 'match_publication%')
+        OR (table_schema = 'hive_projection' AND table_name IN (
+          'match_event', 'match_result', 'match_result_change'
+        ))
+  )
+  AND NOT EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = 'identity'
+       AND table_name LIKE 'public_record_disclosure%'
+  )
+  AND EXISTS (
+    SELECT 1
       FROM information_schema.columns
-     WHERE table_schema = 'hive_projection'
-       AND table_name = 'match_event'
-       AND column_name = 'batch_uuid'
+     WHERE table_schema = 'game'
+       AND table_name = 'round_result_revision'
+       AND column_name = 'canonical_complete_result'
+       AND data_type = 'bytea'
+       AND is_nullable = 'YES'
   ),
-  'correction and invalidation events do not invent a batch id'
+  'local result bytes and the on-chain publication pipeline coexist, without obsolete disclosure tables'
 );
 
 SELECT pg_temp.assert_true(

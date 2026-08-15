@@ -1,4 +1,5 @@
 using HiveChameleon.Realtime;
+using HiveChameleon.Presentation;
 using UnityEngine;
 
 namespace HiveChameleon
@@ -8,14 +9,17 @@ namespace HiveChameleon
         private void Awake()
         {
             DontDestroyOnLoad(gameObject);
-            Debug.Log("Hive Chameleon development client started.");
+            Debug.Log("Hive Chameleon client started.");
 
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (GetComponent<OfficialArenaExperience>() == null)
+            {
+                gameObject.AddComponent<OfficialArenaExperience>();
+            }
+
             if (GetComponent<DevelopmentRealtimeBootstrap>() == null)
             {
                 gameObject.AddComponent<DevelopmentRealtimeBootstrap>();
             }
-#endif
         }
     }
 }

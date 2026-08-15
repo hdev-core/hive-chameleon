@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using HiveChameleon.Realtime;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -15,19 +14,38 @@ namespace HiveChameleon.Editor
         [MenuItem("Hive Chameleon/Build/Development")]
         public static void BuildFromMenu()
         {
-            Build(EditorUserBuildSettings.activeBuildTarget);
+            Build(EditorUserBuildSettings.activeBuildTarget, false);
+        }
+
+        [MenuItem("Hive Chameleon/Build/Production WebGL")]
+        public static void BuildProductionWebGLFromMenu()
+        {
+            Build(BuildTarget.WebGL, true);
         }
 
         public static void BuildFromCommandLine()
         {
-            Build(ResolveBuildTarget(Environment.GetEnvironmentVariable("UNITY_BUILD_TARGET")));
+            Build(
+                ResolveBuildTarget(Environment.GetEnvironmentVariable("UNITY_BUILD_TARGET")),
+                string.Equals(
+                    Environment.GetEnvironmentVariable("HIVE_CHAMELEON_BUILD_CONFIGURATION"),
+                    "production",
+                    StringComparison.OrdinalIgnoreCase
+                )
+            );
         }
 
-        private static void Build(BuildTarget target)
+        private static void Build(BuildTarget target, bool production)
         {
             try
             {
-                EnsureDevelopmentScene(target);
+                if (production && target != BuildTarget.WebGL)
+                {
+                    throw new InvalidOperationException(
+                        "The production browser build target must be WebGL."
+                    );
+                }
+                EnsureDevelopmentScene();
 
                 if (EditorUserBuildSettings.activeBuildTarget != target)
                 {
@@ -52,7 +70,14 @@ namespace HiveChameleon.Editor
                     scenes = new[] { ScenePath },
                     locationPathName = location,
                     target = target,
-                    options = BuildOptions.Development | BuildOptions.AllowDebugging,
+                    // Browsers do not support Unity's managed script debugger. Keep the
+                    // development player and only request debugger attachment on platforms
+                    // where Unity implements it.
+                    options = production
+                        ? BuildOptions.None
+                        : target == BuildTarget.WebGL
+                            ? BuildOptions.Development
+                            : BuildOptions.Development | BuildOptions.AllowDebugging,
                 };
 
                 var report = BuildPipeline.BuildPlayer(options);
@@ -65,16 +90,25 @@ namespace HiveChameleon.Editor
             }
             finally
             {
-                // WebGL cannot read process environment variables at runtime. Credentials are
-                // serialized only for the build, then the source scene is regenerated without them.
-                EnsureDevelopmentScene(null);
+                EnsureDevelopmentScene();
             }
         }
 
-        private static void EnsureDevelopmentScene(BuildTarget? configuredTarget)
+        private static void EnsureDevelopmentScene()
         {
             Directory.CreateDirectory("Assets/Scenes");
             AssetDatabase.Refresh();
+
+            // The scene is deterministic runtime scaffolding. Recreating it after every build
+            // churns Unity file IDs and dirties the worktree without changing the player.
+            if (File.Exists(ScenePath))
+            {
+                EditorBuildSettings.scenes = new[]
+                {
+                    new EditorBuildSettingsScene(ScenePath, true),
+                };
+                return;
+            }
 
             Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
             GameObject cameraObject = new GameObject("Main Camera");
@@ -92,67 +126,12 @@ namespace HiveChameleon.Editor
             GameObject root = new GameObject("HiveChameleon");
             root.AddComponent<Bootstrap>();
 
-            if (configuredTarget == BuildTarget.WebGL)
-            {
-                ConfigureWebGlRealtime(root);
-            }
-
             if (!EditorSceneManager.SaveScene(scene, ScenePath))
             {
                 throw new InvalidOperationException($"Could not save generated scene at {ScenePath}.");
             }
 
             EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(ScenePath, true) };
-        }
-
-        private static void ConfigureWebGlRealtime(GameObject root)
-        {
-            string apiBaseUrl = Environment.GetEnvironmentVariable("HIVE_CHAMELEON_API_URL");
-            string serverKey = Environment.GetEnvironmentVariable("NAKAMA_SERVER_KEY");
-            string bearerToken = Environment.GetEnvironmentVariable("REALTIME_DEV_BEARER_TOKEN");
-
-            bool hasApiBaseUrl = !string.IsNullOrWhiteSpace(apiBaseUrl);
-            bool hasServerKey = !string.IsNullOrWhiteSpace(serverKey);
-            bool hasBearerToken = !string.IsNullOrWhiteSpace(bearerToken);
-
-            if (!hasApiBaseUrl && !hasServerKey && !hasBearerToken)
-            {
-                return;
-            }
-
-            if (!hasApiBaseUrl || !hasServerKey || !hasBearerToken)
-            {
-                throw new InvalidOperationException(
-                    "WebGL realtime builds require HIVE_CHAMELEON_API_URL, "
-                        + "NAKAMA_SERVER_KEY, and REALTIME_DEV_BEARER_TOKEN together."
-                );
-            }
-
-            if (
-                !Uri.TryCreate(apiBaseUrl, UriKind.Absolute, out Uri parsedApiBaseUrl)
-                || (parsedApiBaseUrl.Scheme != Uri.UriSchemeHttp
-                    && parsedApiBaseUrl.Scheme != Uri.UriSchemeHttps)
-            )
-            {
-                throw new InvalidOperationException(
-                    "HIVE_CHAMELEON_API_URL must be an absolute HTTP or HTTPS URL."
-                );
-            }
-
-            if (bearerToken.Trim().Length < 32)
-            {
-                throw new InvalidOperationException(
-                    "REALTIME_DEV_BEARER_TOKEN must contain at least 32 characters."
-                );
-            }
-
-            DevelopmentRealtimeBootstrap realtime =
-                root.AddComponent<DevelopmentRealtimeBootstrap>();
-            realtime.ConfigureForDevelopmentBuild(
-                apiBaseUrl.TrimEnd('/'),
-                serverKey.Trim(),
-                bearerToken.Trim()
-            );
         }
 
         private static BuildTarget ResolveBuildTarget(string requested)

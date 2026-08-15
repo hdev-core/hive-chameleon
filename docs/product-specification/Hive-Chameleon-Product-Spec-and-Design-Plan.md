@@ -20,7 +20,7 @@ Players join a persistent lobby of up to 10 people. Before each round, eligible 
 
 The game is intended to create funny, skill-based moments. A Hider is never truly invisible to a Hunter; success comes from color matching, surface imitation, silhouette control, position, and misdirection. An end-of-round Answer Check reveals every disguise and lets eligible players recognize one favorite.
 
-Hive is a product layer rather than a decorative integration. Player identity, persistent profiles, canonical immutable match-summary records, map attribution, showcase posts, tournament transactions, and cosmetic ownership are connected to Hive accounts. That identity is also reinforced through restrained use of official Hive brand assets—its signature red/crimson (approximately `#E31337`) and approved logomark/wordmark from the hive.io brand kit—and official Actifit assets where applicable, rather than existing only in backend systems.
+Hive is a product layer rather than a decorative integration. Player identity, persistent profiles, map attribution, showcase posts, tournament transactions, and cosmetic ownership are connected to Hive accounts. That identity is also reinforced through restrained use of official Hive brand assets—its signature red/crimson (approximately `#E31337`) and approved logomark/wordmark from the hive.io brand kit—and official Actifit assets where applicable, rather than existing only in backend systems.
 
 ## 3. Target Audience
 
@@ -44,7 +44,7 @@ Create an approachable multiplayer party game in which creative camouflage and h
 - **Easy entry, deep expression:** Movement and objectives should be understandable immediately; painting and posing should allow mastery.
 - **Fair competition:** Purchases and collectible weapons must not provide mechanical advantages.
 - **Persistent identity:** A player uses a Hive identity across supported platforms.
-- **Auditable results:** Official server-attested match summaries are periodically anchored to Hive as an immutable public record.
+- **Authoritative results:** Exact server results and append-only corrections are retained durably and can be audited from the game database.
 - **Hive-native presentation:** Hive presentation uses its real red/crimson identity and official hive.io brand-kit marks in natural locations such as account connection, verification, cosmetics, badges, and victory effects. Generic hexagons, honeycomb imagery, unofficial logo substitutes, and generic blue treatments are not Hive blockchain branding.
 - **Creator attribution:** Approved community maps preserve authorship, versions, and historical records.
 - **Cross-platform continuity:** Desktop and web players share identity and multiplayer sessions.
@@ -52,7 +52,7 @@ Create an approachable multiplayer party game in which creative camouflage and h
 
 ### 4.3 Product Differentiation
 
-Hive Chameleon's primary differentiator is its Hive-native identity, public match-summary ledger, and ownership layer. PostgreSQL supports fast authoritative live play, while periodically batched Hive records make official server-attested results immutable and publicly auditable. Cross-platform availability broadens access beyond a single desktop storefront, while continued maps, cosmetics, and product updates provide an ongoing expansion path.
+Hive Chameleon's primary differentiator is its Hive-native identity, creator attribution, player-authorized transactions, and ownership layer. PostgreSQL supports fast authoritative live play and exact durable result history. Cross-platform availability broadens access beyond a single desktop storefront, while continued maps, cosmetics, and product updates provide an ongoing expansion path.
 
 ## 5. Goals
 
@@ -61,7 +61,7 @@ Hive Chameleon's primary differentiator is its Hive-native identity, public matc
 3. Deliver both Casual and Infection modes.
 4. Make painting, posing, hiding, hunting, spectating, and Answer Check understandable without a tutorial.
 5. Make reconnect reliable for normal matches.
-6. Demonstrate meaningful Hive login, profile, match-record, creator-attribution, transaction, and ownership flows.
+6. Demonstrate meaningful Hive login, profile, creator-attribution, transaction, and ownership flows.
 7. Reach at least 30 FPS at 1080p on low settings on an ordinary target laptop, for both desktop and web.
 8. Produce funny or satisfying camouflage moments during playtests.
 9. Leave a prioritized, maintainable product direction for future development.
@@ -86,7 +86,7 @@ Priorities describe implementation sequence, not cancellation of later features.
 
 | Priority | Definition | Product scope |
 | --- | --- | --- |
-| **P0 - Core demonstration** | Required to prove the product | Hive-linked login and profile, public/private discovery, Quick Play, 3D lobby, Hunter nomination, host migration, Casual and Infection, one official map, painting, poses, shotgun identification, spectators, Answer Check, likes, periodic batched Hive match summaries, normal-match reconnect, desktop/web builds |
+| **P0 - Core demonstration** | Required to prove the product | Hive-linked login and profile, public/private discovery, Quick Play, 3D lobby, Hunter nomination, host migration, Casual and Infection, one official map, painting, poses, shotgun identification, spectators, Answer Check, likes, exact durable result history, normal-match reconnect, desktop/web builds |
 | **P1 - Required product layer** | Completes the intended product proposition after the core is stable | Friends and invitations, Streamer Mode, controller support, cosmetic ownership/shop, one controlled tournament payment/payout flow, controlled map-attribution and showcase demonstration |
 | **P2 - Expansion and stretch** | Built when the core and required layer permit | Creator Workshop, dynamic desktop community maps, transferable/resellable cosmetics, fiat payments, multiple tournament structures, extra cosmetic weapon forms, experimental 3D texture copying |
 | **Deferred** | Explicitly outside the initial delivery path | Mobile/touch release, built-in communication, seasonal competitive systems, multiple official maps, full creator-revenue programs |
@@ -365,7 +365,7 @@ At the end of each round:
 - Player names and final hiding locations are visible.
 - Each eligible player can like exactly one disguise.
 - A Hider cannot like their own disguise.
-- Likes remain off-chain during play and are included in the periodic signed match summary.
+- Likes are committed with the authoritative terminal result after play.
 
 The result presentation should show role outcomes, survival/discovery information, the selected favorite disguise, and the current round scoreboard without delaying return to the lobby unnecessarily.
 
@@ -392,6 +392,8 @@ Infection adds a final-surviving-Hider bonus. No persistent competitive rank is 
 ### 19.2 Scoreboard Behavior
 
 - The lobby presents a round scoreboard, not a cumulative lobby-session scoreboard.
+- The scoreboard ranks only players assigned Hider at round start. The original Hunter is never a
+  scoreboard entry; an Infection conversion does not erase score earned while playing as a Hider.
 - During a live round, scoreboard data refreshes in 30-second batches.
 - Batched refresh prevents Hiders from using immediate score changes to infer when a Hunter saw them.
 - Persistent profile statistics update after confirmed results.
@@ -415,10 +417,9 @@ Google sign-in authenticates the player's game session; it is not itself a Hive 
 
 1. Completes Google sign-in.
 2. Chooses an available Hive username and confirms that Hive usernames are permanent.
-3. Reviews and acknowledges the permanent-public-record disclosure described below.
-4. Waits while the platform coordinates sponsor-backed account creation and verifies enough
+3. Waits while the platform coordinates sponsor-backed account creation and verifies enough
    initial Resource Credits for activity.
-5. Continues with the resulting Hive-linked profile once provisioning succeeds.
+4. Continues with the resulting Hive-linked profile once provisioning succeeds.
 
 A returning Google-authenticated player resumes the same linked Google-provisioned Hive account and normally skips username selection. The account belongs to the player and is custodial by default: the platform holds its Hive authorities in hardened key management until the player claims self-custody. Raw keys are not exposed to Unity, the general application backend, environment variables, or logs.
 
@@ -428,7 +429,7 @@ A returning Google-authenticated player resumes the same linked Google-provision
 | Unclaimed Google-provisioned Hive account | The platform signs through its custodial key service after an explicit in-product player action | The platform signs through its custodial key service after explicit payment confirmation | Not required |
 | Claimed Hive account, including a pending recovery-account transition | Player approves through Keychain, HiveAuth, or another supported Hive signing provider | Player approves through the supported Hive signing provider | Required for Hive actions |
 
-Players with unclaimed Google-provisioned Hive accounts can therefore play and use supported posting- and active-authority features as soon as provisioning completes, without installing Keychain or another wallet. This does not authorize silent background activity: a post, vote, purchase, or tournament entry still requires the corresponding player action or confirmation. Official match publication, collectible issuance, and treasury payouts remain separate service-account operations and never use the player's custodial keys.
+Players with unclaimed Google-provisioned Hive accounts can therefore play and use supported posting- and active-authority features as soon as provisioning completes, without installing Keychain or another wallet. This does not authorize silent background activity: a post, vote, purchase, or tournament entry still requires the corresponding player action or confirmation. Collectible issuance and treasury payouts remain separate service-account operations and never use the player's custodial keys.
 
 The claim path is designed in from the start even if its account-settings UI ships later. During claim, the player establishes new self-custodial Hive keys through a supported wallet or approved credential-generation/export experience. The platform uses the currently custodied owner authority to rotate owner, active, posting, and memo authorities to those new keys, then irreversibly destroys its custodial key material. The Hive username, profile, history, balances, and collectibles remain with the same account. After that authority rotation, the platform can no longer sign normal Hive actions for the player, so supported Hive actions require the player's Hive signing provider.
 
@@ -454,17 +455,15 @@ not hold the sponsor's recovery authority; nevertheless, the UI must show **Reco
 pending** and must not describe the account as fully self-custodial until Hive confirms that the
 new recovery account is effective.
 
-Before creating a Google-provisioned Hive account—and before first match participation for a direct-Hive user—the product presents a one-time disclosure that the player's Hive username, match participation, roles, scores, outcomes, and aggregated likes will become permanently public in published Hive summaries. The player must acknowledge this before continuing. It is a product disclosure, not a Hive signature, and it is not repeated before every match.
-
 The normative field-level no-PII/doxxing rule and Terms-of-Service requirement that irreversible
-on-chain records are permanent and cannot be removed by an off-chain deletion request are defined
+Hive records are permanent and cannot be removed by an off-chain deletion request are defined
 in [Non-Functional Requirements §3](../technical-specification/non-functional-requirements.md#3-privacy-and-immutable-record-compliance).
 
 Linking a pre-existing Hive account to Google, relinking a different Google identity, and the exact game-login experience after self-custody claim are not established by the confirmed standard and remain open product decisions. The system must not infer an existing Hive account from a Google email address.
 
 ### 20.2 Hive Availability Rule
 
-An active match never aborts solely because Hive becomes unavailable. Live simulation, reconnect, scoring, and completion continue through the authoritative game server and PostgreSQL. Completed summaries remain in the durable publication outbox until Hive recovers.
+An active match never aborts solely because Hive becomes unavailable. Live simulation, reconnect, scoring, and completion continue through the authoritative game server and PostgreSQL.
 
 New direct-Hive authentication, first-time Google provisioning, and Hive-dependent posts, votes, payments, ownership changes, and claim actions pause with a clear unavailable/retry state. The technical design must define the exact health checks and avoid misclassifying a temporary local failure as a confirmed Hive outage.
 
@@ -497,28 +496,13 @@ The profile displays:
 
 No separate disposable platform identity is required. Streamer Mode may replace visible identity data locally without changing the underlying Hive identity.
 
-## 22. On-Chain Match Records
+## 22. Authoritative Result History
 
-- PostgreSQL remains the fast authoritative path for matchmaking, reconnect, live round state, in-round scoring, and the complete server result.
-- Completed Casual and Infection results, including small private matches, are periodically duplicated to Hive as batched `custom_json` summaries rather than waiting for the indefinite lobby session to end.
-- Once published and irreversible, Hive is the canonical immutable public ledger for those match summaries; PostgreSQL retains the complete operational record for performance and detailed product queries.
-- Publication is automatic through an official game service account; players do not sign every match result.
-- The official game server is the result oracle. These records are server-attested and publicly auditable, not trustless on-chain re-simulation or proof that the match was independently recomputed by Hive.
-- The Hive-layer design sets initial limits of five minutes, 20 results, and 6 KiB per batch, plus idempotent retry and publisher-RC policy; only production tuning and operational thresholds remain open.
-
-Each result inside a published batch contains:
-
-- Match/round ID
-- Timestamp
-- Mode and map
-- Map version where applicable
-- Participating Hive accounts
-- Assigned roles
-- Winners and scores
-- Match-result schema and scoring-rule versions
-- Hiders found and survived
-- Likes awarded
-- Canonical complete-result hash included in the official publisher-signed batch
+- PostgreSQL remains the authoritative path for matchmaking, reconnect, live round state, in-round scoring, and the complete server result.
+- A completed Casual or Infection round commits its terminal header, participants, discoveries, likes, exact canonical result bytes, and initial revision atomically.
+- Result bytes are retained with a verified SHA-256 so an ambiguous retry cannot substitute a different result.
+- Corrections append complete replacement revisions, and invalidations append a reasoned revision without rewriting the original evidence.
+- Profile statistics and round history are rebuildable from these durable records.
 
 ## 23. Friends, Invitations, and Blocking
 
@@ -581,7 +565,7 @@ Protected fields include:
 - Tournament payment identifiers
 - Server and region details
 
-Streamer Mode affects local presentation only. It must not alter account identity, match integrity, or on-chain records.
+Streamer Mode affects local presentation only. It must not alter account identity, match integrity, or Hive records.
 
 ## 26. Tournaments
 
@@ -655,6 +639,9 @@ For HIVE, HBD, or AFIT purchases, payment authorization follows the same account
 The vertical slice contains one polished official map with multiple visually distinct zones. At least one zone should carry a tasteful official Hive brand treatment using approved Hive red and brand-kit assets, integrated as part of the environment rather than added as an advertising overlay. The exact theme, layout, and art treatment remain a dedicated design task.
 
 The map is static but supports traversal through walking, sprinting, crouching, jumping, and climbing. It should provide diverse colors, materials, lighting conditions, geometry, and silhouette opportunities without relying on interactive props.
+
+The implemented M4 content and interface baseline is documented in
+[Neon Service Arcade vertical slice](neon-service-arcade-vertical-slice.md).
 
 ### 28.2 Creator Tool Direction
 
@@ -745,7 +732,7 @@ The first creator version provides recognition through attribution and showcase 
 - Map ownership is not transferable in the current design.
 - Collaborator attribution and reward splitting are not supported initially.
 - Removed maps disappear from all new lobby creation.
-- Existing on-chain attribution and match history remain visible.
+- Existing Hive attribution remains visible.
 - The creator receives a removal reason and may submit a corrected version.
 
 ## 29. Visual and Audio Direction
@@ -788,7 +775,7 @@ Because found/unfound Hiders use blue/red presentation, the Answer Check must in
 
 ## 31. Onboarding Policy
 
-There is no gameplay tutorial, role instruction screen, or contextual gameplay onboarding in the current design. The one-time Hive public-record disclosure is required identity/privacy onboarding, not a gameplay tutorial. The core UI, role reveal, objective labels, controls, and feedback must therefore be self-explanatory enough for first-time players to understand the match without outside assistance.
+There is no gameplay tutorial, role instruction screen, or contextual gameplay onboarding in the current design. The core UI, role reveal, objective labels, controls, and feedback must therefore be self-explanatory enough for first-time players to understand the match without outside assistance.
 
 This is a deliberate constraint and should be tested directly during usability sessions.
 
@@ -803,12 +790,10 @@ flowchart TD
     B -->|Continue with Google| D["Authenticate with Google"]
     D --> E{"Provisioned account exists?"}
     E -->|No| F["Choose permanent Hive username"]
-    F --> R["Review permanent-public-record disclosure"]
-    R --> G["Sponsor creates Hive account and supplies RC"]
+    F --> G["Sponsor creates Hive account and supplies RC"]
     E -->|Yes| H["Main menu"]
     G --> H
-    C --> L["First-use public-record disclosure"]
-    L --> H
+    C --> H
     H --> I["Quick Play or browser"]
     H --> J["Create lobby"]
     I --> K["3D lobby"]
@@ -885,7 +870,7 @@ These wireframes define hierarchy, controls, and information placement. They are
 |                                                                              |
 | Hive usernames are permanent. Confirm spelling before creating the account.  |
 |                                                                              |
-| Review and acknowledge the Hive public-record disclosure before creation.    |
+| Confirm the permanent Hive username before account creation.                 |
 |                                                                              |
 |                    [ CREATE MY HIVE ACCOUNT ]                                |
 |                                                                              |
@@ -893,24 +878,6 @@ These wireframes define hierarchy, controls, and information placement. They are
 | No wallet setup or account-creation payment is required.                     |
 +------------------------------------------------------------------------------+
 ```
-
-### 34.2 First-Use Hive Public-Record Disclosure
-
-```text
-+------------------------------------------------------------------------------+
-| HIVE PUBLIC RECORDS                                             [Back]       |
-|----------------------------------------------------------------------------  |
-| Published Hive match summaries are permanent and publicly readable.          |
-| They include your Hive username, participation, role, score, outcome, and    |
-| aggregated likes. Published records cannot be privately deleted later.       |
-|                                                                              |
-| [ ] I understand that these match-summary fields will be public permanently. |
-|                                                                              |
-|                              [ CONTINUE ]                                    |
-+------------------------------------------------------------------------------+
-```
-
-This disclosure appears before Google account creation and before first match participation for a direct-Hive user. It is acknowledged once rather than before each match.
 
 ## 35. Main Menu
 
@@ -1083,15 +1050,15 @@ This disclosure appears before Google account creation and before first match pa
 +------------------------------------------------------------------------------+
 | ANSWER CHECK | Found = BLUE/icon | Unfound = RED/icon | 00:35                |
 |----------------------------------------------------------------------------  |
+| <ROUND SCORE - left>                                                         |
+| 01 @player  920       <Hunters move freely through the real 3D map>          |
+| 02 @player  810       <Every Hider flashes at their final world position>    |
+| 03 @player  640       <Blue + FOUND / red + UNFOUND world nameplates>        |
 |                                                                              |
-|                 <Hunters move freely through revealed map>                   |
-|                 <Hiders observe in spectator camera>                         |
+|                       <Hiders observe with spectator cameras>                 |
 |                                                                              |
-| Disguises: [@A Found] [@B Survived] [@C Survived] [@D Found]                 |
-| Selected favorite: @B                              [ LIKE THIS DISGUISE ]    |
-|----------------------------------------------------------------------------  |
-| Round results: <role, outcome, discoveries, survival, points>                |
-|                                          [ Return to Lobby ]                 |
+| <Aimed/followed disguise>                         [ LIKE DISGUISE ]          |
+| <Compact result state; no full-screen result menu obscures the arena>        |
 +------------------------------------------------------------------------------+
 ```
 
@@ -1247,8 +1214,8 @@ This disclosure appears before Google account creation and before first match pa
 | P0-21 | Answer Check | Found/unfound Hiders reveal with color and non-color cues; each eligible player can like one non-self disguise. |
 | P0-22 | Round scoring | Approved inputs calculate a round score; live display refreshes no faster than each 30 seconds. |
 | P0-23 | Normal reconnect | Slot reservation, Join Existing Lobby, safe role restoration, spectate fallback, and score preservation work within 60 seconds. |
-| P0-24 | Periodic Hive result records | The official service periodically publishes batched, server-attested `custom_json` summaries containing the approved fields and off-chain likes; PostgreSQL remains authoritative for live/full operational state while irreversible Hive summaries form the canonical immutable public ledger. |
-| P0-25 | Hive unavailable state | Active matches continue on the authoritative PostgreSQL path and summaries wait in the durable outbox; new authentication/provisioning and Hive-dependent actions pause with a clear retry/status experience. |
+| P0-24 | Exact result history | Terminal result bytes, detailed evidence, and the initial immutable revision commit atomically; retries are idempotent and corrections remain linear. |
+| P0-25 | Hive unavailable state | Active matches continue on the authoritative PostgreSQL path; new authentication/provisioning and Hive-dependent actions pause with a clear retry/status experience. |
 | P0-26 | Cross-platform session | Supported desktop and Chrome players can join and finish the same compatible session. |
 | P0-27 | Performance | Agreed baseline scenes meet at least 30 FPS at 1080p low on the target ordinary laptop. |
 | P0-28 | Fixed web presentation | Unsupported browser resize blocks gameplay visibly without creating silent state corruption. |
@@ -1306,14 +1273,13 @@ The polished vertical slice is successful when:
 5. Public, private, Quick Play, nomination, automatic start, host migration, and return-to-lobby flows behave coherently.
 6. A normal-match disconnect can reconnect within the 60-second reservation policy without corrupting the round.
 7. Spectator and Answer Check flows reveal results correctly and enforce one non-self like.
-8. Keychain and the optional Google path reach persistent Hive-linked identity without creating a guest profile; a first-time Google-authenticated player receives one sponsor-created, RC-enabled real Hive account, acknowledges the permanent-public-record disclosure, can use supported posting/payment actions without wallet setup, and retains a claim path that transfers both account authorities and the recovery role as defined.
-9. The official service publishes completed results as batched, server-attested Hive summaries, and an irreversible summary is publicly retrievable as the canonical immutable record of the published match summary.
-10. Desktop and Chrome web players can complete compatible cross-platform sessions.
-11. Desktop and web meet at least 30 FPS at 1080p low on the agreed ordinary-laptop baseline.
-12. Web resize produces a clear blocking state rather than broken gameplay.
-13. Cosmetic presentation does not change competitive weapon behavior.
-14. Hive-native UI, verification, cosmetics, selected lobby elements, and one official-map zone use official Hive red and approved brand-kit marks without generic hexagon/blue substitutes or overwhelming the game's own colorful visual identity.
-15. Streamer Mode, when delivered, prevents approved sensitive fields from appearing in the local captured interface.
+8. Keychain and the optional Google path reach persistent Hive-linked identity without creating a guest profile; a first-time Google-authenticated player receives one sponsor-created, RC-enabled real Hive account, can use supported posting/payment actions without wallet setup, and retains a claim path that transfers both account authorities and the recovery role as defined.
+9. Desktop and Chrome web players can complete compatible cross-platform sessions.
+10. Desktop and web meet at least 30 FPS at 1080p low on the agreed ordinary-laptop baseline.
+11. Web resize produces a clear blocking state rather than broken gameplay.
+12. Cosmetic presentation does not change competitive weapon behavior.
+13. Hive-native UI, verification, cosmetics, selected lobby elements, and one official-map zone use official Hive red and approved brand-kit marks without generic hexagon/blue substitutes or overwhelming the game's own colorful visual identity.
+14. Streamer Mode, when delivered, prevents approved sensitive fields from appearing in the local captured interface.
 
 ## 57. Playtest Questions
 
@@ -1346,7 +1312,7 @@ The following decisions are intentionally unresolved:
 6. Exact host lobby-AFK timeout
 7. Final hitbox and balance treatment for x1.0, x1.4, x1.7, and cube forms
 8. Exact scoring weights and reliable line-of-sight scoring feasibility
-9. Production tuning of the initial five-minute, 20-result, and 6 KiB Hive match-batch limits, publisher RC sizing/alert thresholds, and provider fallback behavior
+9. Production sizing and alert thresholds for Hive-dependent account, collectible, payment, and showcase operations, including provider fallback behavior
 10. Exact platform rollout of HiveAuth and HiveSigner fallbacks alongside the primary Keychain and optional Google paths
 11. Google-account loss and identity-recovery policy, including whether and how a pre-existing Hive account can be linked, a linked Google identity can be replaced, or access can be restored
 12. Exact claim UI rollout, supported self-custodial credential experience, valid non-platform recovery-account selection policy, and whether Google remains a game-session credential after claim
@@ -1368,7 +1334,7 @@ The paired Technical Architecture & Tech Stack document should resolve implement
   recovery-account transition for self-custody claim
 - Required-Hive availability checks and failure behavior
 - Authoritative role, weapon, score, collision, timer, and reconnect state
-- Periodic `custom_json` match-summary batching, canonical payloads, server attestation, publication retries, irreversibility, HAF reads, and RC budgeting
+- Exact canonical terminal-result storage, immutable revision history, and authoritative recovery
 - Cross-platform lobby discovery and Quick Play selection
 - Host migration and lobby AFK detection
 - Saved lobby appearance versus round appearance

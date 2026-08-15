@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Hive Chameleon database backup
+
+[Timer]
+OnCalendar=*-*-* 02:20:00 UTC
+Persistent=true
+RandomizedDelaySec=20m
+Unit=hive-chameleon-backup.service
+
+[Install]
+WantedBy=timers.target
+

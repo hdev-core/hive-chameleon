@@ -7,39 +7,11 @@ import (
 	"time"
 )
 
-func TestAssignCasualHidingSlotsKeepsTargetsPrivateAndUnique(t *testing.T) {
-	t.Parallel()
-
-	assignments := []roundRoleAssignment{
-		{PlayerID: "hunter", Role: "hunter"},
-		{PlayerID: "hider-a", Role: "hider"},
-		{PlayerID: "hider-b", Role: "hider"},
-	}
-	targetSlots, err := assignCasualHidingSlots(
-		assignments,
-		bytes.NewReader(make([]byte, 32)),
-	)
-	if err != nil {
-		t.Fatalf("assign Casual hiding slots: %v", err)
-	}
-	if targetSlots != 4 {
-		t.Fatalf("target slot count = %d, expected 4", targetSlots)
-	}
-	if assignments[0].HidingSlot != 0 {
-		t.Fatal("Hunter received a private Hider slot")
-	}
-	if assignments[1].HidingSlot < 1 ||
-		assignments[2].HidingSlot < 1 ||
-		assignments[1].HidingSlot == assignments[2].HidingSlot {
-		t.Fatalf("Hider slots are invalid: %#v", assignments)
-	}
-}
-
 func TestCasualRoundAdvancesFromPreparingToAuthoritativeTimeout(t *testing.T) {
 	t.Parallel()
 
 	round := casualRoundFixture()
-	state, err := newCasualRoundState(&round)
+	state, err := newAuthoritativeRoundState(&round)
 	if err != nil {
 		t.Fatalf("create Casual round state: %v", err)
 	}
@@ -59,17 +31,18 @@ func TestCasualRoundAdvancesFromPreparingToAuthoritativeTimeout(t *testing.T) {
 	phases = state.Advance(
 		round.StartedAt.Add(casualPreparingDuration + 40*time.Second),
 	)
-	if len(phases) != 1 || phases[0] != "terminal" {
+	if len(phases) != 1 || phases[0] != "answer_check" {
 		t.Fatalf("unexpected hunting transition: %#v", phases)
 	}
 	if state.WinningSide != "hiders" || state.CompletionReason != "hunt_timeout" {
 		t.Fatalf("unexpected timeout outcome: %#v", state)
 	}
 	state.Apply(&round)
-	if round.Status != "terminal" ||
+	if round.Status != "answer_check" ||
 		round.WinningSide != "hiders" ||
 		round.HidersRemaining != 1 ||
-		round.PhaseDeadline != nil {
+		round.PhaseDeadline == nil ||
+		!round.PhaseDeadline.Equal(state.TerminalAt.Add(answerCheckDuration)) {
 		t.Fatalf("unexpected public timeout state: %#v", round.Public())
 	}
 }
@@ -78,7 +51,7 @@ func TestCasualHunterFireIsServerValidatedAndIdempotent(t *testing.T) {
 	t.Parallel()
 
 	round := casualRoundFixture()
-	state, err := newCasualRoundState(&round)
+	state, err := newAuthoritativeRoundState(&round)
 	if err != nil {
 		t.Fatalf("create Casual round state: %v", err)
 	}
@@ -87,7 +60,7 @@ func TestCasualHunterFireIsServerValidatedAndIdempotent(t *testing.T) {
 
 	miss, discovery := state.HandleFire(
 		"hunter",
-		hunterFireCommand{CommandID: "shot-1", AimSlot: 1},
+		hunterFireCommand{CommandID: "shot-1"},
 		huntStarted,
 	)
 	if !miss.Accepted || miss.Hit || miss.Reason != "miss" || discovery != nil {
@@ -99,16 +72,18 @@ func TestCasualHunterFireIsServerValidatedAndIdempotent(t *testing.T) {
 
 	replayed, discovery := state.HandleFire(
 		"hunter",
-		hunterFireCommand{CommandID: "shot-1", AimSlot: 2},
+		hunterFireCommand{CommandID: "shot-1", TargetPlayerID: "hider"},
 		huntStarted.Add(time.Second),
 	)
-	if replayed.AimSlot != 1 || replayed.ShellsRemaining != 2 || discovery != nil {
+	if replayed.TargetPlayerID != "" ||
+		replayed.ShellsRemaining != 2 ||
+		discovery != nil {
 		t.Fatalf("duplicate command changed its authoritative result: %#v", replayed)
 	}
 
 	reloading, discovery := state.HandleFire(
 		"hunter",
-		hunterFireCommand{CommandID: "shot-2", AimSlot: 2},
+		hunterFireCommand{CommandID: "shot-2", TargetPlayerID: "hider"},
 		huntStarted.Add(50*time.Millisecond),
 	)
 	if reloading.Accepted || reloading.Reason != "reloading" || discovery != nil {
@@ -117,7 +92,7 @@ func TestCasualHunterFireIsServerValidatedAndIdempotent(t *testing.T) {
 
 	hit, discovery := state.HandleFire(
 		"hunter",
-		hunterFireCommand{CommandID: "shot-3", AimSlot: 2},
+		hunterFireCommand{CommandID: "shot-3", TargetPlayerID: "hider"},
 		huntStarted.Add(100*time.Millisecond),
 	)
 	if !hit.Accepted ||
@@ -134,22 +109,39 @@ func TestCasualHunterFireIsServerValidatedAndIdempotent(t *testing.T) {
 	}
 }
 
-func TestCasualRoundRejectsClientDeclaredHitOrTargetPlayer(t *testing.T) {
+func TestCasualRoundAcceptsPlayerTargetButRejectsClientDeclaredOutcome(t *testing.T) {
 	t.Parallel()
 
 	for _, payload := range []string{
-		`{"command_id":"shot-1","aim_slot":2,"hit":true}`,
-		`{"command_id":"shot-1","aim_slot":2,"hider_player_id":"hider"}`,
+		`{"command_id":"shot-1","target_player_id":"hider","hit":true}`,
+		`{"command_id":"shot-1","target_player_id":"hider","hider_player_id":"hider"}`,
+		`{"command_id":"shot-1","aim_slot":2}`,
+		`{"command_id":"shot-1","aim_yaw":30}`,
+		`{"command_id":"shot-1","aim_pitch":10}`,
+		`{"command_id":"shot-1","aim_yaw":30,"aim_pitch":90}`,
 	} {
 		if _, err := decodeHunterFireCommand([]byte(payload)); err == nil {
 			t.Fatalf("accepted client-declared authoritative outcome: %s", payload)
 		}
 	}
 	command, err := decodeHunterFireCommand(
-		[]byte(`{"command_id":"shot-1","aim_slot":2}`),
+		[]byte(
+			`{"command_id":"shot-1","target_player_id":"hider",` +
+				`"aim_yaw":-30,"aim_pitch":-10}`,
+		),
 	)
-	if err != nil || command.CommandID != "shot-1" || command.AimSlot != 2 {
+	if err != nil ||
+		command.CommandID != "shot-1" ||
+		command.TargetPlayerID != "hider" ||
+		command.AimYaw == nil ||
+		*command.AimYaw != 330 ||
+		command.AimPitch == nil ||
+		*command.AimPitch != -10 {
 		t.Fatalf("valid fire intent was rejected: %#v, %v", command, err)
+	}
+	miss, err := decodeHunterFireCommand([]byte(`{"command_id":"shot-2"}`))
+	if err != nil || miss.TargetPlayerID != "" {
+		t.Fatalf("valid deliberate miss was rejected: %#v, %v", miss, err)
 	}
 }
 
@@ -157,14 +149,14 @@ func TestCasualHiderCannotFire(t *testing.T) {
 	t.Parallel()
 
 	round := casualRoundFixture()
-	state, err := newCasualRoundState(&round)
+	state, err := newAuthoritativeRoundState(&round)
 	if err != nil {
 		t.Fatalf("create Casual round state: %v", err)
 	}
 	state.Advance(round.StartedAt.Add(casualPreparingDuration + 10*time.Second))
 	result, discovery := state.HandleFire(
 		"hider",
-		hunterFireCommand{CommandID: "forged-shot", AimSlot: 2},
+		hunterFireCommand{CommandID: "forged-shot", TargetPlayerID: "hider"},
 		round.StartedAt.Add(casualPreparingDuration+11*time.Second),
 	)
 	if result.Accepted || result.Reason != "not_hunter" || discovery != nil {
@@ -172,7 +164,7 @@ func TestCasualHiderCannotFire(t *testing.T) {
 	}
 }
 
-func TestCasualPublicSnapshotDoesNotExposeHidingSlots(t *testing.T) {
+func TestCasualPublicSnapshotDoesNotExposePrivateAssignments(t *testing.T) {
 	t.Parallel()
 
 	round := casualRoundFixture()
@@ -181,6 +173,7 @@ func TestCasualPublicSnapshotDoesNotExposeHidingSlots(t *testing.T) {
 		t.Fatalf("encode public Casual round: %v", err)
 	}
 	if bytes.Contains(payload, []byte("hiding_slot")) ||
+		bytes.Contains(payload, []byte("target_slot_count")) ||
 		bytes.Contains(payload, []byte(`"hider"`)) ||
 		bytes.Contains(payload, []byte(`"hunter"`)) {
 		t.Fatalf("public Casual snapshot leaked private assignment data: %s", payload)
@@ -189,13 +182,19 @@ func TestCasualPublicSnapshotDoesNotExposeHidingSlots(t *testing.T) {
 
 func casualRoundFixture() roundSnapshot {
 	startedAt := time.Date(2026, time.July, 24, 15, 0, 0, 0, time.UTC)
+	arena := defaultOfficialArenaTestDefinition()
 	return roundSnapshot{
 		ID:                       "01900000-0000-7000-8000-000000000001",
 		SequenceNumber:           1,
 		Mode:                     "casual",
+		MapSlug:                  arena.Slug,
+		MapContentVersion:        arena.ContentVersion,
+		GameServerBuildVersion:   gameServerBuildVersion,
+		ProtocolVersion:          matchProtocolVersion,
+		AuthorityGeometryVersion: arena.Geometry.Version,
+		AuthorityGeometryDigest:  arena.GeometryDigest,
 		Status:                   "preparing",
 		StartedAt:                startedAt,
-		TargetSlotCount:          3,
 		HidersTotal:              1,
 		HidersRemaining:          1,
 		DiscoveredHiderPlayerIDs: make([]string, 0),
@@ -210,10 +209,9 @@ func casualRoundFixture() roundSnapshot {
 				Role:     "hunter",
 			},
 			{
-				RoundID:    "01900000-0000-7000-8000-000000000001",
-				PlayerID:   "hider",
-				Role:       "hider",
-				HidingSlot: 2,
+				RoundID:  "01900000-0000-7000-8000-000000000001",
+				PlayerID: "hider",
+				Role:     "hider",
 			},
 		},
 	}

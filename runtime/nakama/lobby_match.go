@@ -12,18 +12,25 @@ import (
 )
 
 const (
-	lobbyMatchTickRate      = 1
-	lobbyStateOpcode        = 1
-	roundRoleAssignedOpcode = 2
-	roundPhaseChangedOpcode = 3
-	roundDiscoveryOpcode    = 4
-	roundPlayerStateOpcode  = 5
-	hunterFireResultOpcode  = 6
-	hunterFireCommandOpcode = 10
+	lobbyMatchTickRate          = 10
+	lobbyStateOpcode            = 1
+	roundRoleAssignedOpcode     = 2
+	roundPhaseChangedOpcode     = 3
+	roundDiscoveryOpcode        = 4
+	roundPlayerStateOpcode      = 5
+	hunterFireResultOpcode      = 6
+	roundSpectatorOpcode        = 7
+	roundScoreOpcode            = 8
+	roundAnswerCheckOpcode      = 9
+	hunterFireCommandOpcode     = 10
+	answerCheckLikeOpcode       = 11
+	answerCheckLikeResultOpcode = 12
+	roundReconnectOpcode        = 13
 )
 
 type persistentLobbyMatch struct {
 	store lobbyStore
+	now   func() time.Time
 }
 
 type lobbyPresence struct {
@@ -32,14 +39,23 @@ type lobbyPresence struct {
 }
 
 type persistentLobbyState struct {
-	LobbyID          string
-	Snapshot         lobbySnapshot
-	Presences        map[string]lobbyPresence
-	PendingPlayerIDs map[string]string
-	PendingLeaves    map[string]string
-	Nominations      map[string]bool
-	Round            *roundSnapshot
-	CasualRound      *casualRoundState
+	LobbyID               string
+	Snapshot              lobbySnapshot
+	Presences             map[string]lobbyPresence
+	PendingPlayerIDs      map[string]string
+	PendingLeaves         map[string]string
+	ReconnectReservations map[string]roundReconnectReservation
+	Nominations           map[string]bool
+	Round                 *roundSnapshot
+	AuthoritativeRound    *authoritativeRoundState
+	AvatarStates          map[string]roundAvatarStateSnapshot
+	PaintStates           map[string]*roundPlayerPaintState
+	PaintReplayQueues     map[string]*paintReplayQueue
+	CachedScore           *roundScoreSnapshot
+	NextScoreBatchAt      time.Time
+	ScoreBatchSequence    uint64
+	LiveStateDirty        bool
+	LiveStatePersistedAt  time.Time
 }
 
 func (m *persistentLobbyMatch) MatchInit(
@@ -65,15 +81,64 @@ func (m *persistentLobbyMatch) MatchInit(
 		return nil, lobbyMatchTickRate, ""
 	}
 	state := &persistentLobbyState{
-		LobbyID:          lobbyID,
-		Snapshot:         snapshot,
-		Presences:        make(map[string]lobbyPresence),
-		PendingPlayerIDs: make(map[string]string),
-		PendingLeaves:    make(map[string]string),
-		Nominations:      make(map[string]bool),
-		Round:            round,
+		LobbyID:               lobbyID,
+		Snapshot:              snapshot,
+		Presences:             make(map[string]lobbyPresence),
+		PendingPlayerIDs:      make(map[string]string),
+		PendingLeaves:         make(map[string]string),
+		ReconnectReservations: make(map[string]roundReconnectReservation),
+		Nominations:           make(map[string]bool),
+		Round:                 round,
+		AvatarStates:          make(map[string]roundAvatarStateSnapshot),
+		PaintStates:           make(map[string]*roundPlayerPaintState),
+		PaintReplayQueues:     make(map[string]*paintReplayQueue),
 	}
 	applyLiveLobbyState(state, snapshot)
+	if round != nil {
+		checkpointPayload, checkpointAt, err := m.store.LoadLiveRoundCheckpoint(
+			ctx,
+			round.ID,
+		)
+		if err != nil {
+			logger.Error(
+				"persistent lobby match could not load private round checkpoint %s: %v",
+				round.ID,
+				err,
+			)
+			return nil, lobbyMatchTickRate, ""
+		}
+		if len(checkpointPayload) == 0 {
+			logger.Error(
+				"active round %s has no private authoritative checkpoint",
+				round.ID,
+			)
+			return nil, lobbyMatchTickRate, ""
+		}
+		checkpoint, err := decodeLiveRoundCheckpoint(checkpointPayload, round)
+		if err != nil {
+			logger.Error(
+				"active round %s has an invalid private checkpoint: %v",
+				round.ID,
+				err,
+			)
+			return nil, lobbyMatchTickRate, ""
+		}
+		applyLiveRoundCheckpoint(state, round, checkpoint, checkpointAt)
+		state.synthesizeCrashReconnectReservations(checkpointAt)
+		if err := m.persistLiveRoundState(
+			ctx,
+			state,
+			m.nowUTC(),
+			true,
+		); err != nil {
+			logger.Error(
+				"active round %s could not fence crash-recovery state: %v",
+				round.ID,
+				err,
+			)
+			return nil, lobbyMatchTickRate, ""
+		}
+	}
 	return state, lobbyMatchTickRate, lobbyMatchLabel(snapshot)
 }
 
@@ -105,6 +170,10 @@ func (m *persistentLobbyMatch) MatchJoinAttempt(
 	if !member {
 		return state, false, "join the persistent lobby through lobby.join first"
 	}
+	state.expireReconnectReservations(m.nowUTC())
+	if _, leaving := state.PendingLeaves[playerID]; leaving {
+		return state, false, "reconnect window expired"
+	}
 	state.PendingPlayerIDs[presence.GetSessionId()] = playerID
 	return state, true, ""
 }
@@ -123,6 +192,9 @@ func (m *persistentLobbyMatch) MatchJoin(
 	if !ok || state == nil {
 		return nil
 	}
+	now := m.nowUTC()
+	restored := make([]roundReconnectSnapshot, 0, len(presences))
+	scoreRecipients := make([]runtime.Presence, 0, len(presences))
 	for _, presence := range presences {
 		playerID := state.PendingPlayerIDs[presence.GetSessionId()]
 		delete(state.PendingPlayerIDs, presence.GetSessionId())
@@ -131,13 +203,37 @@ func (m *persistentLobbyMatch) MatchJoin(
 			_ = dispatcher.MatchKick([]runtime.Presence{presence})
 			continue
 		}
-		state.Presences[presence.GetSessionId()] = lobbyPresence{
-			PlayerID: playerID,
-			Presence: presence,
+		replaced := replacePlayerPresence(state, playerID, presence)
+		if len(replaced) > 0 {
+			_ = dispatcher.MatchKick(replaced)
+		}
+		scoreRecipients = append(scoreRecipients, presence)
+		if snapshot, reconnected := state.restoreReconnect(playerID, now); reconnected {
+			restored = append(restored, snapshot)
+		}
+	}
+	if len(restored) > 0 {
+		if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
+			logger.Error("persist restored reconnect state: %v", err)
+			return nil
 		}
 	}
 	m.refreshAndBroadcast(ctx, logger, dispatcher, state)
 	m.broadcastRoundState(logger, dispatcher, state)
+	if len(scoreRecipients) > 0 {
+		m.queuePaintStateReplays(state, scoreRecipients)
+	}
+	if state.CachedScore != nil && len(scoreRecipients) > 0 {
+		m.broadcastScoreSnapshotTo(
+			logger,
+			dispatcher,
+			*state.CachedScore,
+			scoreRecipients,
+		)
+	}
+	for _, snapshot := range restored {
+		m.broadcastReconnectState(logger, dispatcher, state, snapshot)
+	}
 	return state
 }
 
@@ -155,19 +251,31 @@ func (m *persistentLobbyMatch) MatchLeave(
 	if !ok || state == nil {
 		return nil
 	}
+	now := m.nowUTC()
 	for _, presence := range presences {
 		sessionID := presence.GetSessionId()
 		tracked, exists := state.Presences[sessionID]
 		delete(state.Presences, sessionID)
 		delete(state.PendingPlayerIDs, sessionID)
+		delete(state.PaintReplayQueues, sessionID)
 		if !exists {
+			continue
+		}
+		if len(presencesForPlayer(state, tracked.PlayerID)) > 0 {
 			continue
 		}
 		reason := "host_left"
 		if presence.GetReason() == runtime.PresenceReasonDisconnect {
 			reason = "host_disconnected"
+			if state.reserveReconnect(tracked.PlayerID, now) {
+				continue
+			}
 		}
 		state.PendingLeaves[tracked.PlayerID] = reason
+	}
+	if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
+		logger.Error("persist round state after disconnect: %v", err)
+		return nil
 	}
 	closed, err := m.flushPendingLeaves(ctx, state)
 	if err != nil {
@@ -187,7 +295,7 @@ func (m *persistentLobbyMatch) MatchLoop(
 	_ *sql.DB,
 	_ runtime.NakamaModule,
 	dispatcher runtime.MatchDispatcher,
-	_ int64,
+	tick int64,
 	rawState interface{},
 	messages []runtime.MatchData,
 ) interface{} {
@@ -198,6 +306,10 @@ func (m *persistentLobbyMatch) MatchLoop(
 	if state.Snapshot.Closed {
 		return nil
 	}
+	now := m.nowUTC()
+	state.expireReconnectReservations(now)
+	state.queueUnreachableRoundParticipants(now)
+	hadPendingLeaves := len(state.PendingLeaves) > 0
 	if len(state.PendingLeaves) > 0 {
 		closed, err := m.flushPendingLeaves(ctx, state)
 		if err != nil {
@@ -207,16 +319,55 @@ func (m *persistentLobbyMatch) MatchLoop(
 		if closed {
 			return nil
 		}
+	}
+
+	if state.noReachableRoundParticipants(now) {
+		if err := m.store.AbortRound(
+			ctx,
+			state.LobbyID,
+			state.Round.ID,
+			reconnectWindowExpiredRoundAbortReason,
+			now,
+		); err != nil {
+			logger.Error("abort round with no reachable participants; retrying: %v", err)
+			return state
+		}
+		state.Round.Status = "aborted"
+		state.Round.EndedAt = now
+		state.Round.PhaseDeadline = nil
+		state.Round.WinningSide = ""
+		state.Round.CompletionReason = reconnectWindowExpiredRoundAbortReason
+		state.AuthoritativeRound = nil
+		clear(state.ReconnectReservations)
+		clear(state.AvatarStates)
+		clear(state.PaintStates)
+		clear(state.PaintReplayQueues)
+		state.resetScoreCache()
+		state.LiveStateDirty = false
+		m.broadcastState(logger, dispatcher, state)
+		m.broadcastRoundState(logger, dispatcher, state)
+		return state
+	}
+
+	if hadPendingLeaves {
+		if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
+			logger.Error("persist expired reconnect state: %v", err)
+			return nil
+		}
 		m.broadcastState(logger, dispatcher, state)
 	}
 
-	if state.Round == nil || state.CasualRound == nil {
+	if state.Round == nil || state.AuthoritativeRound == nil {
 		return state
 	}
-	now := time.Now().UTC()
-	phaseChanges := state.CasualRound.Advance(now)
+	phaseChanges := state.AuthoritativeRound.Advance(now)
 	if len(phaseChanges) > 0 {
-		state.CasualRound.Apply(state.Round)
+		state.AuthoritativeRound.Apply(state.Round)
+		state.markLiveRoundDirty()
+		if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
+			logger.Error("persist authoritative phase transition: %v", err)
+			return nil
+		}
 		for _, phase := range phaseChanges {
 			if phase != "hiding" && phase != "hunting" {
 				continue
@@ -226,51 +377,252 @@ func (m *persistentLobbyMatch) MatchLoop(
 			}
 		}
 		m.broadcastRoundState(logger, dispatcher, state)
-	}
-
-	for _, message := range messages {
-		if message.GetOpCode() != hunterFireCommandOpcode {
-			continue
+		for _, phase := range phaseChanges {
+			if phase == "hunting" || phase == "answer_check" || phase == "completed" {
+				m.queuePaintStateReplays(state, nil)
+				break
+			}
 		}
+	}
+	for _, message := range messages {
 		tracked, exists := state.Presences[message.GetSessionId()]
 		if !exists {
 			logger.Warn("ignoring round command from untracked presence")
 			continue
 		}
-		command, err := decodeHunterFireCommand(message.GetData())
-		if err != nil {
-			result := hunterFireResult{
-				RoundID:         state.Round.ID,
-				Reason:          "invalid_command",
-				RoundIsTerminal: state.CasualRound.Phase == "terminal",
+		switch message.GetOpCode() {
+		case hunterFireCommandOpcode:
+			command, err := decodeHunterFireCommand(message.GetData())
+			if err != nil {
+				result := hunterFireResult{
+					RoundID: state.Round.ID,
+					Reason:  "invalid_command",
+					RoundIsTerminal: state.AuthoritativeRound.Phase == "answer_check" ||
+						state.AuthoritativeRound.Phase == "completed",
+				}
+				if playerState, available := state.AuthoritativeRound.PlayerState(
+					tracked.PlayerID,
+				); available {
+					result.ShellsRemaining = playerState.ShellsRemaining
+					result.ReloadUntil = playerState.ReloadUntil
+				}
+				m.broadcastFireResult(logger, dispatcher, message, result)
+				continue
 			}
-			if playerState, available := state.CasualRound.PlayerState(
+			command = state.authorizeFireTarget(
 				tracked.PlayerID,
-			); available {
-				result.ShellsRemaining = playerState.ShellsRemaining
-				result.ReloadUntil = playerState.ReloadUntil
+				command,
+				now,
+			)
+			result, discovery := state.AuthoritativeRound.HandleFire(
+				tracked.PlayerID,
+				command,
+				now,
+			)
+			state.markLiveRoundDirty()
+			if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
+				logger.Error(
+					"persist authoritative Hunter fire result for %s: %v",
+					tracked.PlayerID,
+					err,
+				)
+				return nil
 			}
 			m.broadcastFireResult(logger, dispatcher, message, result)
-			continue
+			m.broadcastRoundPlayerState(
+				logger,
+				dispatcher,
+				state,
+				tracked.PlayerID,
+			)
+			if discovery == nil {
+				continue
+			}
+			state.AuthoritativeRound.Apply(state.Round)
+			m.broadcastDiscovery(logger, dispatcher, *discovery)
+			m.broadcastRoundPlayerState(
+				logger,
+				dispatcher,
+				state,
+				discovery.HiderPlayerID,
+			)
+			m.broadcastRoundState(logger, dispatcher, state)
+			// In Infection, the discovered hider has just become a hunter and is now
+			// authorized to reconstruct the other hiders' painted appearances.
+			m.queuePaintStateReplays(state, nil)
+		case answerCheckLikeOpcode:
+			command, err := decodeAnswerCheckLikeCommand(message.GetData())
+			if err != nil {
+				m.broadcastLikeResult(
+					logger,
+					dispatcher,
+					message,
+					answerCheckLikeResult{
+						RoundID: state.Round.ID,
+						Reason:  "invalid_command",
+					},
+				)
+				continue
+			}
+			result := state.AuthoritativeRound.HandleLike(
+				tracked.PlayerID,
+				command,
+				now,
+			)
+			if result.Accepted {
+				state.CachedScore = nil
+			}
+			state.markLiveRoundDirty()
+			if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
+				logger.Error(
+					"persist authoritative Answer Check like for %s: %v",
+					tracked.PlayerID,
+					err,
+				)
+				return nil
+			}
+			m.broadcastLikeResult(logger, dispatcher, message, result)
+			if result.Accepted {
+				m.broadcastRoundPresentation(logger, dispatcher, state, now)
+			}
+		case avatarStateCommandOpcode:
+			command, err := decodeAvatarStateCommand(message.GetData())
+			if err != nil {
+				logger.Warn(
+					"ignoring invalid avatar state from player %s",
+					tracked.PlayerID,
+				)
+				m.broadcastAvatarCorrection(
+					logger,
+					dispatcher,
+					state,
+					tracked,
+				)
+				continue
+			}
+			snapshot, err := state.applyAvatarState(
+				tracked.PlayerID,
+				command,
+				now,
+			)
+			if err != nil {
+				logger.Warn(
+					"ignoring unauthorized avatar state from player %s: %v",
+					tracked.PlayerID,
+					err,
+				)
+				m.broadcastAvatarCorrection(
+					logger,
+					dispatcher,
+					state,
+					tracked,
+				)
+				continue
+			}
+			state.markLiveRoundDirty()
+			m.broadcastAvatarState(logger, dispatcher, state, snapshot, false)
+		case paintStrokeCommandOpcode:
+			command, err := decodePaintStrokeCommand(message.GetData())
+			if err != nil {
+				logger.Warn(
+					"ignoring invalid paint stroke from player %s: %v",
+					tracked.PlayerID,
+					err,
+				)
+				if command.ClientSequence > 0 {
+					m.broadcastPaintResult(
+						logger,
+						dispatcher,
+						message,
+						paintStrokeResult{
+							RoundID:        state.Round.ID,
+							ClientSequence: command.ClientSequence,
+							Reason:         err.Error(),
+						},
+					)
+				}
+				continue
+			}
+			snapshot, err := state.applyPaintStroke(
+				tracked.PlayerID,
+				command,
+				now,
+			)
+			if err != nil {
+				logger.Warn(
+					"ignoring unauthorized paint stroke from player %s: %v",
+					tracked.PlayerID,
+					err,
+				)
+				m.broadcastPaintResult(
+					logger,
+					dispatcher,
+					message,
+					paintStrokeResult{
+						RoundID:        state.Round.ID,
+						ClientSequence: command.ClientSequence,
+						Reason:         err.Error(),
+					},
+				)
+				continue
+			}
+			state.markLiveRoundDirty()
+			m.broadcastPaintStroke(logger, dispatcher, state, snapshot, nil)
 		}
-		result, discovery := state.CasualRound.HandleFire(
-			tracked.PlayerID,
-			command,
-			now,
-		)
-		m.broadcastFireResult(logger, dispatcher, message, result)
-		m.broadcastRoundPlayerState(
-			logger,
-			dispatcher,
-			state,
-			tracked.PlayerID,
-		)
-		if discovery == nil {
-			continue
+	}
+	m.broadcastNextPaintReplays(logger, dispatcher, state, tick)
+	if state.scoreBatchDue(now) {
+		scores, err := state.refreshProvisionalScore(now)
+		if err != nil {
+			logger.Error("compute authoritative provisional score batch: %v", err)
+		} else {
+			state.markLiveRoundDirty()
+			if err := m.persistLiveRoundState(ctx, state, now, true); err != nil {
+				logger.Error("persist authoritative provisional score batch: %v", err)
+				return nil
+			}
+			m.broadcastScoreSnapshot(logger, dispatcher, scores)
 		}
-		state.CasualRound.Apply(state.Round)
-		m.broadcastDiscovery(logger, dispatcher, *discovery)
+	}
+	if state.AuthoritativeRound.ReadyToCommit(now) {
+		outcome, err := finalizeAuthoritativeRound(
+			ctx,
+			m.store,
+			state.Round,
+			state.AuthoritativeRound,
+		)
+		if err != nil {
+			logger.Error("commit authoritative terminal round result; retrying: %v", err)
+			return state
+		}
+		logger.Info(
+			"terminal round result %s for round %s",
+			outcome,
+			state.Round.ID,
+		)
+		state.LiveStateDirty = false
+		if err := m.store.DeleteLiveRoundCheckpoint(ctx, state.Round.ID); err != nil {
+			logger.Warn(
+				"delete completed private round checkpoint %s: %v",
+				state.Round.ID,
+				err,
+			)
+		}
 		m.broadcastRoundState(logger, dispatcher, state)
+		state.LiveStateDirty = false
+	}
+	checkpointHeartbeatDue := state.LiveStatePersistedAt.IsZero() ||
+		!now.Before(
+			state.LiveStatePersistedAt.Add(liveRoundCheckpointHeartbeat),
+		)
+	if err := m.persistLiveRoundState(
+		ctx,
+		state,
+		now,
+		checkpointHeartbeatDue,
+	); err != nil {
+		logger.Error("periodically persist live round state: %v", err)
+		return nil
 	}
 	return state
 }
@@ -350,13 +702,46 @@ func (m *persistentLobbyMatch) MatchSignal(
 		}
 		m.broadcastState(logger, dispatcher, state)
 		return state, encodeLobbySignalResponse(lobbyRPCResponse{Lobby: state.Snapshot})
+	case "reconnect":
+		if signal.PlayerID == "" {
+			return state, encodeLobbySignalError(
+				newLobbyProblem(grpcInvalidArgument, "reconnecting player is required"),
+			)
+		}
+		now := m.nowUTC()
+		state.expireReconnectReservations(now)
+		if _, leaving := state.PendingLeaves[signal.PlayerID]; leaving {
+			return state, encodeLobbySignalError(
+				newLobbyProblem(grpcFailedPrecondition, "reconnect window expired"),
+			)
+		}
+		reconnect, available := state.reconnectProbe(signal.PlayerID, now)
+		if !available {
+			return state, encodeLobbySignalError(
+				newLobbyProblem(
+					grpcFailedPrecondition,
+					"no active reconnect reservation",
+				),
+			)
+		}
+		var round *roundPublicSnapshot
+		if state.Round != nil {
+			publicRound := state.Round.Public()
+			round = &publicRound
+		}
+		return state, encodeLobbySignalResponse(lobbyRPCResponse{
+			Lobby:     state.Snapshot,
+			Round:     round,
+			Reconnect: &reconnect,
+		})
 	case "nominate_hunter":
 		if signal.Nomination == nil || signal.Nomination.LobbyID != state.LobbyID {
 			return state, encodeLobbySignalError(
 				newLobbyProblem(grpcInvalidArgument, "invalid hunter nomination signal"),
 			)
 		}
-		if state.Round != nil {
+		if state.Round != nil &&
+			state.Round.Status != "completed" && state.Round.Status != "aborted" {
 			return state, encodeLobbySignalError(
 				newLobbyProblem(
 					grpcFailedPrecondition,
@@ -410,17 +795,30 @@ func (m *persistentLobbyMatch) MatchSignal(
 				newLobbyProblem(grpcInvalidArgument, "invalid lobby start signal"),
 			)
 		}
+		if state.Round != nil &&
+			(state.Round.Status == "completed" || state.Round.Status == "aborted") {
+			previousRoundID := state.Round.ID
+			state.Round = nil
+			state.AuthoritativeRound = nil
+			clear(state.AvatarStates)
+			clear(state.PaintStates)
+			clear(state.PaintReplayQueues)
+			clear(state.ReconnectReservations)
+			state.resetScoreCache()
+			if err := m.store.DeleteLiveRoundCheckpoint(
+				ctx,
+				previousRoundID,
+			); err != nil {
+				logger.Warn(
+					"delete stale terminal-round checkpoint %s: %v",
+					previousRoundID,
+					err,
+				)
+			}
+		}
 		if state.Round != nil {
 			return state, encodeLobbySignalError(
 				newLobbyProblem(grpcFailedPrecondition, "lobby already has an active round"),
-			)
-		}
-		if state.Snapshot.Configuration.Mode != "casual" {
-			return state, encodeLobbySignalError(
-				newLobbyProblem(
-					grpcFailedPrecondition,
-					"only Casual mode is available in the current authoritative runtime",
-				),
 			)
 		}
 		snapshot, round, err := m.store.StartRound(
@@ -431,18 +829,30 @@ func (m *persistentLobbyMatch) MatchSignal(
 		if err != nil {
 			return state, encodeLobbySignalError(err)
 		}
-		casualRound, err := newCasualRoundState(&round)
+		authoritativeRound, err := newAuthoritativeRoundState(&round)
 		if err != nil {
-			logger.Error("initialize authoritative Casual round: %v", err)
+			logger.Error("initialize authoritative %s round: %v", round.Mode, err)
 			return state, encodeLobbySignalError(
-				errors.New("authoritative Casual round initialization failed"),
+				errors.New("authoritative round initialization failed"),
 			)
 		}
 		state.Round = &round
-		state.CasualRound = casualRound
+		state.AuthoritativeRound = authoritativeRound
+		state.AvatarStates = initializeRoundAvatarStates(&round, authoritativeRound)
+		state.PaintStates = initializeRoundPaintStates(authoritativeRound)
+		clear(state.PaintReplayQueues)
+		clear(state.ReconnectReservations)
+		if _, err := state.initializeScoreCache(round.StartedAt); err != nil {
+			logger.Error("initialize authoritative score cache: %v", err)
+		}
+		state.LiveStateDirty = false
+		state.LiveStatePersistedAt = round.StartedAt.UTC()
 		applyLiveLobbyState(state, snapshot)
 		m.broadcastState(logger, dispatcher, state)
 		m.broadcastRoundState(logger, dispatcher, state)
+		if state.CachedScore != nil {
+			m.broadcastScoreSnapshot(logger, dispatcher, *state.CachedScore)
+		}
 		publicRound := round.Public()
 		return state, encodeLobbySignalResponse(lobbyRPCResponse{
 			Lobby:         state.Snapshot,
@@ -474,6 +884,14 @@ func (m *persistentLobbyMatch) flushPendingLeaves(
 	snapshot, closed, err := m.store.Leave(ctx, state.LobbyID, playerIDs, hostReason)
 	if err != nil {
 		return false, err
+	}
+	for _, playerID := range playerIDs {
+		if state.AuthoritativeRound != nil {
+			if _, participant := state.AuthoritativeRound.Assignments[playerID]; participant {
+				continue
+			}
+		}
+		delete(state.AvatarStates, playerID)
 	}
 	clear(state.PendingLeaves)
 	applyLiveLobbyState(state, snapshot)
@@ -556,11 +974,34 @@ func (m *persistentLobbyMatch) broadcastRoundState(
 			logger.Error("broadcast private role assignment: %v", err)
 		}
 	}
-	if state.CasualRound == nil {
+	if state.AuthoritativeRound == nil {
 		return
 	}
-	for _, playerID := range sortedPlayerIDs(state.CasualRound.Assignments) {
+	for _, playerID := range sortedPlayerIDs(state.AuthoritativeRound.Assignments) {
 		m.broadcastRoundPlayerState(logger, dispatcher, state, playerID)
+	}
+	m.broadcastAvatarStates(logger, dispatcher, state)
+	seenPlayers := make(map[string]struct{}, len(state.Presences))
+	for _, tracked := range state.Presences {
+		if _, sent := seenPlayers[tracked.PlayerID]; sent {
+			continue
+		}
+		seenPlayers[tracked.PlayerID] = struct{}{}
+		m.broadcastSpectatorState(
+			logger,
+			dispatcher,
+			state,
+			tracked.PlayerID,
+		)
+	}
+	if state.AuthoritativeRound.Phase == "answer_check" ||
+		state.AuthoritativeRound.Phase == "completed" {
+		m.broadcastRoundPresentation(
+			logger,
+			dispatcher,
+			state,
+			m.nowUTC(),
+		)
 	}
 }
 
@@ -570,10 +1011,10 @@ func (m *persistentLobbyMatch) broadcastRoundPlayerState(
 	state *persistentLobbyState,
 	playerID string,
 ) {
-	if state.CasualRound == nil {
+	if state.AuthoritativeRound == nil {
 		return
 	}
-	playerState, available := state.CasualRound.PlayerState(playerID)
+	playerState, available := state.AuthoritativeRound.PlayerState(playerID)
 	if !available {
 		return
 	}
@@ -640,6 +1081,282 @@ func (m *persistentLobbyMatch) broadcastFireResult(
 	}
 }
 
+func (m *persistentLobbyMatch) broadcastAvatarStates(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+) {
+	playerIDs := make([]string, 0, len(state.AvatarStates))
+	for playerID := range state.AvatarStates {
+		playerIDs = append(playerIDs, playerID)
+	}
+	sort.Strings(playerIDs)
+	for _, playerID := range playerIDs {
+		snapshot := state.AvatarStates[playerID]
+		if playerState, available := state.AuthoritativeRound.PlayerState(playerID); available {
+			snapshot.Role = playerState.Role
+			snapshot.Status = playerState.Status
+			state.AvatarStates[playerID] = snapshot
+		}
+		m.broadcastAvatarState(logger, dispatcher, state, snapshot, true)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastAvatarState(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+	snapshot roundAvatarStateSnapshot,
+	reliable bool,
+) {
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		logger.Error("encode avatar state: %v", err)
+		return
+	}
+	recipients, restricted := avatarStateRecipients(state, snapshot)
+	if restricted && len(recipients) == 0 {
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundAvatarStateOpcode,
+		payload,
+		recipients,
+		nil,
+		reliable,
+	); err != nil {
+		logger.Error("broadcast avatar state: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastAvatarCorrection(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+	tracked lobbyPresence,
+) {
+	if state == nil || tracked.Presence == nil {
+		return
+	}
+	snapshot, available := state.AvatarStates[tracked.PlayerID]
+	if !available {
+		return
+	}
+	snapshot.Correction = true
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		logger.Error("encode private avatar correction: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundAvatarStateOpcode,
+		payload,
+		[]runtime.Presence{tracked.Presence},
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast private avatar correction: %v", err)
+	}
+}
+
+func avatarStateRecipients(
+	state *persistentLobbyState,
+	snapshot roundAvatarStateSnapshot,
+) ([]runtime.Presence, bool) {
+	if state == nil ||
+		state.AuthoritativeRound == nil ||
+		snapshot.Role != "hider" {
+		return nil, false
+	}
+	phase := state.AuthoritativeRound.Phase
+	restricted := phase == "preparing" ||
+		phase == "hiding" ||
+		(phase == "hunting" && state.AuthoritativeRound.Mode == "infection")
+	if !restricted {
+		return nil, false
+	}
+	recipients := make([]runtime.Presence, 0, len(state.Presences))
+	for _, tracked := range state.Presences {
+		if tracked.PlayerID == snapshot.PlayerID {
+			recipients = append(recipients, tracked.Presence)
+			continue
+		}
+		if state.AuthoritativeRound.SpectatorState(tracked.PlayerID).Eligible {
+			recipients = append(recipients, tracked.Presence)
+			continue
+		}
+		playerState, participant := state.AuthoritativeRound.PlayerState(
+			tracked.PlayerID,
+		)
+		if !participant {
+			continue
+		}
+		if (phase == "preparing" || phase == "hiding") &&
+			state.AuthoritativeRound.Mode == "casual" &&
+			playerState.Role == "hider" {
+			recipients = append(recipients, tracked.Presence)
+			continue
+		}
+		if phase == "hunting" &&
+			state.AuthoritativeRound.Mode == "infection" &&
+			playerState.Role == "hunter" {
+			recipients = append(recipients, tracked.Presence)
+		}
+	}
+	return recipients, true
+}
+
+func (m *persistentLobbyMatch) broadcastSpectatorState(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+	playerID string,
+) {
+	if state.AuthoritativeRound == nil {
+		return
+	}
+	presences := presencesForPlayer(state, playerID)
+	if len(presences) == 0 {
+		return
+	}
+	snapshot := state.AuthoritativeRound.SpectatorState(playerID)
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		logger.Error("encode private spectator state: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundSpectatorOpcode,
+		payload,
+		presences,
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast private spectator state: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastRoundPresentation(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+	computedAt time.Time,
+) {
+	if state.Round == nil || state.AuthoritativeRound == nil {
+		return
+	}
+	answerCheckPayload, err := json.Marshal(
+		state.AuthoritativeRound.AnswerCheck(state.AvatarStates),
+	)
+	if err != nil {
+		logger.Error("encode Answer Check state: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundAnswerCheckOpcode,
+		answerCheckPayload,
+		nil,
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast Answer Check state: %v", err)
+	}
+
+	_ = computedAt
+	if err := state.ensureFinalScoreCache(); err != nil {
+		logger.Error("compute authoritative score state: %v", err)
+		return
+	}
+	if state.CachedScore != nil {
+		m.broadcastScoreSnapshot(logger, dispatcher, *state.CachedScore)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastScoreSnapshot(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	scores roundScoreSnapshot,
+) {
+	m.broadcastScoreSnapshotTo(logger, dispatcher, scores, nil)
+}
+
+func (m *persistentLobbyMatch) broadcastScoreSnapshotTo(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	scores roundScoreSnapshot,
+	presences []runtime.Presence,
+) {
+	scorePayload, err := json.Marshal(scores)
+	if err != nil {
+		logger.Error("encode authoritative score state: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundScoreOpcode,
+		scorePayload,
+		presences,
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast authoritative score state: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastLikeResult(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	presence runtime.Presence,
+	result answerCheckLikeResult,
+) {
+	payload, err := json.Marshal(result)
+	if err != nil {
+		logger.Error("encode Answer Check like result: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		answerCheckLikeResultOpcode,
+		payload,
+		[]runtime.Presence{presence},
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast Answer Check like result: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) broadcastReconnectState(
+	logger runtime.Logger,
+	dispatcher runtime.MatchDispatcher,
+	state *persistentLobbyState,
+	snapshot roundReconnectSnapshot,
+) {
+	presences := presencesForPlayer(state, snapshot.PlayerID)
+	if len(presences) == 0 {
+		return
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		logger.Error("encode private reconnect state: %v", err)
+		return
+	}
+	if err := dispatcher.BroadcastMessage(
+		roundReconnectOpcode,
+		payload,
+		presences,
+		nil,
+		true,
+	); err != nil {
+		logger.Error("broadcast private reconnect state: %v", err)
+	}
+}
+
+func (m *persistentLobbyMatch) nowUTC() time.Time {
+	if m.now != nil {
+		return m.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func bridgedPlayerIDForPresence(
 	ctx context.Context,
 	presence runtime.Presence,
@@ -665,6 +1382,7 @@ func kickPlayerPresences(
 		if tracked.PlayerID == playerID {
 			presences = append(presences, tracked.Presence)
 			delete(state.Presences, sessionID)
+			delete(state.PaintReplayQueues, sessionID)
 		}
 	}
 	if len(presences) > 0 {
@@ -683,6 +1401,27 @@ func presencesForPlayer(
 		}
 	}
 	return presences
+}
+
+func replacePlayerPresence(
+	state *persistentLobbyState,
+	playerID string,
+	presence runtime.Presence,
+) []runtime.Presence {
+	replaced := make([]runtime.Presence, 0, 1)
+	for sessionID, tracked := range state.Presences {
+		if tracked.PlayerID != playerID {
+			continue
+		}
+		replaced = append(replaced, tracked.Presence)
+		delete(state.Presences, sessionID)
+		delete(state.PaintReplayQueues, sessionID)
+	}
+	state.Presences[presence.GetSessionId()] = lobbyPresence{
+		PlayerID: playerID,
+		Presence: presence,
+	}
+	return replaced
 }
 
 func applyLiveLobbyState(state *persistentLobbyState, snapshot lobbySnapshot) {
