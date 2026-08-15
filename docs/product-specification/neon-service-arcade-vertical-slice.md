@@ -9,7 +9,7 @@ single connected pursuit space.
 
 - Map slug: `neon-service-arcade`
 - Content version: `m2`
-- Authority geometry: `neon-service-arcade-authority-2`
+- Authority geometry: `neon-service-arcade-authority-5`
 - Supported clients: desktop and WebGL on `hive-chameleon-m4-dev` / `m4-v2`
 - Recommended lobby size: 2–6 players
 

@@ -192,6 +192,12 @@ namespace HiveChameleon.Presentation
                     Destroy(_mapObject);
                 }
                 _map = definition.Instantiate(out _mapObject);
+                // Collide against the server's own geometry rather than the
+                // separately authored collision meshes, which drift from it.
+                AuthorityCollisionSurface.Apply(
+                    _mapObject,
+                    AuthorityCollisionSurface.NeonServiceArcadeResource
+                );
                 _arenaSlug = definition.Slug;
                 _arenaActive = false;
             }

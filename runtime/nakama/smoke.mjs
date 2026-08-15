@@ -312,9 +312,9 @@ try {
     started.round.map_content_version !== 'm2' ||
     started.round.game_server_build_version !== 'hive-chameleon-m4-dev' ||
     started.round.protocol_version !== 'm4-v2' ||
-    started.round.authority_geometry_version !== 'neon-service-arcade-authority-2' ||
+    started.round.authority_geometry_version !== 'neon-service-arcade-authority-5' ||
     started.round.authority_geometry_digest !==
-      'sha256:630e96108db3af745cadc89f5bce8b16cef0024172dba2733d510c3576ede412'
+      'sha256:5f7cb5f35e15ba004da1fb37229c75c07d8cc3f81eabe2eed4f8ab42051ad1aa'
   ) {
     throw new Error('lobby.start did not create a preparing round');
   }

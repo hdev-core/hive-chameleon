@@ -209,21 +209,25 @@ namespace HiveChameleon.Tests
                         "Visual FBX geometry must never create duplicate physics surfaces."
                     );
 
-                    MeshCollider[] collisionMeshes =
-                        collision.GetComponentsInChildren<MeshCollider>(true);
+                    // Collision is baked from the server's authority manifest as boxes,
+                    // so this asserts the arena is solid rather than pinning the
+                    // collider type the surface happens to be built from.
+                    Collider[] collisionVolumes =
+                        collision.GetComponentsInChildren<Collider>(true);
                     Assert.That(
-                        collisionMeshes.Length,
+                        collisionVolumes.Length,
                         Is.GreaterThan(10),
-                        $"{expectation.DisplayName} must contain authored traversal collision."
+                        $"{expectation.DisplayName} must contain traversal collision."
                     );
                     Assert.That(
-                        collisionMeshes.All(
+                        collisionVolumes.All(
                             collider =>
                                 collider.enabled
-                                && !collider.convex
-                                && collider.sharedMesh != null
+                                && !(collider is MeshCollider mesh
+                                    && (mesh.convex || mesh.sharedMesh == null))
                         ),
-                        Is.True
+                        Is.True,
+                        "every collision volume must be enabled and usable"
                     );
                     Assert.That(
                         collision

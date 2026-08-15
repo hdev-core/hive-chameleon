@@ -10,8 +10,8 @@ import (
 const (
 	neonServiceArcadeMapSlug                  = "neon-service-arcade"
 	neonServiceArcadeContentVersion           = "m2"
-	neonServiceArcadeAuthorityGeometryVersion = "neon-service-arcade-authority-2"
-	neonServiceArcadeAuthorityGeometryDigest  = "sha256:630e96108db3af745cadc89f5bce8b16cef0024172dba2733d510c3576ede412"
+	neonServiceArcadeAuthorityGeometryVersion = "neon-service-arcade-authority-5"
+	neonServiceArcadeAuthorityGeometryDigest  = "sha256:5f7cb5f35e15ba004da1fb37229c75c07d8cc3f81eabe2eed4f8ab42051ad1aa"
 )
 
 //go:embed maps/neon-service-arcade-authority.json
@@ -43,17 +43,20 @@ func buildOfficialArenaDefinitions() map[string]*officialArenaDefinition {
 			"An indoor arcade, prize cafe, and repair workshop built for close pursuit.",
 			2,
 			6,
+			// Spawns are placed on floor that is clear of the republished
+			// authority geometry, with the first hunter and hider forming the
+			// deterministic smoke pair that must hold line of sight.
 			[][3]float64{
-				{-8.2, 0.05, 6.5},
-				{-8.7, 0.05, 4.1},
+				{-9.00, 0.05, -5.25},
+				{-9.00, 0.05, -3.75},
 			},
 			[][3]float64{
-				{-8.0, 0.05, -4.2},
-				{-0.2, 0.05, -5.8},
-				{4.8, 0.05, -3.2},
-				{8.5, 0.05, -1.2},
-				{7.6, 0.05, 6.2},
-				{4.8, 0.05, 6.7},
+				{-9.00, 0.05, -1.00},
+				{8.00, 0.05, 7.00},
+				{4.50, 0.05, -6.00},
+				{-1.75, 0.05, 5.75},
+				{-1.50, 0.05, -1.75},
+				{8.00, 0.05, 0.00},
 			},
 		),
 	}

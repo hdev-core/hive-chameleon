@@ -355,11 +355,14 @@ func TestFireTargetRequiresPitchAwareTargetIntersectionAndStaticLOS(t *testing.T
 		Sequence:   1,
 		OccurredAt: now,
 	}
+	// Elevated, but still inside the arena. The arena has a ceiling at 3.6 m, so
+	// a target above that is unreachable and unshootable by construction; this
+	// case is about pitch, not about firing through the roof.
 	elevatedTarget := roundAvatarStateSnapshot{
 		RoundID:    round.ID,
 		PlayerID:   "hider",
 		PositionX:  -6,
-		PositionY:  5,
+		PositionY:  2,
 		PositionZ:  4,
 		Pose:       "standing",
 		Sequence:   1,

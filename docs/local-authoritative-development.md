@@ -24,7 +24,7 @@ npm ci
 
 Neon Service Arcade is bundled in the Unity project and is the only selectable arena. A clean
 clone needs no Asset Store map download. The client and Nakama both pin content version `m2`,
-authority geometry version `neon-service-arcade-authority-2`, and the matching geometry digest;
+authority geometry version `neon-service-arcade-authority-5`, and the matching geometry digest;
 they fail closed if those identities disagree.
 
 ## Start the stack
